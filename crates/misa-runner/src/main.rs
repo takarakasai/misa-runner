@@ -21,6 +21,7 @@ mod diag;
 mod dump;
 mod jointvec;
 mod pose;
+mod record;
 mod robot;
 mod runner;
 mod snapshot;
@@ -67,6 +68,7 @@ fn dispatch(cli: &Cli) -> Result<(), String> {
         // 設定を読まずに済むものを先に。
         "ports" => return diag::ports(),
         "config" => return write_config(cli),
+        "replay" => return replay(cli),
         _ => {}
     }
 
@@ -85,6 +87,7 @@ fn dispatch(cli: &Cli) -> Result<(), String> {
                 skip_zero: cli.flag("skip-zero"),
                 status_interval_s: cli.f64("status").unwrap_or(1.0),
                 viz: viz_config(cli),
+                record: cli.str("record").map(|s| s.to_string()),
             };
             runner::run(cfg, robot, opts)
         }
@@ -161,6 +164,76 @@ fn write_config(cli: &Cli) -> Result<(), String> {
     Ok(())
 }
 
+/// 記録を読む。引数 1 つで要約、2 つで指令の差分。
+///
+/// **差分に許容差は無い。** 見たいのは「値が近いか」ではなく「同じ計算を
+/// したか」なので、1 bit でも違えば食い違いとして出す。
+fn replay(cli: &Cli) -> Result<(), String> {
+    let paths: Vec<&str> = cli.positionals().iter().skip(1).map(|s| s.as_str()).collect();
+    match paths.as_slice() {
+        [one] => {
+            let (h, frames) = record::read(one)?;
+            let span = frames
+                .last()
+                .map(|f| f.time.as_secs_f64() - frames[0].time.as_secs_f64())
+                .unwrap_or(0.0);
+            println!("ロボット      {}", h.robot);
+            println!("軸            {} 本", h.axes.len());
+            println!("制御周期      {:.0} Hz", h.rate_hz);
+            println!("周期数        {}", frames.len());
+            println!("記録時間      {span:.2} s");
+
+            let touched = frames.iter().filter(|f| !f.verdict.is_clean()).count();
+            println!("丸めた周期    {touched}");
+            let clamped = frames.iter().filter(|f| !f.verdict.clamped.is_empty()).count();
+            let limited = frames
+                .iter()
+                .filter(|f| !f.verdict.rate_limited.is_empty())
+                .count();
+            let held = frames
+                .iter()
+                .filter(|f| f.verdict.held_for_stale_observation)
+                .count();
+            let faulted = frames.iter().filter(|f| !f.verdict.faulted.is_empty()).count();
+            println!("  可動域      {clamped}");
+            println!("  スルーレート {limited}");
+            println!("  観測が古い  {held}");
+            println!("  異常ビット  {faulted}");
+            Ok(())
+        }
+        [a, b] => {
+            let (ha, fa) = record::read(a)?;
+            let (hb, fb) = record::read(b)?;
+            if ha.axes != hb.axes {
+                return Err("軸の並びが違う記録どうしは比べられません".into());
+            }
+            let limit = cli.usize("limit").unwrap_or(20);
+            let d = misa_core::diff_commands(&fa, &fb, limit);
+            if d.is_empty() {
+                println!(
+                    "食い違いなし（{} 周期を比較。指令は 1 bit も変わっていません）",
+                    fa.len().min(fb.len())
+                );
+                return Ok(());
+            }
+            println!("食い違い {} 件（先頭 {limit} 件まで）", d.len());
+            for x in &d {
+                let name = ha
+                    .axes
+                    .get(x.axis.index())
+                    .map(|s| s.as_str())
+                    .unwrap_or("?");
+                println!(
+                    "  seq {:>7}  {name:<16} {:<16} {} -> {}",
+                    x.seq, x.field, x.left, x.right
+                );
+            }
+            Err("指令が食い違っています".into())
+        }
+        _ => Err("使い方: misa-run replay LOG [LOG2] [--limit N]".into()),
+    }
+}
+
 fn print_help() {
     println!(
         r#"misa-run — 四脚ロボットの実機制御アプリ
@@ -182,7 +255,10 @@ fn print_help() {
 
   imu / sbus / legs は --secs 0（以下）または --forever で Ctrl-C まで回り続ける。
   calib  <sub>              符号・ゼロ点・可動域を実機で確定して設定に書き戻す
-  run                       制御ループ（プロポ操縦）
+  run    [--record PATH]    制御ループ（プロポ操縦）
+                            --record で毎周期を記録する（別スレッドで書く）
+  replay LOG [LOG2]         記録の要約。2 つ渡すと指令を差分する
+                            [--limit N] 差分の表示件数（既定 20）
 
 共通オプション:
   --robot PATH              ロボットのプロファイル TOML
@@ -303,6 +379,8 @@ pub struct Cli {
 /// 走り続ける、といった事故になるので、知らないフラグは起動時に弾く。
 const VALUE_FLAGS: &[&str] = &[
     "robot",
+    "record",
+    "limit",
     "config",
     "secs",
     "gait",
@@ -414,6 +492,10 @@ impl Cli {
 
     pub fn wants_help(&self) -> bool {
         self.flags.contains_key("help") || self.positionals.iter().any(|p| p == "help")
+    }
+
+    pub fn positionals(&self) -> &[String] {
+        &self.positionals
     }
 
     pub fn str(&self, key: &str) -> Option<&str> {

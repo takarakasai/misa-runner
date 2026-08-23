@@ -52,6 +52,9 @@ libc = "0.2"
 # GUI に描かせる。任意機能で、`--no-default-features` で Zenoh ごと外れる。
 zenoh = "1.9"
 serde_json = "1"
+# 記録の書式。no_std・依存が cobs だけ・エンコードが小さい。JSON にしなかった
+# のは、200 Hz × 13 軸だと 1 分で数十 MB になり、SBC で常用できないため。
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 
 [profile.release]
 # 制御ループのジッタを抑えるため。debug=true はシンボルだけで速度には影響しない。

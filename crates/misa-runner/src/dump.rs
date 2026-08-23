@@ -95,6 +95,28 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     println!("t[s]   状態         {}", header());
 
     let mut publisher = open_viz(&viz_cfg)?;
+
+    // **実機なしで記録が採れる。** ここが CI に載る回帰試験の土台で、
+    // 制御ループを触る改修は「dump を録って差分する」で検証できる。
+    // ゲートは `run` と同じく影で回すだけ（出力は捨てる）。
+    let axis_table = crate::snapshot::axis_table();
+    let mut shadow_gate =
+        misa_core::SafetyGate::new(crate::snapshot::safety_config(&cfg.hardware, dt, 5.0));
+    let recorder = match cli.str("record") {
+        Some(path) => {
+            let header = misa_core::record::Header {
+                format_version: misa_core::record::FORMAT_VERSION,
+                robot: cfg.name.clone(),
+                axes: axis_table.axes().iter().map(|a| a.name.clone()).collect(),
+                rate_hz: 1.0 / dt,
+            };
+            let rec = crate::record::Recorder::create(path, &header)?;
+            println!("毎周期を {path} に記録します");
+            Some(rec)
+        }
+        None => None,
+    };
+
     let mut violations: Vec<String> = Vec::new();
     let steps = (seconds / dt).ceil() as usize;
     let period = Duration::from_secs_f64(dt);
@@ -113,6 +135,34 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         if i % every == 0 {
             println!("{t:5.2}  {:<12} {}", out.state.label(), row(&out.targets));
         }
+        if let Some(rec) = recorder.as_ref() {
+            let time = misa_core::Time::from_secs_f64(t);
+            // 実機を持たないので観測は「指令がそのまま実現した」ことにする。
+            // 動力学は入っていない。ここが埋まるのは MuJoCo の Plant が
+            // 入ってから。
+            let mut obs = misa_core::Observation::empty(axis_table.len(), 4);
+            obs.time = time;
+            for (i, a) in obs_axes(&measured).into_iter().enumerate() {
+                let slot = obs.get_mut(misa_core::AxisId::new(i as u16)).unwrap();
+                slot.position_rad = a;
+                slot.health.valid = true;
+            }
+            let mut shadow = crate::snapshot::command(
+                &out.targets,
+                cfg.hardware.legs.default_max_speed_rad_s,
+                out.leg_mode == misa_hal::joint::JointMode::Idle,
+            );
+            let verdict = shadow_gate.apply(&mut shadow, &obs, period);
+            rec.push(misa_core::record::Frame {
+                seq: i as u64,
+                time,
+                intent: crate::snapshot::intent(time, &cmd),
+                observation: obs,
+                command: shadow,
+                verdict,
+            });
+        }
+
         if let Some(p) = publisher.as_mut() {
             // 実機を持たない机上再生なので planned だけ。受け側はゴーストを
             // 描かず、この 1 本でモデルを駆動する。
@@ -179,6 +229,16 @@ fn header() -> String {
         s.push_str(&format!("{:<21}", &names[0][..2]));
     }
     s
+}
+
+/// 関節ベクトルを軸表の並びへ。脚 12 + 腕 1。
+fn obs_axes(q: &JointVec) -> Vec<f64> {
+    let mut v = Vec::with_capacity(13);
+    for leg in q.legs.iter() {
+        v.extend_from_slice(leg);
+    }
+    v.push(q.arm);
+    v
 }
 
 fn row(q: &JointVec) -> String {

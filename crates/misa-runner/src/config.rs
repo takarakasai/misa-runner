@@ -478,6 +478,19 @@ FL_hip_joint = 0.0
         assert_eq!(cfg.name, "namiashi");
     }
 
+    /// **同梱プロファイルのモデルパスが、組み込みの既定と揃っていること。**
+    ///
+    /// submodule を models/namiashi/ へ移したとき、既定値だけ直して
+    /// プロファイル本体を直し忘れ、`dump` が「読み込みに失敗」で落ちた。
+    /// 2 か所にある以上、揃っていることを試験で押さえる。
+    #[test]
+    fn the_shipped_profile_points_at_the_same_model_as_the_default() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../robots/namiashi.toml");
+        let text = std::fs::read_to_string(path).unwrap();
+        let cfg = AppConfig::from_toml(&text).unwrap();
+        assert_eq!(cfg.control.model, default_model_path());
+    }
+
     #[test]
     fn the_shipped_config_still_loads() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../robots/namiashi.toml");

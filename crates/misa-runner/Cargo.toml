@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 misa-core.workspace = true
+postcard.workspace = true
 misa-hal.workspace = true
 libc.workspace = true
 misarta.workspace = true

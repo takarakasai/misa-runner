@@ -98,6 +98,7 @@ misa-run sbus --secs 10        # プロポ入力と解釈結果の確認
 misa-run legs --secs 10        # 脚バスの状態と実効周期（**指令は送らない**）
 misa-run calib scan            # 応答するモータ id を数える（指令は送らない）
 misa-run run  --robot robots/namiashi.toml
+misa-run run  --robot robots/namiashi.toml --record run.rec   # 毎周期を記録
 ```
 
 設定は 1 枚の TOML（`robots/namiashi.toml`）。雛形は
@@ -153,6 +154,32 @@ misa-run calib zero --pose constrain --write robots/namiashi.toml
 `--write` の書き戻しは `AppConfig` から TOML を作り直すので、**手書きの
 コメントは消える**。`misa-run config --out` で生成したファイルを校正で
 上書きしていく運用を前提にしている。
+
+## 記録と再生
+
+`--record PATH` を付けると、毎周期の **意図・観測・指令・安全判定** を 1 本の
+ファイルへ落とす。書き込みは別スレッドで、詰まったら捨てて数えるので、
+**制御周期は待たされない**（取りこぼした数は終了時に出る）。
+
+```sh
+misa-run run  --robot robots/namiashi.toml --record before.rec
+misa-run replay before.rec                 # 要約（周期数・丸めが入った周期）
+misa-run replay before.rec after.rec       # 指令を差分する
+```
+
+**差分に許容差は無い。** 見たいのは「値が近いか」ではなく「同じ計算をしたか」
+なので、1 bit でも違えば食い違いとして軸名・フィールド・値を出し、終了コード 1
+を返す。制御ループを触る改修は、これで挙動を変えていないことを確かめられる。
+
+**実機なしでも録れる。** `dump` にも `--record` があるので、歩容と状態機械の
+回帰試験は実機を触らずに回る:
+
+```sh
+misa-run dump --robot robots/namiashi.toml --gait trot --vx 0.1 --secs 10 --record a.rec
+```
+
+記録は 200 Hz × 13 軸で約 190 KB/s（3 秒で 557 KB）。診断のために録るもので、
+常時走らせる想定ではない。
 
 ## 安全側の作り
 

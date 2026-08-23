@@ -70,6 +70,13 @@ impl Hardware {
     }
 }
 
+/// 観測が何周期ぶん古くなったら「見えていない」と判断するか。
+///
+/// 制御周期の 5 倍。1〜2 周期の取りこぼしは RS485 では普通に起きるので、
+/// そこで止めると使い物にならない。一方で 5 周期（200 Hz なら 25 ms）
+/// 読めていないのは、バスが詰まっているか無応答のモータがいる。
+const STALE_TICKS: f64 = 5.0;
+
 /// 「まだ起動条件が整っていない」失敗に付ける前置き。
 ///
 /// systemd に**再試行してよい失敗**を伝えるためのもの。`main` がこれを見て
@@ -334,6 +341,11 @@ pub struct RunOptions {
     pub status_interval_s: f64,
     /// ライブ可視化（articara へ Zenoh 配信）。
     pub viz: VizConfig,
+    /// 毎周期を記録する先。`None` なら記録しない。
+    ///
+    /// 書き込みは別スレッドで、詰まったら**捨てて数える**。制御周期は
+    /// 待たせない（[`crate::record`]）。
+    pub record: Option<String>,
 }
 
 impl Default for RunOptions {
@@ -343,6 +355,7 @@ impl Default for RunOptions {
             skip_zero: false,
             status_interval_s: 1.0,
             viz: VizConfig::default(),
+            record: None,
         }
     }
 }
@@ -454,7 +467,38 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
     let mut measured_seen = false;
     let mut fault_hint_shown = false;
     let mut watch = Watch::new(&cfg);
+    // 記録と、その脇で回す SafetyGate。
+    //
+    // **ゲートは影で回すだけで、出力は捨てる。** 実機に流れる指令はこれまでと
+    // 同じで、記録に載る SafetyVerdict だけがゲートの判断。配線する前に、
+    // 生きたデータでゲートが何を丸めるつもりだったかを見ておくためにある。
+    let axis_table = crate::snapshot::axis_table();
+    let mut shadow_gate = misa_core::SafetyGate::new(crate::snapshot::safety_config(
+        &cfg.hardware,
+        period.as_secs_f64(),
+        STALE_TICKS,
+    ));
+    let recorder = match opts.record.as_deref() {
+        Some(path) => {
+            let header = misa_core::record::Header {
+                format_version: misa_core::record::FORMAT_VERSION,
+                robot: cfg.name.clone(),
+                axes: axis_table
+                    .axes()
+                    .iter()
+                    .map(|a| a.name.clone())
+                    .collect(),
+                rate_hz: cfg.control.rate_hz,
+            };
+            let rec = crate::record::Recorder::create(path, &header)?;
+            log::info!("毎周期を {path} に記録します");
+            Some(rec)
+        }
+        None => None,
+    };
+
     let mut next = Instant::now();
+    let mut last_tick = Instant::now();
     let mut last_status = Instant::now();
     let mut worst_overrun = Duration::ZERO;
     let mut ticks: u64 = 0;
@@ -517,6 +561,37 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
             }
         }
 
+        if let Some(rec) = recorder.as_ref() {
+            let dt = last_tick.elapsed();
+            let mut statuses = [[misa_hal::legs::JointStatus::default(); 3]; 4];
+            for (i, bus) in hw.legs.buses().iter().enumerate() {
+                statuses[i] = bus.status();
+            }
+            let obs = crate::snapshot::observation(
+                misa_core::Time::from_secs_f64(started.elapsed().as_secs_f64()),
+                &hw.legs.states(),
+                &statuses,
+                hw.arm.position(),
+                &imu,
+                imu.stamp.elapsed(),
+            );
+            let mut shadow = crate::snapshot::command(
+                &out.targets,
+                cfg.hardware.legs.default_max_speed_rad_s,
+                out.leg_mode == JointMode::Idle,
+            );
+            let verdict = shadow_gate.apply(&mut shadow, &obs, dt);
+            rec.push(misa_core::record::Frame {
+                seq: ticks,
+                time: obs.time,
+                intent: crate::snapshot::intent(obs.time, &cmd),
+                observation: obs,
+                command: shadow,
+                verdict,
+            });
+        }
+        last_tick = Instant::now();
+
         if let Some(p) = publisher.as_mut() {
             // 最初の読み戻しが済むまで measured を送らない。ゼロ姿勢のフレームは
             // 受け側で「崩れ落ちたロボット」として描かれる。
@@ -572,6 +647,16 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         } else {
             worst_overrun = worst_overrun.max(now - next);
             next = now;
+        }
+    }
+
+    if let Some(rec) = recorder {
+        let dropped = rec.dropped();
+        match rec.finish() {
+            Ok(n) if dropped == 0 => log::info!("{n} 周期を記録しました"),
+            // **取りこぼしのある記録を、完全な記録と取り違えないこと。**
+            Ok(n) => log::warn!("{n} 周期を記録しました（{dropped} 周期は取りこぼし）"),
+            Err(e) => log::error!("記録を閉じられません: {e}"),
         }
     }
 
