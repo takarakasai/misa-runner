@@ -59,5 +59,7 @@ namespace = "/keel"
 command_topic = "/low_command_msg"
 state_topic = "/low_state"
 state_timeout_ms = 50
+# cmd_vel は 10〜20 Hz の publisher もあるので、状態より緩く取る。
+cmd_vel_timeout_ms = 300
 default_max_speed_rad_s = 8.0
 max_target_rate_rad_s = 3.0

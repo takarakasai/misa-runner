@@ -11,15 +11,13 @@ use std::time::{Duration, Instant};
 use misa_hal::arm::ArmServo;
 use misa_hal::ch348::PortMap;
 use misa_hal::imu::ImuReader;
-use misa_hal::joint::{JointCommand, JointMode, LegSlot, LEG_JOINT_KINDS};
+use misa_hal::joint::{JointMode, LegSlot, LEG_JOINT_KINDS};
 use misa_hal::legs::{BusRequest, LegArray};
 
 use crate::config::AppConfig;
 use crate::controller::{Controller, State};
 use crate::jointvec::JointVec;
 use crate::robot::Robot;
-use misa_core::Pilot as _;
-use misa_core::Plant as _;
 
 use crate::viz::{self, VizConfig};
 
@@ -360,12 +358,17 @@ impl Default for RunOptions {
 }
 
 /// 制御ループ本体。Ctrl-C か致命的エラーで戻る。
-pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String> {
-    // **探索は 1 回だけ。** 脚バス・IMU・受信機で同じ地図を使う。
-    let map = PortMap::discover().map_err(|e| e.to_string())?;
-    let mut plant = crate::plant::SerialPlant::connect_with(&cfg, &map)?;
-    let mut pilot = crate::pilot::SbusPilot::connect_with(&cfg, &map, opts.allow_no_sbus)?;
-
+/// 実機だけの立ち上げ手順。
+///
+/// 受信機を待ち、CH5 が脱力位置か確かめ、マルチターンの原点を張り、
+/// 伏せ姿勢と照合する。**どれもバスを直接握る構成にしか無い**ので、
+/// ブリッジ越しの機体はここを通らない。
+fn start_serial(
+    cfg: &AppConfig,
+    opts: &RunOptions,
+    plant: crate::plant::SerialPlant,
+    pilot: &crate::pilot::SbusPilot,
+) -> Result<crate::plant::SerialPlant, String> {
     // 受信機を待つ。プロポが無い状態で起立させないための入口チェック。
     match pilot.wait_ready(Duration::from_secs(3)) {
         Ok(()) => log::info!("S.BUS 受信を確認しました"),
@@ -442,21 +445,53 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
 
     // **原点の張り直しは CH5 の確認より後。** 張り直しはそのときの姿勢を
     // 無条件に原点にするので、起動を続ける気が無い回でやってはいけない。
-    zero_multiturn_once(&cfg, plant.hw())?;
-    verify_crouch_frame(&cfg, plant.hw());
+    zero_multiturn_once(cfg, plant.hw())?;
+    verify_crouch_frame(cfg, plant.hw());
+
+    Ok(plant)
+}
+
+pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String> {
+    // **繋ぎ方はプロファイルの `kind` が決める。** ここから下は Plant と
+    // Pilot のトレイト越しにしか触らないので、実機でもブリッジ越しでも
+    // 同じループが回る。
+    let (mut plant, mut pilot): (Box<dyn misa_core::Plant>, Box<dyn misa_core::Pilot>) =
+        match &cfg.hardware {
+            misa_hal::config::HardwareConfig::Serial(_) => {
+                // **探索は 1 回だけ。** 脚バス・IMU・受信機で同じ地図を使う。
+                let map = PortMap::discover().map_err(|e| e.to_string())?;
+                let plant = crate::plant::SerialPlant::connect_with(&cfg, &map)?;
+                let pilot =
+                    crate::pilot::SbusPilot::connect_with(&cfg, &map, opts.allow_no_sbus)?;
+                // 実機だけの立ち上げ手順（受信機を待つ、CH5 の位置、
+                // マルチターンの原点、伏せ姿勢との照合）。
+                let plant = start_serial(&cfg, &opts, plant, &pilot)?;
+                (Box::new(plant), Box::new(pilot))
+            }
+            #[cfg(feature = "ros2")]
+            misa_hal::config::HardwareConfig::Ros2(_) => {
+                let layout = crate::snapshot::axis_layout(&cfg)?;
+                let plant = crate::plant_ros2::Ros2Plant::connect(&cfg, layout.table)?;
+                let pilot = crate::pilot_ros2::Ros2Pilot::connect(&cfg)?;
+                (Box::new(plant), Box::new(pilot))
+            }
+            #[cfg(not(feature = "ros2"))]
+            misa_hal::config::HardwareConfig::Ros2(_) => {
+                return Err("このビルドには ros2 が入っていません（--features ros2 で有効化）".into())
+            }
+        };
 
     let stop = install_signal_handler();
     let period = Duration::from_secs_f64(1.0 / cfg.control.rate_hz);
-    let arm_app_driven = plant.hw().arm.is_app_driven();
+    // **「こちらの指令で動くか」は Plant が名乗る。** 受信機直結の腕は
+    // 動いてはいるがアプリの指令では動かないので、駆動しないなら目標角には
+    // 観測値を置く（指令値を置くと実機と食い違った角度でログが埋まる）。
+    let layout = crate::snapshot::axis_layout(&cfg)?;
+    let arm_app_driven = layout
+        .head
+        .is_some_and(|id| plant.capabilities().driven.get(id.index()) == Some(&true));
     if !arm_app_driven {
-        log::info!(
-            "腕はアプリから駆動しません（{}）。目標角にはプロポからの観測値を置きます",
-            if plant.hw().arm.is_connected() {
-                "受信機直結"
-            } else {
-                "未配線"
-            }
-        );
+        log::info!("補助軸はアプリから駆動しません。目標角には観測値を置きます");
     }
     // Controller へ move する前に控えておく。
     let model_limits = robot.limits.clone();
@@ -502,9 +537,13 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
     let mut ticks: u64 = 0;
 
     log::info!(
-        "制御ループ開始: {:.0} Hz（脚バス {:.0} Hz）。Ctrl-C で脱力して終了します",
+        "制御ループ開始: {:.0} Hz（{}）。Ctrl-C で脱力して終了します",
         cfg.control.rate_hz,
-        cfg.hardware.max_control_rate_hz().unwrap_or(f64::NAN)
+        match cfg.hardware.max_control_rate_hz() {
+            Some(hz) => format!("脚バス {hz:.0} Hz"),
+            // ブリッジ越しでは向こうの周期に従うので、こちらから言えることが無い。
+            None => "周期は相手側が決める".to_string(),
+        }
     );
 
     // 最初の観測を 1 回取っておく。指令は全軸脱力。
@@ -527,7 +566,9 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         let cmd = pilot.poll(obs.time);
         // 受信機直結の腕は、プロポのチャンネルから読んだ角度が唯一の手がかり。
         if let Some(observed) = cmd.aux(0) {
-            plant.hw_mut().arm.observe(observed);
+            if let Some(id) = layout.head {
+                plant.observe_aux(id, observed);
+            }
         }
         let measured = jointvec_from(&obs);
         let attitude = obs.imu.map(|i| i.rpy_rad).unwrap_or([0.0; 3]);
@@ -586,8 +627,9 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
             // 最初の読み戻しが済むまで measured を送らない。ゼロ姿勢のフレームは
             // 受け側で「崩れ落ちたロボット」として描かれる。
             // 一度立ったら見に行かない（`all_ok` は 12 軸ぶんロックを取る）。
+            // 最初の読み戻しが済んだかは観測そのものが知っている。
             if !measured_seen {
-                measured_seen = plant.hw().legs.all_ok();
+                measured_seen = !obs.any_unread();
             }
             let body = controller.body_view();
             let t = started.elapsed().as_secs_f64();
@@ -618,8 +660,9 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
             && last_status.elapsed().as_secs_f64() >= opts.status_interval_s
         {
             log_status(
-                plant.hw(),
-                &pilot,
+                plant.as_ref(),
+                pilot.as_ref(),
+                &obs,
                 &controller,
                 &cmd,
                 ticks,
@@ -652,13 +695,8 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
     }
 
     log::info!("停止要求を受けました。脱力します");
-    let idle = [JointCommand::default(); 3];
-    for bus in plant.hw().legs.buses() {
-        bus.set_commands(idle);
-    }
-    let _ = plant.hw().legs.request_all(BusRequest::Disable);
-    let _ = plant.hw_mut().arm.relax();
-    // バススレッドが Disable を実際に送るまで待ってから drop する。
+    let _ = plant.disarm();
+    // 実機なら、バススレッドが Disable を実際に送るまで待ってから drop する。
     std::thread::sleep(Duration::from_millis(100));
     Ok(())
 }
@@ -695,8 +733,9 @@ fn jointvec_from(obs: &misa_core::Observation) -> JointVec {
 }
 
 fn log_status(
-    hw: &Hardware,
-    pilot: &crate::pilot::SbusPilot,
+    plant: &dyn misa_core::Plant,
+    pilot: &dyn misa_core::Pilot,
+    obs: &misa_core::Observation,
     controller: &Controller,
     cmd: &misa_core::Intent,
     ticks: u64,
@@ -704,43 +743,15 @@ fn log_status(
     fault_hint_shown: &mut bool,
     watch: &mut Watch,
 ) {
-    let rates: Vec<String> = hw
-        .legs
-        .buses()
-        .iter()
-        .map(|b| format!("{}:{:.0}Hz", b.leg().prefix(), b.stats().rate_hz))
-        .collect();
-    let errors: u64 = hw.legs.buses().iter().map(|b| b.stats().errors).sum();
-    // 温度は「いちばん熱い軸」だけ出す。12 軸ぜんぶ並べても読まれない。
-    let hottest = hw
-        .legs
-        .buses()
-        .iter()
-        .flat_map(|b| b.status())
-        .filter(|s| s.valid)
-        .map(|s| s.temperature_c)
-        .fold(f64::NEG_INFINITY, f64::max);
-    let faults = hw.legs.faults();
-    let imu = hw.imu.stats();
-    let sbus = pilot.state();
     log::info!(
-        "[{}] {} v=({:+.3},{:+.3},{:+.3}) 脚[{}] err={} 最高温{} IMU {:.0}Hz \
-         S.BUS {}f/{}desync tick={} 遅延最大={:.1}ms 追従最大={}",
+        "[{}] {} v=({:+.3},{:+.3},{:+.3}) {} {} tick={} 遅延最大={:.1}ms 追従最大={}",
         controller.state().label(),
         controller.gait_select().label(),
         cmd.velocity.vx_m_s,
         cmd.velocity.vy_m_s,
         cmd.velocity.wz_rad_s,
-        rates.join(" "),
-        errors,
-        if hottest.is_finite() {
-            format!("{hottest:.0}°C")
-        } else {
-            "-".to_string()
-        },
-        imu.rate_hz,
-        sbus.counters.frames,
-        sbus.counters.desync_bytes,
+        plant.status_line(),
+        pilot.status_line(),
         ticks,
         worst_overrun.as_secs_f64() * 1e3,
         watch.take(),
@@ -748,32 +759,34 @@ fn log_status(
     // 異常ビットは埋もれさせない。自動で脱力はしない（立っている四足を
     // 脱力させると倒れる）ので、operator がモードスイッチで判断できるよう
     // 毎回はっきり出す。
-    for (leg, k, st) in &faults {
+    let mut any = false;
+    for (id, st) in obs.faulted() {
+        any = true;
         log::error!(
-            "  異常: {} {} **{}**（0x{:02X}）{:.1} V / {:.0} °C",
-            leg.prefix(),
-            misa_hal::joint::LEG_JOINT_KINDS[*k],
-            st.describe(),
-            st.error_raw,
-            st.voltage_v,
-            st.temperature_c
+            "  異常: {} **{}**{}",
+            plant.axes().name(id).unwrap_or("?"),
+            plant.describe_fault(st.health.fault_raw),
+            match st.health.temperature_c {
+                Some(t) => format!("{t:.0} °C"),
+                None => String::new(),
+            },
         );
     }
-    // 消し方は毎回書かない。**同じ異常が続いている間は 1 度だけ**。
-    if !faults.is_empty() && !*fault_hint_shown {
-        *fault_hint_shown = true;
-        log::error!(
-            "  原因を取り除いてから `misa-run calib clear-error` で消せます\
-             （原因が残っている間は消えません — マニュアル §2）"
-        );
-    }
-    if faults.is_empty() {
+    // 異常が消えたら次に出たときまた出す。
+    if !any {
         *fault_hint_shown = false;
     }
     if controller.state() == State::PlayingPose {
         if let Some(name) = controller.playing() {
             log::info!("  再生中: {name}");
         }
+    }
+    if any && !*fault_hint_shown {
+        *fault_hint_shown = true;
+        log::error!(
+            "  **自動では脱力しません。** 立っている四足を脱力させると倒れるので、\
+             止めるかどうかは operator が決めてください"
+        );
     }
 }
 

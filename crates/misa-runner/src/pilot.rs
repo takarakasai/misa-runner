@@ -60,6 +60,14 @@ impl SbusPilot {
 }
 
 impl Pilot for SbusPilot {
+    fn status_line(&self) -> String {
+        let s = self.rx.state();
+        format!(
+            "S.BUS {}f/{}desync",
+            s.counters.frames, s.counters.desync_bytes
+        )
+    }
+
     fn poll(&mut self, now: Time) -> Intent {
         let state = self.rx.state();
         let usable = state.is_usable(self.timeout);

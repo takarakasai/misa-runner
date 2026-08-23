@@ -34,7 +34,7 @@
 //! それでも `exchange` に揃えてあるのは、消せない配備先が混ざる以上、
 //! **一番厳しい側に合わせておかないと移したときに壊れる**ため。
 
-use crate::axis::AxisTable;
+use crate::axis::{AxisId, AxisTable};
 use crate::command::{Command, ControlMode};
 use crate::observation::Observation;
 
@@ -91,6 +91,28 @@ pub trait Plant {
 
     /// 閉ループを切る。軸は脱力する。
     fn disarm(&mut self) -> Result<(), String>;
+
+    /// **こちらの指令で動かない軸の観測値**を外から教える。
+    ///
+    /// 受信機直結の腕がこれ。プロポのチャンネルから割り出した角度を
+    /// 入れると、ログ・可視化・モデル状態に実際の角度が載る。駆動する軸
+    /// しか無い Plant では何もしなくてよい。
+    fn observe_aux(&mut self, _axis: AxisId, _value_rad: f64) {}
+
+    /// 状態表示に添える 1 行。バスの実効周期など、**この Plant にしか
+    /// 分からないこと**を書く。既定は空。
+    fn status_line(&self) -> String {
+        String::new()
+    }
+
+    /// 異常ビットの生値を人が読める形にする。
+    ///
+    /// **生値の `0x01` だけ出しても現場では何も分からない。** ビットごとに
+    /// 意味も対処も違う（低電圧は電源、過熱は冷却待ち）ので、ベンダを知って
+    /// いる実装が名前を付ける。
+    fn describe_fault(&self, raw: u32) -> String {
+        format!("{raw:#010x}")
+    }
 
     /// **指令を渡し、観測を受け取る。これが 1 tick の全部。**
     ///

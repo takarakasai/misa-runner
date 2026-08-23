@@ -42,6 +42,8 @@ pub struct Robot {
     /// **機体ごとに違う**（namiashi は `trunk`、keel は `base_link`）。
     /// 決め打ちにすると、シムで姿勢と位置が NaN のまま「転倒なし」と
     /// 出てしまう。
+    /// 読むのは `sim`（`--features sim`）だけ。
+    #[allow(dead_code)]
     pub root_link: String,
 }
 

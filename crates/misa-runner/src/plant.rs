@@ -69,10 +69,6 @@ impl SerialPlant {
     pub fn hw(&self) -> &Hardware {
         &self.hw
     }
-
-    pub fn hw_mut(&mut self) -> &mut Hardware {
-        &mut self.hw
-    }
 }
 
 impl Plant for SerialPlant {
@@ -91,11 +87,68 @@ impl Plant for SerialPlant {
             .map_err(|e| e.to_string())
     }
 
+    /// **切るときは指令も落としてから。** Disable だけ送って目標を残すと、
+    /// 次に投入した瞬間に古い目標へ飛ぶ。
     fn disarm(&mut self) -> Result<(), String> {
-        self.hw
+        let idle = [JointCommand::default(); 3];
+        for bus in self.hw.legs.buses() {
+            bus.set_commands(idle);
+        }
+        let r = self
+            .hw
             .legs
             .request_all(misa_hal::legs::BusRequest::Disable)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string());
+        let _ = self.hw.arm.relax();
+        r
+    }
+
+    /// 受信機直結の腕は、プロポのチャンネルから読んだ角度が唯一の手がかり。
+    fn observe_aux(&mut self, axis: AxisId, value_rad: f64) {
+        if self.head == Some(axis) {
+            self.hw.arm.observe(value_rad);
+        }
+    }
+
+    fn status_line(&self) -> String {
+        let rates: Vec<String> = self
+            .hw
+            .legs
+            .buses()
+            .iter()
+            .map(|b| format!("{}:{:.0}Hz", b.leg().prefix(), b.stats().rate_hz))
+            .collect();
+        let errors: u64 = self.hw.legs.buses().iter().map(|b| b.stats().errors).sum();
+        // 温度は「いちばん熱い軸」だけ。12 軸ぜんぶ並べても読まれない。
+        let hottest = self
+            .hw
+            .legs
+            .buses()
+            .iter()
+            .flat_map(|b| b.status())
+            .filter(|s| s.valid)
+            .map(|s| s.temperature_c)
+            .fold(f64::NEG_INFINITY, f64::max);
+        format!(
+            "脚[{}] err={} 最高温{} IMU {:.0}Hz",
+            rates.join(" "),
+            errors,
+            if hottest.is_finite() {
+                format!("{hottest:.0}°C")
+            } else {
+                "-".to_string()
+            },
+            self.hw.imu.stats().rate_hz,
+        )
+    }
+
+    fn describe_fault(&self, raw: u32) -> String {
+        misa_hal::legs::JointStatus {
+            error_raw: raw as u8,
+            valid: true,
+            ..Default::default()
+        }
+        .describe()
     }
 
     fn exchange(&mut self, cmd: &Command, obs: &mut Observation) -> Result<(), String> {

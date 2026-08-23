@@ -93,10 +93,10 @@ impl Ros2Pilot {
             misa_hal::config::HardwareConfig::Ros2(r) => (
                 r.node_name.clone(),
                 r.namespace.clone(),
-                r.state_timeout_ms,
+                r.cmd_vel_timeout_ms,
             ),
             // 実機がシリアルでも、操縦だけ ROS から入れたいことはある。
-            _ => ("misa_run".to_string(), String::new(), 200),
+            _ => ("misa_run".to_string(), String::new(), 300),
         };
 
         let shared = Arc::new(Mutex::new(Shared::default()));
@@ -179,6 +179,14 @@ impl Ros2Pilot {
 }
 
 impl Pilot for Ros2Pilot {
+    fn status_line(&self) -> String {
+        let s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        match s.velocity_at {
+            Some(t) => format!("cmd_vel {:.0}ms前", t.elapsed().as_secs_f64() * 1e3),
+            None => "cmd_vel 未受信".to_string(),
+        }
+    }
+
     fn poll(&mut self, now: Time) -> Intent {
         let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
 

@@ -405,6 +405,13 @@ pub struct Ros2Hardware {
     /// メッセージの stamp だけが頼りになる。
     #[serde(default = "default_state_timeout_ms")]
     pub state_timeout_ms: u64,
+    /// `cmd_vel` がこれより古ければ速度を 0 にする [ms]。
+    ///
+    /// **状態の時間切れとは別物。** 状態は 200 Hz で来る前提だが、`cmd_vel`
+    /// の publisher は 10〜20 Hz のこともある（`teleop_twist_keyboard` など）。
+    /// 状態と同じ 50 ms にすると、10 Hz の操縦が常時時間切れになる。
+    #[serde(default = "default_cmd_vel_timeout_ms")]
+    pub cmd_vel_timeout_ms: u64,
     /// 位置指令に添える軸の速度上限 [rad/s]。
     #[serde(default = "default_max_speed")]
     pub default_max_speed_rad_s: f64,
@@ -422,6 +429,7 @@ impl Default for Ros2Hardware {
             command_topic: default_command_topic(),
             state_topic: default_state_topic(),
             state_timeout_ms: default_state_timeout_ms(),
+            cmd_vel_timeout_ms: default_cmd_vel_timeout_ms(),
             default_max_speed_rad_s: default_max_speed(),
             max_target_rate_rad_s: default_max_target_rate(),
         }
@@ -439,6 +447,9 @@ fn default_state_topic() -> String {
 }
 fn default_state_timeout_ms() -> u64 {
     50
+}
+fn default_cmd_vel_timeout_ms() -> u64 {
+    300
 }
 
 impl HardwareConfig {

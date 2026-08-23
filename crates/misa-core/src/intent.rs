@@ -173,6 +173,12 @@ pub trait Pilot {
     /// 呼び出し側が「前回の意図を使い回す」ことになり、受信断で速度が
     /// 残り続ける。切れたことは [`Intent::link_ok`] で伝える。
     fn poll(&mut self, now: Time) -> Intent;
+
+    /// 状態表示に添える 1 行。受信の生きの良さなど、**この入力にしか
+    /// 分からないこと**を書く。既定は空。
+    fn status_line(&self) -> String {
+        String::new()
+    }
 }
 
 #[cfg(test)]

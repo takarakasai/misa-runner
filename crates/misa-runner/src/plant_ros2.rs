@@ -68,6 +68,13 @@ pub struct Ros2Plant {
     index: Vec<Option<usize>>,
     /// `index` を作ったときの名前の並び。変わったら張り直す。
     index_for: Vec<String>,
+    /// 直近に報告した「解決できなかった軸」。
+    ///
+    /// **同じことを何度も言わない。** 名前の並びが 2 通り以上のあいだで
+    /// 揺れると（別のノードが同じトピックへ出しているなど）、毎周期
+    /// 張り直しになってログが溢れる。張り直し自体は正しいので続けるが、
+    /// 報告は結果が変わったときだけにする。
+    reported: Option<Vec<String>>,
     /// 状態がこれより古ければ観測を信じない。
     timeout: Duration,
     started: Instant,
@@ -154,6 +161,7 @@ impl Ros2Plant {
             publisher,
             index: vec![None; n],
             index_for: Vec::new(),
+            reported: None,
             timeout: Duration::from_millis(r.state_timeout_ms.max(5)),
             started: Instant::now(),
             stop,
@@ -174,14 +182,17 @@ impl Ros2Plant {
             .collect();
         self.index_for = names.to_vec();
 
-        let missing: Vec<&str> = self
+        let missing: Vec<String> = self
             .axes
             .axes()
             .iter()
             .zip(&self.index)
             .filter(|(_, i)| i.is_none())
-            .map(|(a, _)| a.name.as_str())
+            .map(|(a, _)| a.name.clone())
             .collect();
+        if self.reported.as_ref() == Some(&missing) {
+            return;
+        }
         if missing.is_empty() {
             log::info!("{} 軸すべてを low_state で解決しました", self.index.len());
         } else {
@@ -191,6 +202,7 @@ impl Ros2Plant {
                 missing.len()
             );
         }
+        self.reported = Some(missing);
     }
 }
 
@@ -211,6 +223,14 @@ impl Plant for Ros2Plant {
 
     fn disarm(&mut self) -> Result<(), String> {
         Ok(())
+    }
+
+    fn status_line(&self) -> String {
+        let l = self.latest.lock().unwrap_or_else(|e| e.into_inner());
+        match l.at {
+            Some(t) => format!("low_state {:.1}ms前", t.elapsed().as_secs_f64() * 1e3),
+            None => "low_state 未受信".to_string(),
+        }
     }
 
     fn exchange(&mut self, cmd: &Command, obs: &mut Observation) -> Result<(), String> {
