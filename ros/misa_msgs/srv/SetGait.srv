@@ -1,0 +1,12 @@
+# 歩容の種別。
+#
+# **切り替わるのは遊脚が無いときだけ。** 歩いている最中の要求は受け付け
+# られず、ok = false と理由が返る（踏み替えが飛ぶため）。
+uint8 CRAWL=0
+uint8 WALK=1
+uint8 TROT=2
+
+uint8 gait
+---
+bool ok
+string message

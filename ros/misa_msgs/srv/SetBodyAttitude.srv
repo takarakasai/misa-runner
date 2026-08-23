@@ -1,0 +1,9 @@
+# 胴体の目標姿勢 [rad]。足は接地したまま胴体だけ傾く。
+#
+# **可動域を食う。** gait.body_attitude_max_rad が 0 なら無効（既定）。
+float64 roll
+float64 pitch
+float64 yaw
+---
+bool ok
+string message

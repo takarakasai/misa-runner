@@ -1,0 +1,12 @@
+# どこまで動いてよいか。
+#
+# **並びは活動度の低い順。** 受信断のフェイルセーフはこの順序で
+# 「直前より上へ行かない」ことを保証する。
+uint8 RELAX=0    # 脱力
+uint8 STAND=1    # 初期姿勢で保持
+uint8 WALK=2     # 歩行
+
+uint8 mode
+---
+bool ok
+string message

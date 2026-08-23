@@ -43,7 +43,9 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let viz_cfg = crate::viz_config(cli);
     // **可視化するなら実時間で流す。** 全力で回すと 10 秒ぶんが 1 秒で
     // 終わって、目でも手でも追えない。操縦するときも同じ。
-    let realtime = cli.flag("realtime") || viz_cfg.enabled || cli.str("pilot") == Some("sbus");
+    let realtime = cli.flag("realtime")
+        || viz_cfg.enabled
+        || matches!(cli.str("pilot"), Some("sbus") | Some("ros2"));
 
     // **Pilot を先に開く。** 受信機が無いのにモデルを読んでから落ちると、
     // 待たされたうえで原因が最後に出る。
@@ -65,9 +67,22 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             println!("プロポから操縦します（CH5 が脱力位置で待機）");
             Box::new(p)
         }
-        other => return Err(format!("未知の pilot {other:?}（script|sbus）")),
+        #[cfg(feature = "ros2")]
+        "ros2" => {
+            let p = crate::pilot_ros2::Ros2Pilot::connect(cfg)?;
+            println!("ROS 2 から操縦します（cmd_vel + サービス 5 本。既定は脱力）");
+            Box::new(p)
+        }
+        other => {
+            return Err(format!(
+                "未知の pilot {other:?}（script|sbus{}）",
+                if cfg!(feature = "ros2") { "|ros2" } else { "" }
+            ))
+        }
     };
     let scripted = cli.str("pilot").unwrap_or("script") == "script";
+    // プロポと ROS は操縦者が止めるまで回す。台本は --secs で切る。
+    let interactive = !scripted;
 
     let robot = crate::robot::load_from_config(cfg)?;
     let model_limits = robot.limits.clone();
@@ -129,7 +144,12 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     );
     println!("t[s]   状態         胴体 z[m]  roll   pitch  接地");
 
-    let steps = (seconds / dt).ceil() as usize;
+    // `--secs 0` で操縦者が止めるまで（Ctrl-C）。
+    let steps = if seconds <= 0.0 && interactive {
+        usize::MAX
+    } else {
+        (seconds / dt).ceil() as usize
+    };
     let mut min_z = f64::INFINITY;
     let mut script_velocity = Velocity::ZERO;
     let mut publisher = crate::runner::open_viz(&viz_cfg)?;

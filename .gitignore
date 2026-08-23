@@ -7,3 +7,8 @@
 # **埋め込みリポジトリを gitlink として追跡しない**ため。clone しても中身が
 # 来ないうえ、.gitmodules にも載らないので誰も取得できない。
 /ref/
+# colcon の成果物。misa_msgs のソース（package.xml / CMakeLists.txt / srv）
+# だけを追跡する。
+/ros/build/
+/ros/install/
+/ros/log/

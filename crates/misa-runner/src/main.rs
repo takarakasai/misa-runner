@@ -21,6 +21,8 @@ mod diag;
 mod dump;
 mod jointvec;
 mod pilot;
+#[cfg(feature = "ros2")]
+mod pilot_ros2;
 mod plant;
 mod pose;
 mod record;

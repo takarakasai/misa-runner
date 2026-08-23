@@ -1,0 +1,5 @@
+# 立ち高さの公称値からの差分 [m]。
+float64 offset_m
+---
+bool ok
+string message
