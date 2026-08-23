@@ -23,6 +23,8 @@ mod jointvec;
 mod pilot;
 #[cfg(feature = "ros2")]
 mod pilot_ros2;
+#[cfg(feature = "ros2")]
+mod plant_ros2;
 mod plant;
 mod pose;
 mod record;
@@ -81,6 +83,10 @@ fn dispatch(cli: &Cli) -> Result<(), String> {
     let cfg = load_config(cli)?;
     match command {
         "check" => diag::check(&cfg),
+        #[cfg(feature = "ros2")]
+        "bridge" => plant_ros2::diagnose(&cfg, secs_or_forever(cli, 10.0)),
+        #[cfg(not(feature = "ros2"))]
+        "bridge" => Err("このビルドには ros2 が入っていません（--features ros2 で有効化）".into()),
         "dump" => dump::run(&cfg, cli),
         #[cfg(feature = "sim")]
         "sim" => sim::run(&cfg, cli),
@@ -269,6 +275,7 @@ fn print_help() {
                             --record で毎周期を記録する（別スレッドで書く）
   sim    [--gait G] [--vx V] MuJoCo で動力学込みに回す（--features sim のビルド）
          [--secs S] [--kp K] [--kv K] [--base-height M] [--record PATH]
+  bridge [--secs S]         ROS 2 ブリッジとの往復を確認（**指令は脱力のまま**）
   replay LOG [LOG2]         記録の要約。2 つ渡すと指令を差分する
                             [--limit N] 差分の表示件数（既定 20）
 

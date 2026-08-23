@@ -33,6 +33,7 @@
 //! reliable な publisher から best-effort な subscriber は繋がるので、
 //! `teleop_twist_keyboard` のような既定 QoS の相手とも噛み合う。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -74,8 +75,12 @@ pub struct Ros2Pilot {
     shared: Arc<Mutex<Shared>>,
     /// `cmd_vel` がこれより古ければ速度を 0 にする。
     timeout: Duration,
-    /// spin スレッド。落とすと購読もサービスも止まる。
-    _spin: std::thread::JoinHandle<()>,
+    /// spin スレッドを止める合図。
+    ///
+    /// **止めずに落とすと落ちる。** ROS のコンテキストが片付いたあとに
+    /// spin が走ると、解放済みの領域を触って malloc が壊れる（実測）。
+    stop: Arc<AtomicBool>,
+    spin: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Ros2Pilot {
@@ -144,6 +149,8 @@ impl Ros2Pilot {
             "ROS 2 から操縦します: {namespace}/{node_name}  cmd_vel + サービス 5 本"
         );
 
+        let stop = Arc::new(AtomicBool::new(false));
+        let spin_stop = Arc::clone(&stop);
         let spin = std::thread::Builder::new()
             .name("ros2-pilot".into())
             .spawn(move || {
@@ -155,7 +162,7 @@ impl Ros2Pilot {
                 spawn_play_pose(&sp, play_pose, Arc::clone(&spin_shared));
                 spawn_set_attitude(&sp, set_attitude, Arc::clone(&spin_shared));
                 spawn_set_height(&sp, set_height, Arc::clone(&spin_shared));
-                loop {
+                while !spin_stop.load(Ordering::Relaxed) {
                     node.spin_once(Duration::from_millis(5));
                     pool.run_until_stalled();
                 }
@@ -165,7 +172,8 @@ impl Ros2Pilot {
         Ok(Self {
             shared,
             timeout: Duration::from_millis(timeout_ms.max(20)),
-            _spin: spin,
+            stop,
+            spin: Some(spin),
         })
     }
 }
@@ -348,7 +356,8 @@ mod tests {
         let mut p = Ros2Pilot {
             shared,
             timeout: Duration::from_millis(200),
-            _spin: std::thread::spawn(|| {}),
+            stop: Arc::new(AtomicBool::new(false)),
+            spin: None,
         };
         let i = p.poll(Time::ZERO);
         assert!(i.velocity.is_zero());
@@ -366,7 +375,8 @@ mod tests {
         let mut p = Ros2Pilot {
             shared,
             timeout: Duration::from_millis(200),
-            _spin: std::thread::spawn(|| {}),
+            stop: Arc::new(AtomicBool::new(false)),
+            spin: None,
         };
         let first = p.poll(Time::ZERO);
         assert!(first.play_pose);
@@ -378,5 +388,16 @@ mod tests {
     #[test]
     fn the_default_mode_is_relaxed() {
         assert_eq!(Shared::default().mode, ModeRequest::Relax);
+    }
+}
+
+impl Drop for Ros2Pilot {
+    /// **spin を止めてから落とす。** ROS のコンテキストが片付いたあとに
+    /// spin が走ると、解放済みの領域を触って malloc が壊れる。
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.spin.take() {
+            let _ = h.join();
+        }
     }
 }

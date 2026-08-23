@@ -55,8 +55,9 @@ role = "wheel"
 kind = "ros2"
 node_name = "misa_run"
 namespace = "/keel"
-command_topic = "joint_command"
-state_topic = "joint_state"
+# STM のブリッジが購読／配信しているトピック（ksm_mvp_real_ws）。
+command_topic = "/low_command_msg"
+state_topic = "/low_state"
 state_timeout_ms = 50
 default_max_speed_rad_s = 8.0
 max_target_rate_rad_s = 3.0
