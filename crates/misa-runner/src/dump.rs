@@ -117,6 +117,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     };
 
     let mut violations: Vec<String> = Vec::new();
+    let mut checked = true;
     let steps = (seconds / dt).ceil() as usize;
     let period = Duration::from_secs_f64(dt);
     let mut next = Instant::now();
@@ -132,7 +133,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             };
         }
         let out = controller.tick(&cmd, &measured, imu.rpy_rad, dt);
-        check_limits(cfg, &out.targets, t, &mut violations);
+        checked &= check_limits(cfg, &out.targets, t, &mut violations);
         if i % every == 0 {
             println!("{t:5.2}  {:<12} {}", out.state.label(), row(&out.targets));
         }
@@ -151,7 +152,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             let mut shadow = crate::snapshot::command(
                 &layout,
                 &out.targets,
-                cfg.hardware.legs.default_max_speed_rad_s,
+                cfg.hardware.default_max_speed_rad_s(),
                 out.leg_mode == misa_hal::joint::JointMode::Idle,
             );
             let verdict = shadow_gate.apply(&mut shadow, &obs, period);
@@ -182,7 +183,10 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         }
     }
 
-    if violations.is_empty() {
+    if !checked {
+        println!("\n可動域: **検証していません**（PC が可動域を持たない構成。向こうの仕事）");
+        Ok(())
+    } else if violations.is_empty() {
         println!("\n可動域: すべて範囲内");
         Ok(())
     } else {
@@ -208,7 +212,7 @@ fn crouch_pose(cfg: &AppConfig) -> JointVec {
         .iter()
         .zip(q.legs.iter_mut())
     {
-        let Some(bus) = cfg.hardware.bus_for(*slot) else {
+        let Some(bus) = cfg.hardware.serial().ok().and_then(|h| h.bus_for(*slot)) else {
             continue;
         };
         for (m, dst) in bus.motors.iter().zip(leg.iter_mut()) {
@@ -254,8 +258,14 @@ fn row(q: &JointVec) -> String {
 /// 可動域は実機設定 (`hardware.legs.bus[].motors[]`) が持っているものを使う。
 /// モデルの `<limit>` ではなく実機の設定を見るのは、実際にクランプするのが
 /// そちらだから。
-fn check_limits(cfg: &AppConfig, q: &JointVec, t: f64, out: &mut Vec<String>) {
-    for bus in &cfg.hardware.legs.bus {
+///
+/// **検証できたかを返す。** 可動域を PC が持たない構成（ブリッジ越し）では
+/// できないので、それを「範囲内」と言わないために区別する。
+fn check_limits(cfg: &AppConfig, q: &JointVec, t: f64, out: &mut Vec<String>) -> bool {
+    let Ok(serial) = cfg.hardware.serial() else {
+        return false;
+    };
+    for bus in &serial.legs.bus {
         let Ok(slot) = bus.leg_slot() else { continue };
         for (k, motor) in bus.motors.iter().enumerate() {
             let value = q.legs[slot.index()][k];
@@ -267,6 +277,7 @@ fn check_limits(cfg: &AppConfig, q: &JointVec, t: f64, out: &mut Vec<String>) {
             }
         }
     }
+    true
 }
 
 fn level_imu() -> ImuSample {

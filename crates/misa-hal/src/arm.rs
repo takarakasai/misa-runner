@@ -155,10 +155,10 @@ impl ArmServo for NullArm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::HardwareConfig;
+    use crate::config::SerialHardware;
 
     fn cfg() -> ArmConfig {
-        HardwareConfig::default().arm
+        SerialHardware::default().arm
     }
 
     #[test]

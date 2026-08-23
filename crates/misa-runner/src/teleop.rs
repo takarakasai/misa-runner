@@ -440,7 +440,7 @@ mod tests {
     use crate::config::GaitTuning;
 
     fn arm_cfg() -> misa_hal::config::ArmConfig {
-        misa_hal::config::HardwareConfig::default().arm
+        misa_hal::config::SerialHardware::default().arm
     }
 
     fn state_with(channels: &[(usize, u16)]) -> SbusState {

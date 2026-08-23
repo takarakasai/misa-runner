@@ -336,19 +336,190 @@ pub enum ArmProtocol {
     None,
 }
 
-/// 実機まとめ。
+/// 実機との繋ぎ方。**機体ごとにここが変わる。**
+///
+/// `kind` で選ぶ。TOML では**必ず先頭に置くこと** — テーブル見出しより後ろに
+/// 書いた素のキーは、そのテーブルの中身として読まれる。
+///
+/// ```toml
+/// [hardware]
+/// kind = "serial"     # namiashi、keel のベンチ
+/// [hardware.legs]
+/// ...
+/// ```
+///
+/// ```toml
+/// [hardware]
+/// kind = "ros2"       # keel の本番（STM のブリッジへ繋ぐ）
+/// state_topic = "..."
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HardwareConfig {
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HardwareConfig {
+    /// シリアル／CAN のバスを PC が直接握る。
+    Serial(SerialHardware),
+    /// STM のブリッジへ ROS 2 の独自メッセージで繋ぐ。
+    ///
+    /// **モータの配線も校正値も PC は持たない。** どちらもブリッジの中で
+    /// 閉じるので、ここに書くのは繋ぎ先だけ。
+    Ros2(Ros2Hardware),
+}
+
+impl Default for HardwareConfig {
+    fn default() -> Self {
+        HardwareConfig::Serial(SerialHardware::default())
+    }
+}
+
+/// PC が直接バスを握る構成。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SerialHardware {
     pub legs: LegsConfig,
     pub imu: ImuConfig,
     pub sbus: SbusConfig,
     pub arm: ArmConfig,
 }
 
+/// ROS 2 のトピック越しにブリッジへ繋ぐ構成。
+///
+/// **まだ `Ros2Plant` が無いので、読めるだけで動きはしない。** 先に書式を
+/// 決めておくのは、機体のプロファイルを書き始められるようにするため。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Ros2Hardware {
+    #[serde(default = "default_node_name")]
+    pub node_name: String,
+    #[serde(default)]
+    pub namespace: String,
+    /// `None` なら `ROS_DOMAIN_ID` に従う。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_id: Option<u32>,
+    /// 指令を publish するトピック。
+    #[serde(default = "default_command_topic")]
+    pub command_topic: String,
+    /// 状態を subscribe するトピック。
+    #[serde(default = "default_state_topic")]
+    pub state_topic: String,
+    /// 状態がこれより古ければ観測を信じない [ms]。
+    ///
+    /// **pub/sub には往復の相関が無い**ので、古さの判定はここと
+    /// メッセージの stamp だけが頼りになる。
+    #[serde(default = "default_state_timeout_ms")]
+    pub state_timeout_ms: u64,
+    /// 位置指令に添える軸の速度上限 [rad/s]。
+    #[serde(default = "default_max_speed")]
+    pub default_max_speed_rad_s: f64,
+    /// **目標角そのもの**の変化率の上限 [rad/s]。0 で無制限。
+    #[serde(default = "default_max_target_rate")]
+    pub max_target_rate_rad_s: f64,
+}
+
+impl Default for Ros2Hardware {
+    fn default() -> Self {
+        Self {
+            node_name: default_node_name(),
+            namespace: String::new(),
+            domain_id: None,
+            command_topic: default_command_topic(),
+            state_topic: default_state_topic(),
+            state_timeout_ms: default_state_timeout_ms(),
+            default_max_speed_rad_s: default_max_speed(),
+            max_target_rate_rad_s: default_max_target_rate(),
+        }
+    }
+}
+
+fn default_node_name() -> String {
+    "misa_run".into()
+}
+fn default_command_topic() -> String {
+    "joint_command".into()
+}
+fn default_state_topic() -> String {
+    "joint_state".into()
+}
+fn default_state_timeout_ms() -> u64 {
+    50
+}
+
 impl HardwareConfig {
+    /// バスを直接握る構成のときだけ中身を返す。
+    ///
+    /// **校正・脚バス・S.BUS はこの構成にしか無い。** 呼び出し側が
+    /// `serial()?` を通ることで、ROS 2 の機体に対して意味のない操作を
+    /// 実行しようとしたことが起動時に分かる。
+    pub fn serial(&self) -> Result<&SerialHardware> {
+        match self {
+            HardwareConfig::Serial(h) => Ok(h),
+            HardwareConfig::Ros2(_) => Err(Error::Config(
+                "この操作はバスを直接握る構成 (kind = \"serial\") でのみ使えます".into(),
+            )),
+        }
+    }
+
+    /// 構成として筋が通っているか。
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            HardwareConfig::Serial(h) => h.validate(),
+            HardwareConfig::Ros2(h) => {
+                if h.command_topic.trim().is_empty() || h.state_topic.trim().is_empty() {
+                    return Err(Error::Config(
+                        "command_topic / state_topic が空です".into(),
+                    ));
+                }
+                if h.command_topic == h.state_topic {
+                    // 同じトピックに publish して subscribe すると、自分の
+                    // 指令を状態として読む。
+                    return Err(Error::Config(
+                        "command_topic と state_topic が同じです".into(),
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// 位置指令に添える軸の速度上限 [rad/s]。**構成に依らず必要**なので、
+    /// どちらの変種も持つ。
+    pub fn default_max_speed_rad_s(&self) -> f64 {
+        match self {
+            HardwareConfig::Serial(h) => h.legs.default_max_speed_rad_s,
+            HardwareConfig::Ros2(h) => h.default_max_speed_rad_s,
+        }
+    }
+
+    /// **目標角そのもの**の変化率の上限 [rad/s]。0 で無制限。
+    pub fn max_target_rate_rad_s(&self) -> f64 {
+        match self {
+            HardwareConfig::Serial(h) => h.legs.max_target_rate_rad_s,
+            HardwareConfig::Ros2(h) => h.max_target_rate_rad_s,
+        }
+    }
+
+    /// 制御周期がこれを超えてはいけない、という上限 [Hz]。
+    ///
+    /// シリアルではバスの周期。ブリッジ越しでは PC 側から決められないので
+    /// `None`（向こうの周期に従う）。
+    pub fn max_control_rate_hz(&self) -> Option<f64> {
+        match self {
+            HardwareConfig::Serial(h) => Some(h.legs.bus_rate_hz),
+            HardwareConfig::Ros2(_) => None,
+        }
+    }
+
+    pub fn serial_mut(&mut self) -> Result<&mut SerialHardware> {
+        match self {
+            HardwareConfig::Serial(h) => Ok(h),
+            HardwareConfig::Ros2(_) => Err(Error::Config(
+                "この操作はバスを直接握る構成 (kind = \"serial\") でのみ使えます".into(),
+            )),
+        }
+    }
+}
+
+impl SerialHardware {
     /// TOML 文字列から読む。
     pub fn from_toml(text: &str) -> Result<Self> {
-        let cfg: HardwareConfig =
+        let cfg: SerialHardware =
             toml::from_str(text).map_err(|e| Error::Config(format!("TOML の解析に失敗: {e}")))?;
         cfg.validate()?;
         Ok(cfg)
@@ -453,7 +624,7 @@ impl HardwareConfig {
     }
 }
 
-impl Default for HardwareConfig {
+impl Default for SerialHardware {
     fn default() -> Self {
         // 既定の配線: 基板の LEG1..4 (UART0..3) = **FL, RL, FR, RR**、
         // バス内は id 1, 2, 3 = hip, thigh, calf。
@@ -585,14 +756,14 @@ mod tests {
 
     #[test]
     fn default_config_is_valid() {
-        HardwareConfig::default().validate().unwrap();
+        SerialHardware::default().validate().unwrap();
     }
 
     #[test]
     fn default_config_round_trips_through_toml() {
-        let cfg = HardwareConfig::default();
+        let cfg = SerialHardware::default();
         let text = cfg.to_toml().unwrap();
-        let back = HardwareConfig::from_toml(&text).unwrap();
+        let back = SerialHardware::from_toml(&text).unwrap();
         assert_eq!(cfg, back);
     }
 
@@ -607,7 +778,7 @@ mod tests {
     /// 違うので「左右対称だろう」と決めてかかると外す。ここで固定しておく。
     #[test]
     fn default_signs_flip_roll_front_rear_and_pitch_left_right() {
-        let cfg = HardwareConfig::default();
+        let cfg = SerialHardware::default();
         let expected = [
             (LegSlot::Fl, [1.0, 1.0, 1.0]),
             (LegSlot::Rl, [-1.0, 1.0, 1.0]),
@@ -627,7 +798,7 @@ mod tests {
     /// 軸個別に持てていることと値の両方を固定する。
     #[test]
     fn only_calf_overrides_the_gear_ratio() {
-        let cfg = HardwareConfig::default();
+        let cfg = SerialHardware::default();
         let bus_default = cfg.legs.gear_ratio;
         for leg in LegSlot::ALL {
             let bus = cfg.bus_for(leg).unwrap();
@@ -653,7 +824,7 @@ mod tests {
 
     #[test]
     fn default_wiring_is_uart0_to_3_equals_fl_rl_fr_rr() {
-        let cfg = HardwareConfig::default();
+        let cfg = SerialHardware::default();
         let expected = [
             (LegSlot::Fl, 0u16),
             (LegSlot::Rl, 1),
@@ -677,28 +848,28 @@ mod tests {
 
     #[test]
     fn swapped_joint_order_is_rejected() {
-        let mut cfg = HardwareConfig::default();
+        let mut cfg = SerialHardware::default();
         cfg.legs.bus[0].motors.swap(0, 1);
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn duplicate_motor_id_on_one_bus_is_rejected() {
-        let mut cfg = HardwareConfig::default();
+        let mut cfg = SerialHardware::default();
         cfg.legs.bus[0].motors[1].id = 1;
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn duplicate_leg_is_rejected() {
-        let mut cfg = HardwareConfig::default();
+        let mut cfg = SerialHardware::default();
         cfg.legs.bus[1].leg = "FL".into();
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn inverted_joint_limits_are_rejected() {
-        let mut cfg = HardwareConfig::default();
+        let mut cfg = SerialHardware::default();
         cfg.legs.bus[0].motors[0].min_rad = 1.0;
         cfg.legs.bus[0].motors[0].max_rad = -1.0;
         assert!(cfg.validate().is_err());

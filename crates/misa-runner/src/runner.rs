@@ -40,13 +40,14 @@ impl Hardware {
     /// 1 本開くたびに調べ直すと 2 本目以降が自分自身の `EBUSY` で失敗する
     /// （実機で踏んだ）。受信機（`SbusPilot`）とも同じ地図を共有する。
     pub fn connect_with(cfg: &AppConfig, map: &PortMap) -> Result<Self, String> {
-        let legs = LegArray::connect_with(&cfg.hardware, map, &cfg.name).map_err(|e| e.to_string())?;
+        let serial = cfg.hardware.serial().map_err(|e| e.to_string())?;
+        let legs = LegArray::connect_with(serial, map, &cfg.name).map_err(|e| e.to_string())?;
         for bus in legs.buses() {
             log::info!("脚 {} → {}", bus.leg().prefix(), bus.port());
         }
-        let imu = ImuReader::connect_with(&cfg.hardware.imu, map).map_err(|e| e.to_string())?;
+        let imu = ImuReader::connect_with(&serial.imu, map).map_err(|e| e.to_string())?;
         log::info!("IMU → {}", imu.port());
-        let arm = misa_hal::arm::connect(&cfg.hardware.arm).map_err(|e| e.to_string())?;
+        let arm = misa_hal::arm::connect(&serial.arm).map_err(|e| e.to_string())?;
         Ok(Self {
             legs,
             imu,
@@ -176,7 +177,7 @@ fn verify_crouch_frame(cfg: &AppConfig, hw: &Hardware) {
     let mut worst_at = String::new();
     let mut rows = Vec::new();
     for leg in LegSlot::ALL {
-        let Some(bus) = cfg.hardware.bus_for(leg) else {
+        let Some(bus) = cfg.hardware.serial().ok().and_then(|h| h.bus_for(leg)) else {
             return;
         };
         for k in 0..3 {
@@ -256,7 +257,7 @@ impl Watch {
     fn new(cfg: &AppConfig) -> Self {
         let mut limits = [[(f64::NEG_INFINITY, f64::INFINITY); 3]; 4];
         for (slot, dst) in LegSlot::ALL.iter().zip(limits.iter_mut()) {
-            let Some(bus) = cfg.hardware.bus_for(*slot) else {
+            let Some(bus) = cfg.hardware.serial().ok().and_then(|h| h.bus_for(*slot)) else {
                 continue;
             };
             for (m, d) in bus.motors.iter().zip(dst.iter_mut()) {
@@ -501,7 +502,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
     log::info!(
         "制御ループ開始: {:.0} Hz（脚バス {:.0} Hz）。Ctrl-C で脱力して終了します",
         cfg.control.rate_hz,
-        cfg.hardware.legs.bus_rate_hz
+        cfg.hardware.max_control_rate_hz().unwrap_or(f64::NAN)
     );
 
     // 最初の観測を 1 回取っておく。指令は全軸脱力。
@@ -554,7 +555,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         let outgoing = crate::snapshot::command(
             &layout,
             &out.targets,
-            cfg.hardware.legs.default_max_speed_rad_s,
+            cfg.hardware.default_max_speed_rad_s(),
             out.leg_mode == JointMode::Idle,
         );
 

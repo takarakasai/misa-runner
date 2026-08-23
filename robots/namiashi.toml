@@ -109,6 +109,11 @@ chicken_head_base_rad = 0.0
 chicken_head_gain = 1.0
 chicken_head_tau_s = 0.05
 
+[hardware]
+# 実機との繋ぎ方。**サブテーブルより前に置くこと**（TOML では見出しより
+# 後ろの素のキーは、そのテーブルの中身として読まれる）。
+kind = "serial"
+
 [hardware.legs]
 baud = 2000000
 response_timeout_ms = 20

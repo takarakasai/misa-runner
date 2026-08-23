@@ -1,0 +1,51 @@
+# keel — STM のブリッジへ ROS 2 で繋ぐ構成。
+#
+# **配線もモータ id も校正値も、ここには書かない。** ゼロ点・可動域・符号は
+# STM が持ち、CAN は STM が握る。PC が持つのはモデルと歩容の設定だけ。
+#
+# **まだ Ros2Plant が無いので run はできない。** いま通るのは check / dump /
+# sim（dump と sim は可動域の検証を飛ばす — 可動域を PC が持たないため）。
+name = "keel"
+
+[control]
+model = "../mdls/keel/mvp_v12.misa"
+rate_hz = 200.0
+start_pose = "constrain2"
+kinematics_pose = "home"
+
+# keel のモデルが持つポーズは home / constrain2 / test。namiashi の
+# greeting は無いので、演出は名前を空にして無効にしてある。
+[poses]
+greeting = ""
+greeting_alt = ""
+
+[gait]
+stance_height_m = 0.30
+swing_height_m = 0.06
+max_vx_m_s = 0.4
+max_vy_m_s = 0.2
+max_wz_rad_s = 0.8
+
+# 車輪 4 軸。歩容もチキンヘッドも触らないので、指令は出ない（観測のみ）。
+[[aux]]
+joint = "FL_wheel_joint"
+role = "wheel"
+[[aux]]
+joint = "FR_wheel_joint"
+role = "wheel"
+[[aux]]
+joint = "RL_wheel_joint"
+role = "wheel"
+[[aux]]
+joint = "RR_wheel_joint"
+role = "wheel"
+
+[hardware]
+kind = "ros2"
+node_name = "misa_run"
+namespace = "/keel"
+command_topic = "joint_command"
+state_topic = "joint_state"
+state_timeout_ms = 50
+default_max_speed_rad_s = 8.0
+max_target_rate_rad_s = 3.0

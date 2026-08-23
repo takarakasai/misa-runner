@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 use lkmotor_driver::{Motor, MotorConfig as LkMotorConfig, MotorId, Rs485Driver};
 
 use crate::ch348::PortMap;
-use crate::config::{HardwareConfig, LegBusConfig, LegsConfig, MotorConfig};
+use crate::config::{SerialHardware, LegBusConfig, LegsConfig, MotorConfig};
 use crate::error::{Error, Result};
 use crate::joint::{JointCommand, JointMode, JointState, LegSlot};
 
@@ -669,12 +669,12 @@ impl LegArray {
     ///
     /// 途中で失敗した場合、それまでに開いたバスは drop で畳まれる。
     /// `robot` はロックを分けるためのロボット名（`AppConfig::name`）。
-    pub fn connect(cfg: &HardwareConfig, robot: &str) -> Result<Self> {
+    pub fn connect(cfg: &SerialHardware, robot: &str) -> Result<Self> {
         Self::connect_with(cfg, &PortMap::discover()?, robot)
     }
 
     /// 事前に取った探索結果を使って開く。
-    pub fn connect_with(cfg: &HardwareConfig, map: &PortMap, robot: &str) -> Result<Self> {
+    pub fn connect_with(cfg: &SerialHardware, map: &PortMap, robot: &str) -> Result<Self> {
         // ポートを開く前に取る。開いてから弾くと、その一瞬だけ二重に
         // 喋る窓ができる。
         let lock = LegsLock::acquire(robot)?;
@@ -831,7 +831,7 @@ impl LegBus {
     ///
     /// [`LegArray::connect`] は 4 本まとめて開くので、1 脚を調べるだけでも
     /// 残り 3 本のポートを掴んでしまう。触る範囲は要る分だけにしたい。
-    pub fn open(cfg: &HardwareConfig, leg: LegSlot, map: &PortMap) -> Result<Self> {
+    pub fn open(cfg: &SerialHardware, leg: LegSlot, map: &PortMap) -> Result<Self> {
         let bus_cfg = cfg
             .bus_for(leg)
             .ok_or_else(|| Error::Config(format!("脚 {} の設定がありません", leg.prefix())))?;
@@ -839,7 +839,7 @@ impl LegBus {
     }
 
     /// 探索から自分でやる版。
-    pub fn open_alone(cfg: &HardwareConfig, leg: LegSlot) -> Result<Self> {
+    pub fn open_alone(cfg: &SerialHardware, leg: LegSlot) -> Result<Self> {
         Self::open(cfg, leg, &PortMap::discover()?)
     }
 

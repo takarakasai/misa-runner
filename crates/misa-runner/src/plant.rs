@@ -60,7 +60,7 @@ impl SerialPlant {
             axes,
             caps,
             head: layout.head,
-            max_speed_rad_s: cfg.hardware.legs.default_max_speed_rad_s,
+            max_speed_rad_s: cfg.hardware.default_max_speed_rad_s(),
             started: std::time::Instant::now(),
         })
     }

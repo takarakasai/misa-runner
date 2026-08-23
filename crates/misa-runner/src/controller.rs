@@ -993,7 +993,7 @@ mod tests {
         let t = Teleop::new(
             TeleopConfig::default(),
             &crate::config::GaitTuning::default(),
-            &misa_hal::config::HardwareConfig::default().arm,
+            &misa_hal::config::SerialHardware::default().arm,
         );
         let bench = t.bench_stand();
         assert_eq!(bench.mode, ModeRequest::Stand);

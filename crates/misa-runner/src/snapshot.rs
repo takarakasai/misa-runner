@@ -102,29 +102,43 @@ pub fn safety_config(
     control_period_s: f64,
     stale_ticks: f64,
 ) -> SafetyConfig {
-    let hw = &cfg.hardware;
-    let rate = hw.legs.max_target_rate_rad_s;
+    let rate = cfg.hardware.max_target_rate_rad_s();
     let mut axes = Vec::with_capacity(layout.table.len());
+    // **可動域を持っているのはバスを直接握る構成だけ。** ブリッジ越しの機体
+    // では向こうが持つので、こちらは制限しない（いずれモデルの `[joint.limit]`
+    // から埋める）。無制限のまま指令を出すのは危ないが、その経路には
+    // まだ指令を出す実装が無い。
+    let serial = cfg.hardware.serial().ok();
     for leg in LegSlot::ALL {
-        // 脚の設定が無いのは設定検証が弾く。ここまで来たら在るはず。
-        let bus = hw.bus_for(leg).expect("脚の設定がある");
-        for m in &bus.motors {
-            axes.push(AxisLimits {
-                min_rad: m.min_rad,
-                max_rad: m.max_rad,
-                max_target_rate_rad_s: rate,
-                max_torque_nm: 0.0,
-            });
+        match serial.and_then(|h| h.bus_for(leg)) {
+            Some(bus) => {
+                for m in &bus.motors {
+                    axes.push(AxisLimits {
+                        min_rad: m.min_rad,
+                        max_rad: m.max_rad,
+                        max_target_rate_rad_s: rate,
+                        max_torque_nm: 0.0,
+                    });
+                }
+            }
+            None => {
+                for _ in 0..3 {
+                    axes.push(AxisLimits {
+                        max_target_rate_rad_s: rate,
+                        ..AxisLimits::UNLIMITED
+                    });
+                }
+            }
         }
     }
     // 補助軸の可動域。いまは腕の設定しか持っていないので、**head だけ**
     // その値を使い、ほかはモデルの可動域が入るまで無制限にしておく。
     // 無制限が危ないのは駆動する軸だけで、駆動しない軸は指令が出ない。
     for id in layout.aux() {
-        let is_head = layout.head == Some(id);
+        let arm = (layout.head == Some(id)).then(|| serial.map(|h| &h.arm)).flatten();
         axes.push(AxisLimits {
-            min_rad: if is_head { hw.arm.min_rad } else { f64::NEG_INFINITY },
-            max_rad: if is_head { hw.arm.max_rad } else { f64::INFINITY },
+            min_rad: arm.map_or(f64::NEG_INFINITY, |a| a.min_rad),
+            max_rad: arm.map_or(f64::INFINITY, |a| a.max_rad),
             max_target_rate_rad_s: rate,
             max_torque_nm: 0.0,
         });
@@ -423,16 +437,17 @@ mod tests {
         assert_eq!(sc.axes.len(), lay.table.len());
 
         // FL の hip は設定の 1 本目のバスの 1 個目のモータ。
-        let m = &cfg.hardware.bus_for(LegSlot::Fl).unwrap().motors[0];
+        let sh = cfg.hardware.serial().unwrap();
+        let m = &sh.bus_for(LegSlot::Fl).unwrap().motors[0];
         assert_eq!(sc.axes[0].min_rad, m.min_rad);
         assert_eq!(sc.axes[0].max_rad, m.max_rad);
         assert_eq!(
             sc.axes[0].max_target_rate_rad_s,
-            cfg.hardware.legs.max_target_rate_rad_s
+            cfg.hardware.max_target_rate_rad_s()
         );
         // head の可動域は腕の設定から来る。
         let head = lay.head.expect("同梱プロファイルは head を持つ");
-        assert_eq!(sc.axes[head.index()].min_rad, cfg.hardware.arm.min_rad);
+        assert_eq!(sc.axes[head.index()].min_rad, sh.arm.min_rad);
     }
 
 

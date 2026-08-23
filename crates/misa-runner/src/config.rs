@@ -160,12 +160,14 @@ impl AppConfig {
             return Err("control.rate_hz は正の値が必要です".into());
         }
         // 制御周期がバス周期より速いと、同じ指令を 2 回送るだけで意味がない。
-        if self.control.rate_hz > self.hardware.legs.bus_rate_hz {
+        if let Some(bus_hz) = self.hardware.max_control_rate_hz() {
+        if self.control.rate_hz > bus_hz {
             return Err(format!(
                 "control.rate_hz ({}) が legs.bus_rate_hz ({}) を超えています。\
                  バスが追いつかないので制御周期を落とすか、バス周期を上げてください",
-                self.control.rate_hz, self.hardware.legs.bus_rate_hz
+                self.control.rate_hz, bus_hz
             ));
+        }
         }
         // **チキンヘッドの相手は 1 本まで。** 2 本あるとどちらを動かすか
         // 決まらず、片方が黙って無視される。
@@ -536,6 +538,26 @@ FL_hip_joint = 0.0
         assert_eq!(cfg.control.model, default_model_path());
     }
 
+    /// **2 台目のプロファイルが読めること。**
+    ///
+    /// keel はブリッジ越しなので配線もモータ id も校正値も持たない。
+    /// 「[hardware] にモータが無い設定は設定として認めない」という検証が
+    /// 効いたままだと、ここで弾かれる。
+    #[test]
+    fn a_profile_for_a_robot_behind_a_bridge_loads() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../robots/keel.toml");
+        let text = std::fs::read_to_string(path).expect("robots/keel.toml が読めません");
+        let cfg = AppConfig::from_toml(&text).expect("keel のプロファイルが読めない");
+        assert_eq!(cfg.name, "keel");
+        assert_eq!(cfg.aux.len(), 4, "車輪 4 軸");
+        assert!(
+            cfg.hardware.serial().is_err(),
+            "ブリッジ越しの構成が serial として読めてしまっている"
+        );
+        // 制御周期の上限はバスの周期ではなく向こうが決める。
+        assert_eq!(cfg.hardware.max_control_rate_hz(), None);
+    }
+
     #[test]
     fn the_shipped_config_still_loads() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../robots/namiashi.toml");
@@ -571,7 +593,7 @@ FL_hip_joint = 0.0
     #[test]
     fn control_rate_above_the_bus_rate_is_rejected() {
         let mut cfg = AppConfig::default();
-        cfg.control.rate_hz = cfg.hardware.legs.bus_rate_hz * 2.0;
+        cfg.control.rate_hz = cfg.hardware.max_control_rate_hz().unwrap() * 2.0;
         assert!(cfg.validate().is_err());
     }
 }

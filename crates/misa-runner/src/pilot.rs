@@ -33,14 +33,15 @@ impl SbusPilot {
         map: &PortMap,
         allow_no_sbus: bool,
     ) -> Result<Self, String> {
-        let rx = SbusReceiver::connect_with(&cfg.hardware.sbus, map).map_err(|e| e.to_string())?;
+        let serial = cfg.hardware.serial().map_err(|e| e.to_string())?;
+        let rx = SbusReceiver::connect_with(&serial.sbus, map).map_err(|e| e.to_string())?;
         log::info!("S.BUS → {}", rx.port());
         Ok(Self {
             rx,
             teleop: Teleop::new(
                 cfg.teleop.clone(),
                 &cfg.gait,
-                &cfg.hardware.arm,
+                &serial.arm,
             ),
             timeout: Duration::from_millis(cfg.control.teleop_timeout_ms),
             allow_no_sbus,

@@ -361,13 +361,13 @@ impl Deadline {
 /// 既定は再描画表示。`plain` で 1 行 / 更新の逐次出力に切り替わる
 /// （リダイレクトやログ採取のとき、ANSI が混ざると読めないため）。
 pub fn sbus(cfg: &AppConfig, seconds: Option<f64>, plain: bool) -> Result<(), String> {
-    let rx = SbusReceiver::connect(&cfg.hardware.sbus).map_err(|e| e.to_string())?;
+    let rx = SbusReceiver::connect(&cfg.hardware.serial().map_err(|e| e.to_string())?.sbus).map_err(|e| e.to_string())?;
     let deadline = Deadline::new(seconds);
     println!("{} で受信中（{}）", rx.port(), deadline.label());
     rx.wait_ready(Duration::from_secs(3))
         .map_err(|e| format!("{e}。送信機の電源を確認してください"))?;
 
-    let mut teleop = Teleop::new(cfg.teleop.clone(), &cfg.gait, &cfg.hardware.arm);
+    let mut teleop = Teleop::new(cfg.teleop.clone(), &cfg.gait, &cfg.hardware.serial().map_err(|e| e.to_string())?.arm);
     let timeout = Duration::from_millis(cfg.control.teleop_timeout_ms);
     let roles = channel_roles(&cfg.teleop);
     let port = format!("{}", rx.port());
@@ -421,7 +421,7 @@ pub fn sbus(cfg: &AppConfig, seconds: Option<f64>, plain: bool) -> Result<(), St
 
 /// `imu` — IMU の値を表示し続ける。
 pub fn imu(cfg: &AppConfig, seconds: Option<f64>) -> Result<(), String> {
-    let reader = ImuReader::connect(&cfg.hardware.imu).map_err(|e| e.to_string())?;
+    let reader = ImuReader::connect(&cfg.hardware.serial().map_err(|e| e.to_string())?.imu).map_err(|e| e.to_string())?;
     let deadline = Deadline::new(seconds);
     println!("{} で受信中（{}）", reader.port(), deadline.label());
     reader
@@ -465,7 +465,7 @@ pub fn imu(cfg: &AppConfig, seconds: Option<f64>) -> Result<(), String> {
 /// 立ち上げでやりたいのは後者。脚を手で動かして、画面のモデルが同じように
 /// 動くかを見れば、`(バス, id)` → 関節の対応と符号を目で確認できる。
 pub fn legs(cfg: &AppConfig, seconds: Option<f64>, viz_cfg: &VizConfig) -> Result<(), String> {
-    let array = LegArray::connect(&cfg.hardware, &cfg.name).map_err(|e| e.to_string())?;
+    let array = LegArray::connect(cfg.hardware.serial().map_err(|e| e.to_string())?, &cfg.name).map_err(|e| e.to_string())?;
     let deadline = Deadline::new(seconds);
     println!(
         "脚バスを開きました（指令は送りません。観測: {}）",
@@ -482,7 +482,7 @@ pub fn legs(cfg: &AppConfig, seconds: Option<f64>, viz_cfg: &VizConfig) -> Resul
     // IMU は measured の `pose_rp`（胴体の roll/pitch）を埋めるために開く。
     // ここでも**指令は出さない**ので、読むだけで機体は動かない。
     // 開けなくても関節角の確認は続けられるので、失敗は警告に留める。
-    let imu = match ImuReader::connect(&cfg.hardware.imu) {
+    let imu = match ImuReader::connect(&cfg.hardware.serial().map_err(|e| e.to_string())?.imu) {
         Ok(r) => {
             println!(
                 "  IMU → {}（胴体の roll/pitch を measured に載せます）",
@@ -664,6 +664,17 @@ fn print_teleop(t: &TeleopConfig) {
 
 fn print_wiring(hw: &HardwareConfig) {
     println!("配線:");
+    let hw = match hw {
+        HardwareConfig::Serial(h) => h,
+        HardwareConfig::Ros2(r) => {
+            // ブリッジ越しの機体は、配線もモータ id も PC が持たない。
+            println!("  ROS 2 ブリッジ経由（配線とモータ id は向こうが持つ）");
+            println!("    node      {}/{}", r.namespace.trim_end_matches('/'), r.node_name);
+            println!("    指令      {}", r.command_topic);
+            println!("    状態      {}", r.state_topic);
+            return;
+        }
+    };
     for bus in &hw.legs.bus {
         let ids: Vec<String> = bus
             .motors

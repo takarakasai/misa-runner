@@ -23,7 +23,7 @@
 use std::io::{BufRead, Write};
 use std::time::{Duration, Instant};
 
-use misa_hal::config::HardwareConfig;
+use misa_hal::config::SerialHardware;
 use misa_hal::joint::{JointCommand, JointMode, LegSlot, LEG_JOINT_KINDS};
 use misa_hal::legs::{BusRequest, LegArray, LegBus, PidPartial, PidSet};
 
@@ -32,6 +32,19 @@ use crate::Cli;
 
 /// 軸を止めてから状態が落ち着くまでの待ち。
 const SETTLE: Duration = Duration::from_millis(300);
+
+/// 校正は**バスを直接握る構成でしか意味がない**。
+///
+/// ブリッジ越し（ROS 2 / 中間層 UDP）の機体では、ゼロ点も可動域も符号も
+/// 向こうが持つ。ここで弾いておかないと、PC 側にだけ書き込んで
+/// 「効かない」と悩むことになる。
+fn serial(cfg: &AppConfig) -> Result<&misa_hal::config::SerialHardware, String> {
+    cfg.hardware.serial().map_err(|e| e.to_string())
+}
+
+fn serial_mut(cfg: &mut AppConfig) -> Result<&mut misa_hal::config::SerialHardware, String> {
+    cfg.hardware.serial_mut().map_err(|e| e.to_string())
+}
 
 pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     match cli.positionals.get(1).map(|s| s.as_str()) {
@@ -70,8 +83,7 @@ fn scan(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         if only.is_some_and(|l| l != leg) {
             continue;
         }
-        let bus_cfg = cfg
-            .hardware
+        let bus_cfg = serial(cfg)?
             .bus_for(leg)
             .ok_or_else(|| format!("脚 {} の設定がありません", leg.prefix()))?;
         print!("{} {} : ", leg.prefix(), bus_cfg.port.label());
@@ -81,7 +93,7 @@ fn scan(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         if found.is_empty() {
             println!(
                 "応答なし（モータ電源とボーレート {} を確認）",
-                cfg.hardware.legs.baud
+                serial(cfg)?.legs.baud
             );
         } else {
             let expected: Vec<u8> = bus_cfg.motors.iter().map(|m| m.id).collect();
@@ -123,8 +135,8 @@ fn scan_bus(cfg: &AppConfig, leg: LegSlot, max_id: u8) -> Result<Vec<u8>, String
 /// 可動域は触らない（指令を出さないので使われない）。3 軸に満たないときは
 /// 最後の id を繰り返すのではなく**存在しない id で埋める**: 重複 id は
 /// `validate` が弾くし、応答を取り違える元でもある。
-fn probe_config(cfg: &AppConfig, leg: LegSlot, ids: &[u8]) -> Result<HardwareConfig, String> {
-    let mut hw = cfg.hardware.clone();
+fn probe_config(cfg: &AppConfig, leg: LegSlot, ids: &[u8]) -> Result<SerialHardware, String> {
+    let mut hw = serial(cfg)?.clone();
     let bus = hw
         .legs
         .bus
@@ -172,7 +184,7 @@ fn jog(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     println!("脚が自由に動ける状態か確認してください。続けるなら Enter、やめるなら Ctrl-C");
     let _ = read_line();
 
-    let bus = LegBus::open_alone(&cfg.hardware, leg).map_err(|e| e.to_string())?;
+    let bus = LegBus::open_alone(serial(cfg)?, leg).map_err(|e| e.to_string())?;
     let before = measure_one(&bus, k)?;
 
     // マルチターンフレームは起動時に自動で確立されるので、ここで置き直す
@@ -234,8 +246,9 @@ fn jog(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
 
     if let Some(path) = cli.str("write") {
         let mut cfg = cfg.clone();
-        let bi = bus_index(&cfg.hardware, leg)?;
-        cfg.hardware.legs.bus[bi].motors[k].sign = sign;
+        let sh = serial_mut(&mut cfg)?;
+        let bi = bus_index(sh, leg)?;
+        sh.legs.bus[bi].motors[k].sign = sign;
         write_config(&cfg, path)?;
         println!("{path} に書き戻しました");
     } else {
@@ -264,7 +277,8 @@ fn jog_once(
     // モータの電源 ON マルチターンフレームへ移した時点でその前提は消えた。
     // 絶対座標の一点を指すので、原点姿勢から離れているほど大きく動く
     // （実測で 73° 動く条件があった）。可動域クランプは ±145° なので止まらない。
-    let map = &cfg.hardware.legs.bus[bus_index(&cfg.hardware, bus.leg())?].motors[k];
+    let sh = serial(cfg)?;
+    let map = &sh.legs.bus[bus_index(sh, bus.leg())?].motors[k];
     let target = before + map.sign * delta_rad;
 
     // **クランプに当たる状態では測らない。**
@@ -299,7 +313,7 @@ fn jog_once(
     bus.set_commands(cmds);
 
     // スルーレート制限があるので、到達には目標差 / 制限レート ぶんかかる。
-    let travel_s = delta_rad.abs() / cfg.hardware.legs.max_target_rate_rad_s.max(0.1);
+    let travel_s = delta_rad.abs() / cfg.hardware.max_target_rate_rad_s().max(0.1);
     std::thread::sleep(Duration::from_secs_f64(travel_s + 1.0));
 
     let after = measure_one(bus, k)?;
@@ -319,7 +333,7 @@ fn range(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let margin = cli.f64("margin").unwrap_or(0.05);
     let name = joint_label(cfg, leg, k);
 
-    let array = LegArray::connect(&cfg.hardware, &cfg.name).map_err(|e| e.to_string())?;
+    let array = LegArray::connect(serial(cfg)?, &cfg.name).map_err(|e| e.to_string())?;
     let bus = array.bus(leg);
     bus.request(BusRequest::Disable)
         .map_err(|e| e.to_string())?;
@@ -373,9 +387,10 @@ fn range(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
 
     if let Some(path) = cli.str("write") {
         let mut cfg = cfg.clone();
-        let bi = bus_index(&cfg.hardware, leg)?;
-        cfg.hardware.legs.bus[bi].motors[k].min_rad = lo;
-        cfg.hardware.legs.bus[bi].motors[k].max_rad = hi;
+        let sh = serial_mut(&mut cfg)?;
+        let bi = bus_index(sh, leg)?;
+        sh.legs.bus[bi].motors[k].min_rad = lo;
+        sh.legs.bus[bi].motors[k].max_rad = hi;
         write_config(&cfg, path)?;
         println!("{path} に書き戻しました");
     } else {
@@ -414,7 +429,7 @@ fn zero(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     println!("保持できたら Enter（Ctrl-C で中止）");
     let _ = read_line();
 
-    let array = LegArray::connect(&cfg.hardware, &cfg.name).map_err(|e| e.to_string())?;
+    let array = LegArray::connect(serial(cfg)?, &cfg.name).map_err(|e| e.to_string())?;
     array
         .wait_anchored(Duration::from_secs(3))
         .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;
@@ -432,7 +447,7 @@ fn zero(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // 逆算する（sign * q_abs = q_model_現在 - zero_pose_rad_旧）。
     let mut out = cfg.clone();
     for leg in LegSlot::ALL {
-        let bi = bus_index(&out.hardware, leg)?;
+        let bi = bus_index(serial(&out)?, leg)?;
         let state = array.bus(leg).state();
         for k in 0..3 {
             if !state[k].ok {
@@ -441,18 +456,18 @@ fn zero(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                     leg.prefix()
                 ));
             }
-            let old = cfg.hardware.legs.bus[bi].motors[k].zero_pose_rad;
+            let old = serial(cfg)?.legs.bus[bi].motors[k].zero_pose_rad;
             let sign_q_abs = state[k].position_rad - old;
             let held = angles.legs[leg.index()][k];
-            out.hardware.legs.bus[bi].motors[k].zero_pose_rad = held - sign_q_abs;
+            serial_mut(&mut out)?.legs.bus[bi].motors[k].zero_pose_rad = held - sign_q_abs;
         }
     }
     println!("オフセットを求めました（モータには何も書いていません）:");
     for leg in LegSlot::ALL {
-        let bi = bus_index(&out.hardware, leg)?;
+        let bi = bus_index(serial(&out)?, leg)?;
         let vals: Vec<String> = (0..3)
             .map(|k| {
-                let v = out.hardware.legs.bus[bi].motors[k].zero_pose_rad;
+                let v = serial(&out).unwrap().legs.bus[bi].motors[k].zero_pose_rad;
                 format!("{v:+.4}")
             })
             .collect();
@@ -518,7 +533,7 @@ fn clear_multiturn(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     println!("続けるなら Enter、やめるなら Ctrl-C");
     let _ = read_line();
 
-    let array = LegArray::connect(&cfg.hardware, &cfg.name).map_err(|e| e.to_string())?;
+    let array = LegArray::connect(serial(cfg)?, &cfg.name).map_err(|e| e.to_string())?;
     array
         .wait_anchored(Duration::from_secs(3))
         .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;
@@ -581,16 +596,16 @@ fn target_joint(cli: &Cli) -> Result<(LegSlot, usize), String> {
 }
 
 fn joint_label(cfg: &AppConfig, leg: LegSlot, k: usize) -> String {
-    let id = cfg
-        .hardware
-        .bus_for(leg)
+    let id = serial(cfg)
+        .ok()
+        .and_then(|h| h.bus_for(leg))
         .and_then(|b| b.motors.get(k))
         .map(|m| m.id)
         .unwrap_or(0);
     format!("{}_{}_joint (id {id})", leg.prefix(), LEG_JOINT_KINDS[k])
 }
 
-fn bus_index(hw: &HardwareConfig, leg: LegSlot) -> Result<usize, String> {
+fn bus_index(hw: &SerialHardware, leg: LegSlot) -> Result<usize, String> {
     hw.legs
         .bus
         .iter()
@@ -659,7 +674,7 @@ fn read_line() -> String {
 /// 3. もう一度実行して raw が一致するか見る
 fn single_turn(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let only = leg_filter(cli)?;
-    let array = LegArray::connect(&cfg.hardware, &cfg.name).map_err(|e| e.to_string())?;
+    let array = LegArray::connect(serial(cfg)?, &cfg.name).map_err(|e| e.to_string())?;
     array
         .wait_anchored(Duration::from_secs(3))
         .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;
@@ -689,12 +704,12 @@ fn single_turn(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         let bus = array.bus(leg);
         let raw = bus.single_turn();
         for (k, v) in raw.iter().enumerate() {
-            let gear = cfg
-                .hardware
+            let gear_default = serial(cfg)?.legs.gear_ratio;
+            let gear = serial(cfg)?
                 .bus_for(leg)
                 .and_then(|b| b.motors.get(k))
-                .map_or(cfg.hardware.legs.gear_ratio, |m| {
-                    m.gear_ratio_or(cfg.hardware.legs.gear_ratio)
+                .map_or(gear_default, |m| {
+                    m.gear_ratio_or(gear_default)
                 });
             let wrap_deg = 360.0 / gear;
             match v {
@@ -759,13 +774,13 @@ fn clear_error(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // 投げてしまうと「時間で消えた」のか「コマンドで消えた」のかが
     // 分からなくなる。観測を汚さないための逃げ道。
     let dry_run = cli.flag("dry-run");
-    let array = LegArray::connect(&cfg.hardware, &cfg.name).map_err(|e| e.to_string())?;
+    let array = LegArray::connect(serial(cfg)?, &cfg.name).map_err(|e| e.to_string())?;
     array
         .wait_anchored(Duration::from_secs(3))
         .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;
     // 現状を掴むために 1 巡ぶん待つ（status は軸ごとに順番に読まれる）。
     std::thread::sleep(Duration::from_millis(
-        cfg.hardware.legs.status_interval_ms * 4,
+        serial(cfg)?.legs.status_interval_ms * 4,
     ));
 
     println!(
@@ -921,12 +936,12 @@ fn restart(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     println!("続けるなら Enter、やめるなら Ctrl-C");
     let _ = read_line();
 
-    let array = LegArray::connect(&cfg.hardware, &cfg.name).map_err(|e| e.to_string())?;
+    let array = LegArray::connect(serial(cfg)?, &cfg.name).map_err(|e| e.to_string())?;
     array
         .wait_anchored(Duration::from_secs(3))
         .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;
     std::thread::sleep(Duration::from_millis(
-        cfg.hardware.legs.status_interval_ms * 4,
+        serial(cfg)?.legs.status_interval_ms * 4,
     ));
 
     println!();
@@ -950,7 +965,7 @@ fn restart(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         .wait_anchored(Duration::from_secs(5))
         .map_err(|e| format!("{e}（再起動後にモータが応答していません）"))?;
     std::thread::sleep(Duration::from_millis(
-        cfg.hardware.legs.status_interval_ms * 4,
+        serial(cfg)?.legs.status_interval_ms * 4,
     ));
 
     println!();
@@ -1054,7 +1069,7 @@ fn pid(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         torque_limit: gain("set-torque-limit")?.map(|v| v as i16),
     };
     let writing = !set.is_empty();
-    let array = LegArray::connect(&cfg.hardware, &cfg.name).map_err(|e| e.to_string())?;
+    let array = LegArray::connect(serial(cfg)?, &cfg.name).map_err(|e| e.to_string())?;
     array
         .wait_anchored(Duration::from_secs(3))
         .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;

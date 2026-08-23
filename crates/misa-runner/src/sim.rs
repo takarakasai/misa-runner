@@ -129,7 +129,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         let outgoing = crate::snapshot::command(
             &layout,
             &out.targets,
-            cfg.hardware.legs.default_max_speed_rad_s,
+            cfg.hardware.default_max_speed_rad_s(),
             out.leg_mode == misa_hal::joint::JointMode::Idle,
         );
         if let Some(rec) = recorder.as_ref() {
@@ -215,7 +215,7 @@ fn jointvec_from(obs: &misa_core::Observation) -> crate::jointvec::JointVec {
 fn crouch_pose(cfg: &AppConfig) -> [[f64; 3]; 4] {
     let mut q = [[0.0; 3]; 4];
     for (slot, leg) in misa_hal::joint::LegSlot::ALL.iter().zip(q.iter_mut()) {
-        let Some(bus) = cfg.hardware.bus_for(*slot) else {
+        let Some(bus) = cfg.hardware.serial().ok().and_then(|h| h.bus_for(*slot)) else {
             continue;
         };
         for (m, dst) in bus.motors.iter().zip(leg.iter_mut()) {
