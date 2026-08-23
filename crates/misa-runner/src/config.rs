@@ -1,10 +1,10 @@
-//! アプリ設定（TOML）。実機設定 (`namiashi_hal::config`) と同じファイルに同居する。
+//! アプリ設定（TOML）。実機設定 (`misa_hal::config`) と同じファイルに同居する。
 //!
 //! ファイル 1 枚に `[hardware]` と `[control] [gait] [teleop] [poses]` を並べる
 //! 形にしてある。配線とチューニングを別ファイルに分けると、現場で片方だけ
 //! 持ち出して食い違う。
 
-use namiashi_hal::config::HardwareConfig;
+use misa_hal::config::HardwareConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::teleop::TeleopConfig;
@@ -145,7 +145,7 @@ pub struct ControlConfig {
 }
 
 fn default_model_path() -> String {
-    "models/namiashi.misa".into()
+    "models/namiashi/namiashi.misa".into()
 }
 fn default_rate_hz() -> f64 {
     200.0

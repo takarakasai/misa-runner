@@ -8,7 +8,7 @@
 //! エンドポイント設定に依存する近似で、表示用と割り切るのが `sbus-protocol`
 //! の方針（`raw_to_us` のドキュメント）だから。
 
-use namiashi_hal::sbus::{SbusState, CHANNELS};
+use misa_hal::sbus::{SbusState, CHANNELS};
 use serde::{Deserialize, Serialize};
 
 /// S.BUS の生値の下限・中央・上限（`sbus_protocol::{RAW_MIN, RAW_MAX}` 準拠）。
@@ -408,7 +408,7 @@ impl Teleop {
     pub fn new(
         cfg: TeleopConfig,
         gait: &crate::config::GaitTuning,
-        arm: &namiashi_hal::config::ArmConfig,
+        arm: &misa_hal::config::ArmConfig,
     ) -> Self {
         Self {
             cfg,
@@ -523,8 +523,8 @@ mod tests {
     use super::*;
     use crate::config::GaitTuning;
 
-    fn arm_cfg() -> namiashi_hal::config::ArmConfig {
-        namiashi_hal::config::HardwareConfig::default().arm
+    fn arm_cfg() -> misa_hal::config::ArmConfig {
+        misa_hal::config::HardwareConfig::default().arm
     }
 
     fn state_with(channels: &[(usize, u16)]) -> SbusState {
@@ -540,8 +540,8 @@ mod tests {
         s
     }
 
-    fn sbus_counters(frames: u64) -> namiashi_hal::sbus::Counters {
-        namiashi_hal::sbus::Counters {
+    fn sbus_counters(frames: u64) -> misa_hal::sbus::Counters {
+        misa_hal::sbus::Counters {
             frames,
             ..Default::default()
         }

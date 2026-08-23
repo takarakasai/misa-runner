@@ -155,7 +155,7 @@ impl Robot {
         let mut q = JointVec::zeros();
         q.arm = arm;
         for (name, q_ik) in out.iter_joint_targets() {
-            let Some((leg, k)) = namiashi_hal::joint::lookup(name) else {
+            let Some((leg, k)) = misa_hal::joint::lookup(name) else {
                 log::warn!("歩容が知らない関節 {name} を出力しました");
                 continue;
             };
@@ -344,9 +344,9 @@ mod tests {
         );
     }
 
-    /// 同梱モデルの絶対パス（`crates/namiashi-runner` から見たリポジトリルート）。
+    /// 同梱モデルの絶対パス（`crates/misa-runner` から見たリポジトリルート）。
     fn shipped_model_path() -> String {
-        format!("{}/../../models/namiashi.misa", env!("CARGO_MANIFEST_DIR"))
+        format!("{}/../../models/namiashi/namiashi.misa", env!("CARGO_MANIFEST_DIR"))
     }
 
     #[test]

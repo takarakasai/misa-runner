@@ -1,6 +1,6 @@
-//! `models/` の 2 つのファイルがずれていないかを見張る。
+//! `models/namiashi/` の 2 つのファイルがずれていないかを見張る。
 //!
-//! `models/` は [`namiashi_description`] の submodule で、同じ情報が 2 箇所にある:
+//! `models/namiashi/` は [`namiashi_description`] の submodule で、同じ情報が 2 箇所にある:
 //!
 //! | | |
 //! |---|---|
@@ -32,7 +32,7 @@ use std::path::PathBuf;
 const ANGLE_TOL: f64 = 1e-6;
 
 fn models_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/namiashi")
 }
 
 fn load(rel: &str) -> toml::Value {
@@ -40,7 +40,7 @@ fn load(rel: &str) -> toml::Value {
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
             "{} を読めません: {e}\n\
-             models/ は namiashi_description の submodule です。空なら\n\
+             models/namiashi は namiashi_description の submodule です。空なら\n\
                  git submodule update --init\n\
              を実行してください。",
             path.display()

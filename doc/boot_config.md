@@ -590,7 +590,7 @@ graphical.target  shutdown.target  systemd-update-utmp-runlevel.service
 **縮むのは `systemd-analyze` の表示値だけ**。`NetworkManager.service`（36 行）を丸ごと
 オーバーライドするとベンダー更新が反映されなくなるため、割に合わないと判断した。
 
-将来 `namiashi.service` を作る場合も `After=basic.target` 等で直接順序を指定すれば
+将来 `misa-run.service` を作る場合も `After=basic.target` 等で直接順序を指定すれば
 `multi-user.target` の到達時刻とは無関係に起動する。
 
 ## 案F: 不要サービスの無効化【適用済み・効果は不確定】
@@ -844,11 +844,11 @@ Linux 側からは観測できない）。
   ├─ カーネル → ユーザースペース            1.495 s
   ├─ CH348 の tty が生える                  3.398 s  (+1.903 s)  ← 支配項
   ├─ multi-user.target                      3.489 s  (+0.091 s)
-  └─ namiashi 起動 → 初フレーム処理                 (+0.145 s)  実測
+  └─ misa-run 起動 → 初フレーム処理                 (+0.145 s)  実測
                                            ≈ 3.63 s + U-Boot
 ```
 
-`namiashi` 自身の起動（設定 + モデル読み込み + ポート open + スレッド開始 +
+`misa-run` 自身の起動（設定 + モデル読み込み + ポート open + スレッド開始 +
 初フレーム）は **0.145 秒**。ここは既に小さく、削る対象ではない。
 
 #### 1.764 秒の正体は USB 列挙ではなくドライバのロード待ち
@@ -887,18 +887,18 @@ tty は約 **1.84 s**。`/etc/initramfs-tools/modules` に入れて initrd に�
 # 案2: /etc/initramfs-tools/modules に "ch9344" → update-initramfs -u（さらに 0.2 s 速い）
 ```
 
-**② `namiashi.service` の起動契機を変える。** 現在のテンプレートは
+**② `misa-run.service` の起動契機を変える。** 現在のテンプレートは
 `WantedBy=multi-user.target` なので **3.489 s まで待つ**。
-①だけやっても tty が早く出るだけで namiashi は待たされ、**効果はゼロ**。
+①だけやっても tty が早く出るだけで misa-run は待たされ、**効果はゼロ**。
 device ユニットに引かせれば tty 生成と同時に起動できる。
 
 ```
-現状        3.398 s (tty) → 3.489 s (multi-user) → namiashi
-① だけ      1.84 s  (tty) → 3.489 s (multi-user) → namiashi    効果なし
-① + ②       1.84 s  (tty) → namiashi                           -1.65 s
+現状        3.398 s (tty) → 3.489 s (multi-user) → misa-run
+① だけ      1.84 s  (tty) → 3.489 s (multi-user) → misa-run    効果なし
+① + ②       1.84 s  (tty) → misa-run                           -1.65 s
 ```
 
-> **訂正。** 調査の途中で「`namiashi.service` の起動契機を変えても 91 ms 程度」と
+> **訂正。** 調査の途中で「`misa-run.service` の起動契機を変えても 91 ms 程度」と
 > 見積もったが、これは誤り。tty が 3.398 s に出る**現状での**差でしかない。
 > ①で tty が早く出るようになると律速が `multi-user.target` 側へ移るため、
 > ②の取り分が 1.6 秒に化ける。**①②は片方ずつ評価すると両方とも「効果が薄い」
@@ -922,10 +922,10 @@ device ユニットに引かせれば tty 生成と同時に起動できる。
 
 #### 保留の理由
 
-**②は `namiashi.service` の構造変更**であり、2026-08-21 時点で機体は組み立て中・
+**②は `misa-run.service` の構造変更**であり、2026-08-21 時点で機体は組み立て中・
 サービスは未インストール。①は単独では効果が無く、②とセットで初めて意味を持つ。
 
-したがって **`namiashi.service` を投入するときに①②を一緒に設計する**。
+したがって **`misa-run.service` を投入するときに①②を一緒に設計する**。
 そのとき `BindsTo=` / `After=` に加えて `WantedBy=` をどうするかが論点になる。
 
 見込みは①②で **-1.65 s**、カーネル基準 3.63 s → 約 2.0 s。

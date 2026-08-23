@@ -1,7 +1,7 @@
 # モータ / ポート対応表
 
 `config/namiashi.toml` の内容をそのまま表にしたもの。**校正で値が変わったら
-`namiashi check` の出力が最新**（あちらは設定から毎回生成している）。ここは
+`misa-run check` の出力が最新**（あちらは設定から毎回生成している）。ここは
 ベンチで手元に置く紙の代わり。
 
 ## CH348 の UART 割り当て
@@ -32,7 +32,7 @@
 
 **`/dev/ttyCH9344USB*` の番号は当てにしない。** 列挙順で決まるので物理 UART
 番号とは無関係。アプリは ch9344 の `GETUARTINDEX` ioctl で引いている
-（`namiashi ports` で対応が見える）。
+（`misa-run ports` で対応が見える）。
 
 ## 脚モータ 12 軸（LKMTech MG4005）
 
@@ -317,7 +317,7 @@
 ## 異常ビット（`errorState`）
 
 マニュアル §1 の `errorState` は 1 ビットずつ意味が違い、**対処もまるで
-別物**。`namiashi run` は日本語で出す（生値だけでは判断できない）。
+別物**。`misa-run run` は日本語で出す（生値だけでは判断できない）。
 
 | bit | 値 | 意味 | 対処 |
 |---|---|---|---|
@@ -339,7 +339,7 @@
 消すのは人が原因を潰したと判断したときだけ:
 
 ```sh
-./target/release/namiashi calib clear-error [--leg FL]
+./target/release/misa-run calib clear-error [--leg FL]
 ```
 
 `0x9B` の応答は**「消した後の状態」**であって成功フラグではないので、
@@ -433,7 +433,7 @@ RS485 のマニュアルに閾値を読む・書くコマンドは無い（§18/
 
 以下は「電源再投入をバスから起こしたい」別の用途のために残す。
 
-`namiashi calib restart [--leg FL] [--joint calf]` で試せる。
+`misa-run calib restart [--leg FL] [--joint calf]` で試せる。
 **必ず伏せ姿勢で。** 原点がリセットされるので、伏せ以外だと 12 軸の
 ゼロ点が飛ぶ。前後の異常状態と Δq(model) を並べて出す。
 

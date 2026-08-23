@@ -6,8 +6,8 @@
 
 use std::time::{Duration, Instant};
 
-use namiashi_hal::imu::ImuSample;
-use namiashi_hal::joint::JOINT_NAMES;
+use misa_hal::imu::ImuSample;
+use misa_hal::joint::JOINT_NAMES;
 
 use crate::config::AppConfig;
 use crate::controller::{Controller, State};
@@ -152,7 +152,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
 /// `q_motor = 0`。つまり **`zero_pose_rad` の並びが伏せ姿勢**。
 fn crouch_pose(cfg: &AppConfig) -> JointVec {
     let mut q = JointVec::zeros();
-    for (slot, leg) in namiashi_hal::joint::LegSlot::ALL
+    for (slot, leg) in misa_hal::joint::LegSlot::ALL
         .iter()
         .zip(q.legs.iter_mut())
     {

@@ -6,11 +6,11 @@
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-use namiashi_hal::ch348;
-use namiashi_hal::config::HardwareConfig;
-use namiashi_hal::imu::ImuReader;
-use namiashi_hal::legs::LegArray;
-use namiashi_hal::sbus::{SbusReceiver, SbusState, CHANNELS};
+use misa_hal::ch348;
+use misa_hal::config::HardwareConfig;
+use misa_hal::imu::ImuReader;
+use misa_hal::legs::LegArray;
+use misa_hal::sbus::{SbusReceiver, SbusState, CHANNELS};
 
 use crate::config::AppConfig;
 use crate::jointvec::JointVec;
@@ -56,7 +56,7 @@ fn role_of(uart: u16) -> &'static str {
 /// どれなのか分からず、立ち上げで切り分けられない。受信機はフェイルセーフ中でも
 /// フレームを送り続ける（`sbus/doc/spec.md` §6.2: 送信機 OFF でも 66.5 fps 継続）
 /// ので、**fps が出ていることはリンクが生きている証拠にならない。**
-fn link_status(state: &namiashi_hal::sbus::SbusState, ok: bool) -> String {
+fn link_status(state: &misa_hal::sbus::SbusState, ok: bool) -> String {
     if ok {
         return "link=OK".to_string();
     }
@@ -87,7 +87,7 @@ fn link_status(state: &namiashi_hal::sbus::SbusState, ok: bool) -> String {
 ///
 /// どちらも **S.BUS2 でないと来ない**（S.BUS1 にはテレメトリスロットが無い）。
 /// 未受信は `---` で、0 V と紛れないようにする。
-fn telemetry(state: &namiashi_hal::sbus::SbusState) -> String {
+fn telemetry(state: &misa_hal::sbus::SbusState) -> String {
     fn volts(value: Option<f32>) -> String {
         match value {
             Some(v) => format!("{v:.1}V"),
@@ -206,7 +206,7 @@ fn channel_roles(t: &TeleopConfig) -> [&'static str; CHANNELS] {
 /// 再描画表示の全行。
 ///
 /// レイアウトは `board/nm_board/ch348/test/sbus_monitor.py` を踏襲した
-/// （ヘッダ + 2 列 8 行のチャンネル表）。そこに namiashi 側の**解釈結果**を
+/// （ヘッダ + 2 列 8 行のチャンネル表）。そこにこちら側の**解釈結果**を
 /// 足してある。生値だけ見ても「その値でロボットが何をするつもりか」は
 /// 分からず、立ち上げで確かめたいのは後者だから。
 fn monitor_lines(
@@ -219,7 +219,7 @@ fn monitor_lines(
     let rule = "-".repeat(76);
     let mut out = vec![
         format!(
-            "namiashi sbus  {port}  100000 8E2   {:5.1} fps  frames={} slots={} desync={}",
+            "misa-run sbus  {port}  100000 8E2   {:5.1} fps  frames={} slots={} desync={}",
             state.fps, c.frames, c.slots, c.desync_bytes
         ),
         // link= は敢えて固定幅にしない。埋めると無駄な空白が空くうえ、
@@ -673,7 +673,7 @@ fn print_wiring(hw: &HardwareConfig) {
     }
     println!("  IMU {}", hw.imu.port.label());
     println!("  S.BUS {}", hw.sbus.port.label());
-    let arm = namiashi_hal::arm::connect(&hw.arm).ok();
+    let arm = misa_hal::arm::connect(&hw.arm).ok();
     let driven = arm.as_ref().map(|a| a.is_app_driven()).unwrap_or(false);
     println!(
         "  腕 {} protocol={:?} アプリから駆動={}",

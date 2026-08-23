@@ -76,7 +76,7 @@ planned を半透明のゴーストで重ねる。
 ### PC 側
 
 モデルは [`namiashi_description`](https://github.com/takarakasai/namiashi_description)
-にある。**SBC から scp する必要は無い**（SBC 側の `models/` も同じものの submodule）。
+にある。**SBC から scp する必要は無い**（SBC 側の `models/namiashi/` も同じものの submodule）。
 
 ```sh
 git clone https://github.com/takarakasai/namiashi_description.git
@@ -100,8 +100,8 @@ cd articara && cargo build --release --features viz
 ### 1. SBC で配信を始める
 
 ```sh
-cd ~/work/namiashi-runner
-./target/release/namiashi legs --secs 0 --viz --config config/namiashi.toml
+cd ~/work/misa-runner
+./target/release/misa-run legs --secs 0 --viz --config config/namiashi.toml
 ```
 
 `--secs 0`（または `--forever`）で Ctrl-C まで回り続ける。
@@ -201,7 +201,7 @@ python3 doc/scout-check.py
 
 ```sh
 # SBC
-./target/release/namiashi legs --secs 0 --viz --viz-endpoint tcp/0.0.0.0:7447 \
+./target/release/misa-run legs --secs 0 --viz --viz-endpoint tcp/0.0.0.0:7447 \
     --config config/namiashi.toml
 # articara のエンドポイント欄: tcp/192.168.0.21:7447
 ```

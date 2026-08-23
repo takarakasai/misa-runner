@@ -4,7 +4,7 @@
 # 通常の依存は GitHub の git 依存なので、SBC でも新しい PC でも
 # `git clone && cargo build` だけで立ち上がる。**このスクリプトは不要。**
 #
-# 要るのは「namiashi-runner と一緒に misa-actuator や sbus も直しながら試す」
+# 要るのは「misa-runner と一緒に misa-actuator や sbus も直しながら試す」
 # ときだけ。`.cargo/config.toml` に `[patch]` を書き出して、ビルドがローカルの
 # チェックアウトを見るようにする。
 #

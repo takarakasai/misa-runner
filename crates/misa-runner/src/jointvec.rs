@@ -2,10 +2,10 @@
 //!
 //! ゲイト・ポーズ再生・チキンヘッドはどれも「関節角の集合」を作って渡すだけ
 //! なので、その入れ物を 1 個に決めてしまう。並びは
-//! [`namiashi_hal::joint::JOINT_NAMES`]（FL, FR, RL, RR × hip, thigh, calf）
+//! [`misa_hal::joint::JOINT_NAMES`]（FL, FR, RL, RR × hip, thigh, calf）
 //! の後ろに腕を足したもの。
 
-use namiashi_hal::joint::{LegSlot, ARM_JOINT_NAME, JOINT_NAMES};
+use misa_hal::joint::{LegSlot, ARM_JOINT_NAME, JOINT_NAMES};
 
 /// 脚 12 軸 + 腕 1 軸。
 pub const DOF: usize = 13;
@@ -40,7 +40,7 @@ impl JointVec {
         if joint_name == ARM_JOINT_NAME {
             return Some(self.arm);
         }
-        namiashi_hal::joint::lookup(joint_name).map(|(leg, k)| self.legs[leg.index()][k])
+        misa_hal::joint::lookup(joint_name).map(|(leg, k)| self.legs[leg.index()][k])
     }
 
     /// 関節名で書く。未知の名前なら `false` を返して何もしない。
@@ -49,7 +49,7 @@ impl JointVec {
             self.arm = value;
             return true;
         }
-        match namiashi_hal::joint::lookup(joint_name) {
+        match misa_hal::joint::lookup(joint_name) {
             Some((leg, k)) => {
                 self.legs[leg.index()][k] = value;
                 true

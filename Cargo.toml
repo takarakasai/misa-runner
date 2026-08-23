@@ -1,11 +1,14 @@
-# namiashi-runner — 実機 namiashi（LKMTech ×12 + RC サーボ ×1）の制御アプリ。
+# misa-runner — 四脚ロボットの実機制御アプリ。
+#
+# ロボット 1 台は「モデル（.misa）+ プロファイル（TOML）」で定義する。1 台目は
+# namiashi（LKMTech ×12 + RC サーボ ×1、CH348 上の RS485 ×4）。
 #
 # 依存はすべて GitHub の公開リポジトリへの git 依存。新しいマシン（SBC など）では
 # `git clone && cargo build` だけで立ち上がる。ローカルの兄弟チェックアウトで
 # 併行開発したいときは `./scripts/dev-siblings.sh` を使う。
 [workspace]
 resolver = "2"
-members = ["crates/namiashi-hal", "crates/namiashi-runner"]
+members = ["crates/misa-hal", "crates/misa-runner"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,7 +17,7 @@ license = "Apache-2.0"
 authors = ["Takara Kasai <takara.kasai@gmail.com>"]
 
 [workspace.dependencies]
-namiashi-hal = { path = "crates/namiashi-hal" }
+misa-hal = { path = "crates/misa-hal" }
 
 # ── 自前の crate（git 依存）──
 #

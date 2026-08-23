@@ -1,8 +1,13 @@
-//! namiashi 実機のハードウェア抽象層。
+//! 四脚ロボット実機のハードウェア抽象層。
 //!
-//! 実機の I/F は `nm_board/ch348` rev2 基板（CH348L, USB-C → 8ch UART）で確定
-//! している。本 crate はその 8 本の UART をそれぞれの役割に束ねる層で、上位
-//! （`namiashi-runner`）からはモデルの関節名／関節角だけが見えるようにする。
+//! 上位（`misa-runner`）からはモデルの関節名／関節角だけが見えるようにする層。
+//! 実機との差（バスの種類・モータ id・符号・ゼロ点・可動域）はここと
+//! [`config`] に閉じ込める。
+//!
+//! # namiashi（1 台目）の構成
+//!
+//! I/F は `nm_board/ch348` rev2 基板（CH348L, USB-C → 8ch UART）で確定して
+//! いる。本 crate はその 8 本の UART をそれぞれの役割に束ねる。
 //!
 //! ```text
 //!  UART0..3  RS485  LEG1..4  ─ LKMTech V3 ×3 (hip/thigh/calf)   → legs::LegArray

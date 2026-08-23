@@ -1,17 +1,17 @@
 [package]
-name = "namiashi-runner"
-description = "四脚ロボット namiashi の実機制御アプリ: プロポ (S.BUS) 操縦、歩容切替、ポーズ再生。"
+name = "misa-runner"
+description = "四脚ロボットの実機制御アプリ: プロポ (S.BUS) 操縦、歩容切替、ポーズ再生。対応機は robots/ のプロファイルで決まる。"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
 [[bin]]
-name = "namiashi"
+name = "misa-run"
 path = "src/main.rs"
 
 [dependencies]
-namiashi-hal.workspace = true
+misa-hal.workspace = true
 libc.workspace = true
 misarta.workspace = true
 quadruped-gait.workspace = true

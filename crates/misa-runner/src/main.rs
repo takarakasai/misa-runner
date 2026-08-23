@@ -1,13 +1,13 @@
-//! 四脚ロボット namiashi の実機制御アプリ。
+//! 四脚ロボットの実機制御アプリ。対応機は robots/ のプロファイルで決まる。
 //!
 //! ```text
-//! namiashi ports                    CH348 のポートを UART 番号つきで一覧
-//! namiashi config [--out PATH]      既定設定を TOML で書き出す
-//! namiashi check                    設定とモデルを検証（実機に触れない）
-//! namiashi dump [--gait ..] [--vx]  歩容を実機なしで再生し関節角を検証
-//! namiashi calib <sub>              符号・ゼロ点・可動域を実機で確定する
-//! namiashi imu | sbus | legs        実機の受信 / 状態だけを観測（動かさない）
-//! namiashi run                      制御ループ（プロポ操縦）
+//! misa-run ports                    CH348 のポートを UART 番号つきで一覧
+//! misa-run config [--out PATH]      既定設定を TOML で書き出す
+//! misa-run check                    設定とモデルを検証（実機に触れない）
+//! misa-run dump [--gait ..] [--vx]  歩容を実機なしで再生し関節角を検証
+//! misa-run calib <sub>              符号・ゼロ点・可動域を実機で確定する
+//! misa-run imu | sbus | legs        実機の受信 / 状態だけを観測（動かさない）
+//! misa-run run                      制御ループ（プロポ操縦）
 //! ```
 //!
 //! 立ち上げの順番は上から下。`check` → `ports` → `imu` / `sbus` / `legs` が
@@ -42,7 +42,7 @@ fn main() {
 
     if let Err(e) = dispatch(&cli) {
         // **起動条件が整っていないだけの失敗は 75 で返す。**
-        // systemd はこれだけを再起動の対象にする（`namiashi.service`）。
+        // systemd はこれだけを再起動の対象にする（`misa-run.service`）。
         // 制御ループ中のクラッシュ（1）で自動再起動すると脚が再び動き出す。
         match e.strip_prefix(runner::RETRYABLE) {
             Some(msg) => {
@@ -88,7 +88,7 @@ fn dispatch(cli: &Cli) -> Result<(), String> {
             runner::run(cfg, robot, opts)
         }
         other => Err(format!(
-            "未知のコマンド {other:?}。`namiashi --help` を見てください"
+            "未知のコマンド {other:?}。`misa-run --help` を見てください"
         )),
     }
 }
@@ -157,10 +157,10 @@ fn write_config(cli: &Cli) -> Result<(), String> {
 
 fn print_help() {
     println!(
-        r#"namiashi — 四脚ロボット namiashi の実機制御アプリ
+        r#"misa-run — 四脚ロボットの実機制御アプリ
 
 使い方:
-  namiashi <コマンド> [オプション]
+  misa-run <コマンド> [オプション]
 
 コマンド:
   ports                     CH348 のポートを物理 UART 番号つきで一覧（何も開かない）
@@ -239,13 +239,13 @@ run のオプション:
   --status S                状態表示の間隔 [s]（0 で表示しない、既定 1）
 
 立ち上げの順番:
-  namiashi check  →  ports  →  imu / sbus / legs
+  misa-run check  →  ports  →  imu / sbus / legs
     →  calib scan  →  calib range/move（12 軸ぶん）  →  calib zero  →  run
 
 articara で見る:
-  1) namiashi dump --gait trot --vx 0.1 --secs 60 --realtime --viz \
+  1) misa-run dump --gait trot --vx 0.1 --secs 60 --realtime --viz \
        --viz-endpoint tcp/127.0.0.1:7447
-  2) 別端末で articara を起動しモデル models/namiashi.misa を開く
+  2) 別端末で articara を起動しモデル models/namiashi/namiashi.misa を開く
      （cd ../articara && cargo run --release --features viz）
   3) Live gait feed パネルで同じキー / エンドポイントを入れて Start
 "#

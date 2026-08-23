@@ -4,7 +4,7 @@
 //! `viz_feed::VizFeedState`）で、`quadruped_gait::viz::GaitVizFrame` を JSON で
 //! 待っている。実装契約は quadruped-gait の `doc/viz_publisher.md` と
 //! `quadruped-gait/src/viz.rs` のモジュールドキュメントが正典。
-//! articara 側で namiashi のモデルを開いておけば、フレームの 12 関節が
+//! articara 側で対象ロボットのモデルを開いておけば、フレームの 12 関節が
 //! 名前（`FL_hip_joint` …）で該当関節に入る。
 //!
 //! # 2 ストリーム
@@ -396,8 +396,8 @@ mod tests {
 
         let cfg = VizConfig {
             enabled: true,
-            key_planned: "namiashi/viztest/planned".into(),
-            key_measured: "namiashi/viztest/measured".into(),
+            key_planned: "misa/viztest/planned".into(),
+            key_measured: "misa/viztest/measured".into(),
             rate_hz: 1000.0,
             endpoint: None,
         };

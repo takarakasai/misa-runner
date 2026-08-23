@@ -1,6 +1,6 @@
 //! 実機の制御ループ。
 //!
-//! 周期の考え方は [`namiashi_hal::legs`] のとおり: 脚バス 4 本はそれぞれ自由
+//! 周期の考え方は [`misa_hal::legs`] のとおり: 脚バス 4 本はそれぞれ自由
 //! 走行していて、このループは共有スロットに目標を書き最新値を読むだけ。
 //! したがってここで守るべきは「一定周期で回ること」だけで、バスの応答を
 //! 待つ必要はない。
@@ -8,12 +8,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use namiashi_hal::arm::ArmServo;
-use namiashi_hal::ch348::PortMap;
-use namiashi_hal::imu::ImuReader;
-use namiashi_hal::joint::{JointCommand, JointMode, LegSlot, LEG_JOINT_KINDS};
-use namiashi_hal::legs::{BusRequest, LegArray};
-use namiashi_hal::sbus::SbusReceiver;
+use misa_hal::arm::ArmServo;
+use misa_hal::ch348::PortMap;
+use misa_hal::imu::ImuReader;
+use misa_hal::joint::{JointCommand, JointMode, LegSlot, LEG_JOINT_KINDS};
+use misa_hal::legs::{BusRequest, LegArray};
+use misa_hal::sbus::SbusReceiver;
 
 use crate::config::AppConfig;
 use crate::controller::{Controller, State};
@@ -47,7 +47,7 @@ impl Hardware {
         let sbus =
             SbusReceiver::connect_with(&cfg.hardware.sbus, &map).map_err(|e| e.to_string())?;
         log::info!("S.BUS → {}", sbus.port());
-        let arm = namiashi_hal::arm::connect(&cfg.hardware.arm).map_err(|e| e.to_string())?;
+        let arm = misa_hal::arm::connect(&cfg.hardware.arm).map_err(|e| e.to_string())?;
         Ok(Self {
             legs,
             imu,
@@ -118,7 +118,7 @@ fn zero_multiturn_once(cfg: &AppConfig, hw: &Hardware) -> Result<(), String> {
     /// tmpfs で 1777。**再起動で必ず消える**のがこの仕組みの土台。
     /// `/run` は root:root 755 でサービスユーザ（takara）が書けない。
     /// `/tmp` はディスク上のこともあり、再起動で消える保証がない。
-    const MARKER: &str = "/dev/shm/namiashi-multiturn-zeroed";
+    const MARKER: &str = "/dev/shm/misa-multiturn-zeroed-namiashi";
     const SETTLE: Duration = Duration::from_millis(300);
 
     if !cfg.control.zero_multiturn_on_boot {
@@ -279,7 +279,7 @@ impl Watch {
                     out.push(format!(
                         "{} {} {:+.1}°（範囲 [{:+.0}, {:+.0}]）",
                         slot.prefix(),
-                        namiashi_hal::joint::LEG_JOINT_KINDS[k],
+                        misa_hal::joint::LEG_JOINT_KINDS[k],
                         m.to_degrees(),
                         lo.to_degrees(),
                         hi.to_degrees()
@@ -307,7 +307,7 @@ impl Watch {
                 "{:.3}rad({} {})",
                 self.worst,
                 leg.prefix(),
-                namiashi_hal::joint::LEG_JOINT_KINDS[k]
+                misa_hal::joint::LEG_JOINT_KINDS[k]
             ),
             None => "-".to_string(),
         };
@@ -669,7 +669,7 @@ fn log_status(
         log::error!(
             "  異常: {} {} **{}**（0x{:02X}）{:.1} V / {:.0} °C",
             leg.prefix(),
-            namiashi_hal::joint::LEG_JOINT_KINDS[*k],
+            misa_hal::joint::LEG_JOINT_KINDS[*k],
             st.describe(),
             st.error_raw,
             st.voltage_v,
@@ -680,7 +680,7 @@ fn log_status(
     if !faults.is_empty() && !*fault_hint_shown {
         *fault_hint_shown = true;
         log::error!(
-            "  原因を取り除いてから `namiashi calib clear-error` で消せます\
+            "  原因を取り除いてから `misa-run calib clear-error` で消せます\
              （原因が残っている間は消えません — マニュアル §2）"
         );
     }

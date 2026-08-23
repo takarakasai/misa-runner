@@ -1,16 +1,16 @@
-# namiashi 制御ループの systemd ユニット
+# misa-run 制御ループの systemd ユニット
 #
 # インストール:
-#   sudo cp ~/work/namiashi-runner/doc/namiashi.service /etc/systemd/system/
+#   sudo cp ~/work/misa-runner/doc/misa-run.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
-#   sudo systemctl start namiashi        # 手動起動で試す
-#   journalctl -u namiashi -f            # ログを見る
+#   sudo systemctl start misa-run        # 手動起動で試す
+#   journalctl -u misa-run -f            # ログを見る
 #
 # 電源投入で自動起動させるのは、手動起動で挙動を確認してから:
-#   sudo systemctl enable namiashi
+#   sudo systemctl enable misa-run
 #
 # 停止は必ず systemctl で（SIGTERM が脱力シーケンスに入る）:
-#   sudo systemctl stop namiashi
+#   sudo systemctl stop misa-run
 #
 # 設計の根拠は doc/runtime_tuning.md 「RT 優先度の付与」を参照。
 #
@@ -36,14 +36,14 @@
 #   3. SBC の電源を入れる（enable 済みなら自動起動）。
 #      **本番会場では PC を繋げないので enable は必須。**
 #      2 が済んでいなくても、済ませた時点で自動的に立ち上がる（下記 Restart= 参照）。
-#   4. ベンチなら `journalctl -u namiashi -f` で
+#   4. ベンチなら `journalctl -u misa-run -f` で
 #      「マルチターン原点を張り直しました」と
 #      「マルチターン原点は伏せ姿勢と整合しています」を確認してから CH5 を動かす。
 #      本番会場では PC を繋げないので、ここは 1 の姿勢を守ることで担保する。
 
 [Unit]
-Description=namiashi quadruped control loop
-Documentation=file:///home/takara/work/namiashi-runner/doc/runtime_tuning.md
+Description=misa-run quadruped control loop (robot: namiashi)
+Documentation=file:///home/takara/work/misa-runner/doc/runtime_tuning.md
 
 # CH348 の tty が生えてから起動する。ch9344 は USB 接続時に udev がロードする。
 # BindsTo により、USB を抜くとサービスも停止する。
@@ -67,8 +67,8 @@ StartLimitIntervalSec=0
 Type=simple
 User=takara
 SupplementaryGroups=dialout
-WorkingDirectory=/home/takara/work/namiashi-runner
-ExecStart=/home/takara/work/namiashi-runner/target/release/namiashi run --config config/namiashi.toml
+WorkingDirectory=/home/takara/work/misa-runner
+ExecStart=/home/takara/work/misa-runner/target/release/misa-run run --config config/namiashi.toml
 
 # --- リアルタイム優先度 ---
 # systemd が付与するので、アプリ側に CAP_SYS_NICE も rtprio 制限も不要。
@@ -82,8 +82,8 @@ CPUSchedulingPriority=50
 LimitRTPRIO=95
 LimitMEMLOCK=infinity
 
-# 脚バスの二重掴みは /run/lock/namiashi-legs.lock の flock で防いでいる
-# （namiashi-hal の LegsLock）。**PrivateTmp= や PrivateDevices=、
+# 脚バスの二重掴みは /run/lock/misa-legs-namiashi.lock の flock で防いでいる
+# （misa-hal の LegsLock）。**PrivateTmp= や PrivateDevices=、
 # ProtectSystem=strict をここに足すと、その名前空間が分かれて排他が黙って
 # 効かなくなる。** 足すなら BindPaths= で /run/lock を共有すること。
 #
@@ -110,7 +110,7 @@ LimitMEMLOCK=infinity
 # 暴走の心配は CH5 の門で頭打ちになる（StartLimitIntervalSec=0 の項も参照）。
 #
 # なお runner 側の 75 / 1 の返し分けはログの区別（「待機:」対「エラー:」）として
-# 残してある。詳細は crates/namiashi-runner/src/runner.rs の RETRYABLE を参照。
+# 残してある。詳細は crates/misa-runner/src/runner.rs の RETRYABLE を参照。
 Restart=on-failure
 RestartSec=3
 
@@ -125,7 +125,7 @@ TimeoutStopSec=15
 #
 # CH348 の tty は 3.398 s、multi-user.target は 3.489 s なので、現状の差は
 # 91 ms しかない。しかし ch9344 を先読みして tty を 1.84 s に前倒しすると、
-# 律速がこの行に移る。namiashi はネットワークにもログインセッションにも
+# 律速がこの行に移る。misa-run はネットワークにもログインセッションにも
 # 依存しないので、multi-user.target を待つ理由は本来無い。
 #
 # 詳細と測定値: doc/boot_config.md「CH348 の tty 生成が 1.764 秒待たされている」

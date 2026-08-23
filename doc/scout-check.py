@@ -3,7 +3,7 @@
 
 zenoh は既定で `224.0.0.224:7446` に scout メッセージを撒く。ここへ**受動的に**
 join して、誰から届いているかを表示するだけのスクリプト。zenoh 本体には触れない
-ので、`namiashi legs --viz` を動かしたまま実行してよい。
+ので、`misa-run legs --viz` を動かしたまま実行してよい。
 
     # SBC と PC の両方で走らせる
     python3 scout-check.py

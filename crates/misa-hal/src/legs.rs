@@ -605,7 +605,7 @@ impl LegsLock {
     /// `/run/lock` は FHS のロック置き場で、どのディストロでも 1777。
     /// `/tmp` を使わないのは、systemd の `PrivateTmp=` を後から付けた瞬間に
     /// 排他が黙って効かなくなるため。
-    const PATH: &'static str = "/run/lock/namiashi-legs.lock";
+    const PATH: &'static str = "/run/lock/misa-legs-namiashi.lock";
 
     fn acquire() -> Result<Self> {
         use std::os::unix::fs::OpenOptionsExt;
@@ -627,7 +627,7 @@ impl LegsLock {
             return Err(Error::Config(format!(
                 "脚バスは既に別のプロセスが使っています。\
                  **2 つ同時に動かすとモータの応答が取り違えられて角度が壊れます。**\
-                 `systemctl status namiashi` と `pgrep -a namiashi` で確認し、\
+                 `systemctl status misa-run` と `pgrep -a misa-run` で確認し、\
                  先に止めてください"
             )));
         }

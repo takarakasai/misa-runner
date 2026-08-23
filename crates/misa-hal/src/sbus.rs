@@ -118,7 +118,7 @@ impl SbusState {
     /// 操縦入力として信用してよいか。
     ///
     /// フェイルセーフ中・フレーム途絶中は false。ここが false のときに
-    /// 速度指令を 0 にするのは上位（`namiashi-runner` の teleop）の仕事。
+    /// 速度指令を 0 にするのは上位（`misa-runner` の teleop）の仕事。
     pub fn is_usable(&self, max_age: Duration) -> bool {
         self.is_fresh(max_age) && !self.failsafe
     }

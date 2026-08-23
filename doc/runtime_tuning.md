@@ -9,7 +9,7 @@ Debian GNU/Linux 11 (bullseye) / Linux 5.15.147-21-a733 / aarch64
 ## 前提
 
 四脚ロボット **namiashi** の制御機として組み込む。制御アプリは
-[`namiashi-runner`](../)（Rust）。
+[`misa-runner`](../)（Rust）。
 
 | | |
 |---|---|
@@ -101,7 +101,7 @@ echo performance | sudo tee /sys/devices/system/cpu/cpufreq/policy*/scaling_gove
 # /etc/systemd/system/cpu-performance.service
 [Unit]
 Description=Pin cpufreq governor to performance (deterministic 500Hz control loop)
-Documentation=file:///home/takara/work/namiashi-runner/doc/runtime_tuning.md
+Documentation=file:///home/takara/work/misa-runner/doc/runtime_tuning.md
 
 [Service]
 Type=oneshot
@@ -202,7 +202,7 @@ cpul zone trip_point_1 = 60000 (passive)  <- cpufreq がここに拘束
 ### 次にやるべきこと: 実アプリでの計測
 
 システム側の合成負荷では (b) の判定ができないため、**さらにシステム設定を変更する前に
-`namiashi` を実際に動かして周波数を観測する**のが順序として正しい。
+`misa-run` を実際に動かして周波数を観測する**のが順序として正しい。
 
 ```sh
 # 別ターミナルで制御ループを回しながら
@@ -218,10 +218,10 @@ done
 - 定常運転中 `cdev` が 0 のまま → IPA は問題にならない。`performance` 固定だけで十分
 - `cdev` が振動する → `step_wise` 化を検討（ファンの問題とセットで評価）
 
-最終的な判断材料は **`namiashi` 側で実測したループ周期**。
+最終的な判断材料は **`misa-run` 側で実測したループ周期**。
 システム側の周波数観測は原因の切り分け用。
 
-**計測器は既に存在する。** `handover.md` §5.5 によれば `namiashi run` の状態行に
+**計測器は既に存在する。** `handover.md` §5.5 によれば `misa-run run` の状態行に
 「遅延最大」が出る。合成ベンチではなくこの数字で判断できる。
 
 なお同§は対策として `chrt -f 50` と performance ガバナを挙げており、
@@ -272,7 +272,7 @@ sudo u-boot-update
 
 `boot_config.md` 案F の続き。案F は**起動時間**の観点で不要サービスを整理したが、
 ここでは**運転中に CPU を奪う常駐プロセス**の観点で棚卸しした。
-到達目標は「`namiashi-runner` + SSH（デバッグ用）だけが動いている状態」。
+到達目標は「`misa-runner` + SSH（デバッグ用）だけが動いている状態」。
 
 調査時点の常駐サービスは 17 個。案F の効果で大物は残っていなかったが、
 **案F で消したはずのものが復活している**ケースが 1 件見つかった。
@@ -514,7 +514,7 @@ initramfs の再生成も成功している）。mask を意図的に選んだ�
 
 ### 残った未整備
 
-**`namiashi.service` は未インストール。これは意図的な判断。**
+**`misa-run.service` は未インストール。これは意図的な判断。**
 
 2026-08-21 時点で**機体を組み立て中**であり、サービス化は時期尚早。
 まず**センサ確認等を手動で実行**して挙動を確かめる段階にある。
@@ -524,22 +524,22 @@ initramfs の再生成も成功している）。mask を意図的に選んだ�
 
 | | 状態 |
 |---|---|
-| ユニットファイル | `doc/namiashi.service`（`systemd-analyze verify` 警告なし） |
-| バイナリ | `namiashi-runner/target/release/namiashi`（2026-08-20 19:12 ビルド） |
+| ユニットファイル | `doc/misa-run.service`（`systemd-analyze verify` 警告なし） |
+| バイナリ | `misa-runner/target/release/misa-run`（2026-08-20 19:12 ビルド） |
 | CH348 | 8 ポート認識（`/dev/ttyCH9344USB0-7`）、`ch9344` ロード済み |
 | 権限 | `takara` は `dialout` + `realtime` に所属、`ulimit -r`=95 |
-| 設定検証 | `namiashi check` → 設定 OK / 関節 18・nq=13 / 配線 FL-RR + IMU(UART5) + S.BUS(UART6) 全て解決、exit=0 |
+| 設定検証 | `misa-run check` → 設定 OK / 関節 18・nq=13 / 配線 FL-RR + IMU(UART5) + S.BUS(UART6) 全て解決、exit=0 |
 
 手動確認に使えるサブコマンド（いずれも脚に指令を送らない）:
 
 ```sh
-cd ~/work/namiashi-runner
-./target/release/namiashi ports              # CH348 のポートを物理 UART 番号つきで一覧
-./target/release/namiashi check              # 設定とモデルの検証（実機に触れない）
-./target/release/namiashi imu   --secs 5     # IMU の値
-./target/release/namiashi sbus  --secs 5     # プロポ入力と解釈結果
-./target/release/namiashi legs  --secs 5     # 脚バスの状態と実効周期（指令は送らない）
-./target/release/namiashi dump               # 歩容を実機なしで再生し可動域を検証
+cd ~/work/misa-runner
+./target/release/misa-run ports              # CH348 のポートを物理 UART 番号つきで一覧
+./target/release/misa-run check              # 設定とモデルの検証（実機に触れない）
+./target/release/misa-run imu   --secs 5     # IMU の値
+./target/release/misa-run sbus  --secs 5     # プロポ入力と解釈結果
+./target/release/misa-run legs  --secs 5     # 脚バスの状態と実効周期（指令は送らない）
+./target/release/misa-run dump               # 歩容を実機なしで再生し可動域を検証
 ```
 
 `sbus` は S.BUS2 のテレメトリ（`Rx-Batt` / `Ext-Volt`）とリンク断の理由
@@ -549,10 +549,10 @@ cd ~/work/namiashi-runner
 インストールは組み立て完了後:
 
 ```sh
-sudo cp ~/work/namiashi-runner/doc/namiashi.service /etc/systemd/system/
+sudo cp ~/work/misa-runner/doc/misa-run.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl start namiashi     # まず手動起動で確認
-sudo systemctl enable namiashi    # 挙動を確認してから自動起動を入れる
+sudo systemctl start misa-run     # まず手動起動で確認
+sudo systemctl enable misa-run    # 挙動を確認してから自動起動を入れる
 ```
 
 `Restart=` の判断（自動復帰させるか）は「判断待ち」のまま。既定は `Restart=no`。
@@ -705,7 +705,7 @@ sudo usermod -aG dialout takara     # 反映には再ログインが必要
 
 ## Rust ツールチェーン
 
-`namiashi-runner` は edition 2024 を使うため **Rust 1.85 以上**が必要
+`misa-runner` は edition 2024 を使うため **Rust 1.85 以上**が必要
 （`handover.md` §5.4）。
 
 | | |
@@ -723,10 +723,10 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ビルド（`handover.md` §5.2）:
 
 ```sh
-cd ~/work/namiashi-runner
+cd ~/work/misa-runner
 cargo build --release --no-default-features    # viz 不要なら軽い方
-./target/release/namiashi check
-./target/release/namiashi ports                # 8 UART の役割付けを確認
+./target/release/misa-run check
+./target/release/misa-run ports                # 8 UART の役割付けを確認
 ```
 
 ビルド時間の見積もりは handover が「4 コアの SBC で 10〜20 分」。本機は 8 コアなので
@@ -842,7 +842,7 @@ impl io::Read for TTYPort {
 
 ### 500 Hz の成立性
 
-> **【2026-08-21 実測により覆った】この節の結論は誤り。** 初通電で `namiashi legs` を
+> **【2026-08-21 実測により覆った】この節の結論は誤り。** 初通電で `misa-run legs` を
 > 測ったところ **1 バスあたり 415〜440 Hz** で、500 Hz に届かなかった。
 > 律速はワイヤ上の時間ではなく **USB の往復レイテンシ**。
 > 次節「初通電での実測」を読むこと。以下は当時の机上計算として残す。
@@ -876,12 +876,12 @@ response_timeout_ms = 5
 ```
 
 **バス側は既に 500 Hz で回っている。** 変更予定なのは `control.rate_hz`（現在 200.0）の方。
-`namiashi-runner/src/config.rs:51` に `control.rate_hz > bus_rate_hz` を弾く検証がある。
+`misa-runner/src/config.rs:51` に `control.rate_hz > bus_rate_hz` を弾く検証がある。
 
 ### 初通電での実測【2026-08-21】— 律速は USB の往復レイテンシ
 
 `handover.md` §2 が「いちばん大きい未知は通信レート」として実測を待っていた項目。
-機体が組み上がり、初めて 12 軸に通電して `namiashi legs --secs 10` を採った。
+機体が組み上がり、初めて 12 軸に通電して `misa-run legs --secs 10` を採った。
 
 ```
 FL  415.8Hz 最悪 6.00ms err=0    q=[+0.304 +0.356 +0.440] T=[32 32 32]°C ok=true
@@ -942,7 +942,7 @@ RR  417.6Hz 最悪 6.02ms err=0    q=[+0.287 +0.459 +0.210] T=[32 33 32]°C ok=t
 1. `lkmotor-driver` の read タイムアウトを締切連動にする（上記パッチ）
 2. `response_timeout_ms` を 5 → 1 程度に下げる
 3. `control.rate_hz` を 200 → 500 に上げる
-4. `namiashi run` の「遅延最大」で確認
+4. `misa-run run` の「遅延最大」で確認
 
 ### 適用状況
 
@@ -952,13 +952,13 @@ RR  417.6Hz 最悪 6.02ms err=0    q=[+0.287 +0.459 +0.210] T=[32 33 32]°C ok=t
 |---|---|
 | チェックアウト | `/home/takara/work/misa-actuator`（`dev-siblings.sh` の想定レイアウト） |
 | ブランチ | `fix/rs485-read-timeout-tracks-deadline` |
-| 分岐元 | `5db57cf` — **`main` の HEAD と `namiashi-runner` の pin が完全一致** していた |
+| 分岐元 | `5db57cf` — **`main` の HEAD と `misa-runner` の pin が完全一致** していた |
 | 変更 | `crates/lkmotor-driver/src/driver.rs` のみ、18 行追加 / 3 行削除 |
 | コミット | ~~**未実施**~~ → **2026-08-21 に `a203ce0` で main へ。push 済み** |
 
 > **2026-08-21: 取り込み完了。** それまで作業ツリーにしか無く、`dev-siblings.sh`
 > がオフだと GitHub の `5db57cf`（未パッチ）を取っていたため、**ビルドしたバイナリ
-> には入っていなかった**。`namiashi-runner` の `Cargo.lock` も `a203ce0` へ更新済み。
+> には入っていなかった**。`misa-runner` の `Cargo.lock` も `a203ce0` へ更新済み。
 >
 > なお「無応答時に 1 周 10 秒」はこのパッチとは**無関係**だった。
 > `response_timeout_ms` を 20 → 200 に変えても総時間が 1.3 秒しか動かず、
@@ -977,7 +977,7 @@ RR  417.6Hz 最悪 6.02ms err=0    q=[+0.287 +0.459 +0.210] T=[32 33 32]°C ok=t
 ```
 $ cargo tree --no-default-features -i lkmotor-driver
 lkmotor-driver v0.1.0 (/home/takara/work/misa-actuator/crates/lkmotor-driver)
-└── namiashi-hal v0.1.0 → namiashi-runner v0.1.0
+└── misa-hal v0.1.0 → misa-runner v0.1.0
 ```
 
 `cargo build --release --no-default-features` 成功。`.cargo/config.toml` の `[patch]` により
@@ -991,11 +991,11 @@ lkmotor-driver v0.1.0 (/home/takara/work/misa-actuator/crates/lkmotor-driver)
 
 ### 影響範囲
 
-`misa-actuator` は別リポジトリで、`namiashi-runner` は SHA で pin している
+`misa-actuator` は別リポジトリで、`misa-runner` は SHA で pin している
 （`Cargo.lock`: `git+https://github.com/takarakasai/misa-actuator.git#5db57cf5...`）。
-反映には misa-actuator 側へのコミット・push と、`namiashi-runner` の pin 更新が必要。
+反映には misa-actuator 側へのコミット・push と、`misa-runner` の pin 更新が必要。
 
-ローカルで試すだけなら `namiashi-runner/scripts/dev-siblings.sh` が
+ローカルで試すだけなら `misa-runner/scripts/dev-siblings.sh` が
 `.cargo/config.toml` に `[patch]` を書き出し、ビルドがローカルチェックアウトを見るようになる。
 
 > `dev-siblings.sh` は既存チェックアウトに対して
@@ -1009,7 +1009,7 @@ lkmotor-driver v0.1.0 (/home/takara/work/misa-actuator/crates/lkmotor-driver)
 
 ## ビルド環境の構築【完了】
 
-`namiashi-runner` を SBC 上でビルドできる状態にするまでに必要だったもの。
+`misa-runner` を SBC 上でビルドできる状態にするまでに必要だったもの。
 
 ### 必要だったパッケージ
 
@@ -1032,7 +1032,7 @@ macOS、`windows-sys` は Windows、`jni-sys` は Android、`js-sys` は wasm、
 ### ローカル兄弟チェックアウト
 
 ```sh
-cd ~/work/namiashi-runner
+cd ~/work/misa-runner
 ./scripts/dev-siblings.sh          # .cargo/config.toml に [patch] を書き出す
 ./scripts/dev-siblings.sh --off    # git 依存へ戻す
 ```
@@ -1043,10 +1043,10 @@ cd ~/work/namiashi-runner
 
 ### 疎通確認の結果（配線前・2026-08-20）
 
-`namiashi check`: 設定 / モデル（関節 18, nq=13）/ ポーズ / シーケンス / プロポ割り当て /
+`misa-run check`: 設定 / モデル（関節 18, nq=13）/ ポーズ / シーケンス / プロポ割り当て /
 配線表まで全て OK。
 
-`namiashi ports`: CH348 の UART 番号解決に成功。
+`misa-run ports`: CH348 の UART 番号解決に成功。
 
 ```
 UART  デバイス                役割
@@ -1064,10 +1064,10 @@ UART  デバイス                役割
 
 配線が未完のため、以下は未実施:
 
-- `namiashi imu --secs 10`
-- `namiashi sbus --secs 10`
-- `namiashi legs --secs 10`
-- `namiashi run` の「遅延最大」による周期実測 — **IPA の判定と 20 ms パッチの効果測定は
+- `misa-run imu --secs 10`
+- `misa-run sbus --secs 10`
+- `misa-run legs --secs 10`
+- `misa-run run` の「遅延最大」による周期実測 — **IPA の判定と 20 ms パッチの効果測定は
   どちらもこれ待ち**
 
 ## PREEMPT_RT の要否判定【調査完了・導入不要と結論】
@@ -1150,7 +1150,7 @@ passive トリップの 60 °C を超えていた。つまり**サーマルス�
 
 **実運用への含意:** 制御ループが動いている間はクロックが上がるため、負荷時の数値
 （206 µs）が実態に近い。ただし**制御ループが 2 ms 周期で 1.5 ms 眠る**パターンが IPA から
-どう見えるかは実アプリでしか判定できない。「調査1」の結論と同じく、`namiashi run` の
+どう見えるかは実アプリでしか判定できない。「調査1」の結論と同じく、`misa-run run` の
 実測待ち。
 
 ### 結論
@@ -1169,10 +1169,10 @@ passive トリップの 60 °C を超えていた。つまり**サーマルス�
 
 ### 訂正: `--realtime` は RT スケジューリングと無関係
 
-`namiashi` の `--realtime` フラグは **`dump` のリプレイを実時間ペースで流すためのもの**で
+`misa-run` の `--realtime` フラグは **`dump` のリプレイを実時間ペースで流すためのもの**で
 （`dump.rs` でのみ使用、`--viz` 用）、SCHED_FIFO とは関係しない。`run` のフラグでもない。
 
-`handover.md` §5.5 のとおり **namiashi 自身は優先度制御を実装していない**。
+`handover.md` §5.5 のとおり **misa-run 自身は優先度制御を実装していない**。
 `mlockall` も使っていない。RT 優先度は外部から付与する必要がある。
 
 ### 開発時: `limits.d`
@@ -1184,7 +1184,7 @@ passive トリップの 60 °C を超えていた。つまり**サーマルス�
 ```
 
 `realtime` グループを作成し `takara` を追加（反映には再ログインが必要）。
-これで `chrt -f 50 ./target/release/namiashi run` が sudo なしで実行できる。
+これで `chrt -f 50 ./target/release/misa-run run` が sudo なしで実行できる。
 
 > **rtprio 95 は「上限」であって推奨値ではない。実際に使う値は 20〜50 程度に留めること。**
 > 本機は非 PREEMPT_RT カーネルで、USB(CH348) の完了処理は softirq / `ksoftirqd` が担う。
@@ -1230,25 +1230,25 @@ CH348 の tty は 3.398 s に生え、`multi-user.target` は 3.489 s。この�
 **律速が `multi-user.target` 側に移る**。
 
 ```
-現状        3.398 s (tty) → 3.489 s (multi-user) → namiashi
-① だけ      1.84 s  (tty) → 3.489 s (multi-user) → namiashi    効果なし
-① + ②       1.84 s  (tty) → namiashi                           -1.65 s
+現状        3.398 s (tty) → 3.489 s (multi-user) → misa-run
+① だけ      1.84 s  (tty) → 3.489 s (multi-user) → misa-run    効果なし
+① + ②       1.84 s  (tty) → misa-run                           -1.65 s
 ```
 
 **①②は片方ずつ評価すると両方とも「効果が薄い」と見えてしまう。**
-サービス投入時にセットで設計すること。namiashi はネットワークにも
+サービス投入時にセットで設計すること。misa-run はネットワークにも
 ログインセッションにも依存しないので、`multi-user.target` を待つ理由は無い。
 
 #### 判断待ち: `Restart=`
 
 `on-failure` にすれば制御プロセスが落ちても自動復帰するが、
-「異常終了 → 再起動 → **脚が再び動き出す**」という挙動になる。namiashi は受信断・
+「異常終了 → 再起動 → **脚が再び動き出す**」という挙動になる。misa-run は受信断・
 フェイルセーフで速度 0・その場起立に入る設計だが、落ちた原因によっては安全側に倒れるとは
 限らない。**既定は `Restart=no`（手動復帰）**にしてある。
 
 ### Rust 側で実装する案について
 
-`libc = "0.2"` は既に `namiashi-runner` の直接依存なので実装自体は容易
+`libc = "0.2"` は既に `misa-runner` の直接依存なので実装自体は容易
 （`libc::sched_setscheduler` / `libc::pthread_setschedparam`）。ただし:
 
 - **「制御スレッドだけ RT」は逆効果になりうる。** 制御ループはモータ応答を `leg-*`
@@ -1263,7 +1263,7 @@ CH348 の tty は 3.398 s に生え、`multi-user.target` は 3.489 s。この�
 
 ## CH348 の write がモータ電源 OFF で 5 秒詰まる【実測・回避済み】
 
-**症状:** `namiashi legs` を Ctrl-C しても終了に 41 秒かかる。モータが無応答の
+**症状:** `misa-run legs` を Ctrl-C しても終了に 41 秒かかる。モータが無応答の
 とき 1 周が 10 秒（0.1 Hz）まで落ちる。
 
 **原因は受信タイムアウトではなく送信側だった。** pyserial で
@@ -1288,7 +1288,7 @@ write #4:    5119.9 ms  ok      ← 詰まる
 | `flush_rx` の無限ループ | `probe_motor`（`calib scan`）の経路で、`legs` のループは通らない |
 | **CH348 の write** | **これ。** 上の実測 |
 
-### 対処（`namiashi-runner` 側、適用済み）
+### 対処（`misa-runner` 側、適用済み）
 
 ドライバ / ハードウェア側の挙動なのでアプリからは消せない。**無駄な write を
 減らす**方向で 3 点入れた。
@@ -1328,17 +1328,17 @@ write #4:    5119.9 ms  ok      ← 詰まる
 | 5 | ウォッチドッグ有効化 | 未 | プロポで動くロボットのハングは危険 |
 | 6 | ch9344 の DKMS 登録 | **適用済み** | `/dev/ttyCH9344USB0-7` 生成確認済み |
 | 6b | `dialout` グループ追加 | 適用（要再ログイン） | 無いと全ポート `Permission denied` |
-| 6c | Rust 1.85+ (`rustup`) | 未 | `namiashi` のビルドに必要 |
+| 6c | Rust 1.85+ (`rustup`) | 未 | `misa-run` のビルドに必要 |
 | 7 | 不要サービス無効化 | **適用済み**（常駐 17→14、タイマー 5→2） | 調査3 を参照。`irqbalance` のみ保留 |
 | 8 | `lkmotor-driver` の 20 ms 問題 | **パッチ適用済み・コンパイル検証済み**（実機未検証） | 500 Hz の縮退耐性を決める。他のどの項目より影響が大きい |
-| 9 | `namiashi.service` の投入 | **保留（意図的）** — 機体を組み立て中。まず手動でセンサ確認 | 準備は完了済み。調査3「残った未整備」を参照 |
+| 9 | `misa-run.service` の投入 | **保留（意図的）** — 機体を組み立て中。まず手動でセンサ確認 | 準備は完了済み。調査3「残った未整備」を参照 |
 | 9b | `ch9344` 先読み + `WantedBy=` 見直し | **保留** — 9 とセットで実施 | 電源投入→S.BUS 応答が -1.65 s。`boot_config.md` 参照 |
 
 4〜7 の詳細は [`boot_config.md`](boot_config.md) の「運用: ロボット組み込み用途への最適化」。
 
 ## 未検証・今後の課題
 
-- **実ループ周期の実測** — `namiashi` 側で周期のヒストグラムを取り、governor 変更の効果を確認する。
+- **実ループ周期の実測** — `misa-run` 側で周期のヒストグラムを取り、governor 変更の効果を確認する。
   システム側の数値ではなくアプリ側の実測が最終判断材料
 - **ファンのトリップポイント引き下げ** — `step_wise` 化する場合、Device Tree の修正で
   `pwm-fan` の active トリップを 60 °C より下げられるか

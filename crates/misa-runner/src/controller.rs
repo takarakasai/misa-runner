@@ -15,8 +15,8 @@
 //! 同じことを 2 か所で書くことになる。
 
 use misarta::trajectory::InterpolationKind;
-use namiashi_hal::imu::ImuSample;
-use namiashi_hal::joint::JointMode;
+use misa_hal::imu::ImuSample;
+use misa_hal::joint::JointMode;
 use quadruped_gait::{AnyGaitController, GaitGenerator};
 
 use crate::chicken::ChickenHead;
@@ -128,7 +128,7 @@ impl Controller {
     }
 
     /// `arm_app_driven` はアプリが腕サーボを駆動できるか
-    /// （`namiashi_hal::arm::ArmServo::is_app_driven`）。
+    /// （`misa_hal::arm::ArmServo::is_app_driven`）。
     pub fn with_arm(robot: Robot, cfg: AppConfig, arm_app_driven: bool) -> Self {
         let gait_select = GaitSelect::Crawl;
         let gait = robot.build_gait(&cfg.gait, gait_select);
@@ -672,8 +672,8 @@ mod tests {
     }
 
     fn test_model_path() -> String {
-        // crates/namiashi-runner から見たリポジトリルート。
-        format!("{}/../../models/namiashi.misa", env!("CARGO_MANIFEST_DIR"))
+        // crates/misa-runner から見たリポジトリルート。
+        format!("{}/../../models/namiashi/namiashi.misa", env!("CARGO_MANIFEST_DIR"))
     }
 
     /// 状態が `want` になるまで回す。回りすぎたら失敗。
@@ -1006,7 +1006,7 @@ mod tests {
         let t = Teleop::new(
             TeleopConfig::default(),
             &crate::config::GaitTuning::default(),
-            &namiashi_hal::config::HardwareConfig::default().arm,
+            &misa_hal::config::HardwareConfig::default().arm,
         );
         let bench = t.bench_stand();
         assert_eq!(bench.mode, ModeRequest::Stand);

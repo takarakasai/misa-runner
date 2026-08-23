@@ -1,6 +1,6 @@
 [package]
-name = "namiashi-hal"
-description = "namiashi 実機のハードウェア抽象層: CH348 上の RS485 脚バス ×4 (LKMTech V3)、TTL IMU、S.BUS 受信、腕サーボ。"
+name = "misa-hal"
+description = "四脚ロボット実機のハードウェア抽象層: シリアル/CAN の脚バス、IMU、S.BUS 受信、補助軸。namiashi では CH348 上の RS485 ×4 (LKMTech V3)。"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

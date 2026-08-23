@@ -23,9 +23,9 @@
 use std::io::{BufRead, Write};
 use std::time::{Duration, Instant};
 
-use namiashi_hal::config::HardwareConfig;
-use namiashi_hal::joint::{JointCommand, JointMode, LegSlot, LEG_JOINT_KINDS};
-use namiashi_hal::legs::{BusRequest, LegArray, LegBus, PidPartial, PidSet};
+use misa_hal::config::HardwareConfig;
+use misa_hal::joint::{JointCommand, JointMode, LegSlot, LEG_JOINT_KINDS};
+use misa_hal::legs::{BusRequest, LegArray, LegBus, PidPartial, PidSet};
 
 use crate::config::AppConfig;
 use crate::Cli;

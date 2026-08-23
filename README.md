@@ -1,4 +1,4 @@
-# namiashi-runner
+# misa-runner
 
 四脚ロボット **namiashi**（LKMTech V3 モータ ×12 + 腕の RC サーボ ×1）を
 プロポ（Futaba S.BUS）で操縦する実機アプリ。
@@ -46,15 +46,15 @@ UART の割り当ては `spec_rev2_0_0_asbuilt.md` §4 のとおり:
 （SBC など）でも兄弟チェックアウトは要らない。SSH 鍵も認証情報も要らない。
 
 ```sh
-git clone --recurse-submodules https://github.com/takarakasai/namiashi-runner.git
-cd namiashi-runner
+git clone --recurse-submodules https://github.com/takarakasai/misa-runner.git
+cd misa-runner
 cargo build --release      # 依存は cargo が GitHub から取ってくる
 cargo test
 ```
 
-**`--recurse-submodules` を忘れないこと。** `models/` は
+**`--recurse-submodules` を忘れないこと。** `models/namiashi/` は
 [`namiashi_description`](https://github.com/takarakasai/namiashi_description) の
-submodule で、モデル（`.misa`）と meshes がそこにある。忘れると `models/` が
+submodule で、モデル（`.misa`）と meshes がそこにある。忘れると `models/namiashi/` が
 空のままで `check` が「読み込みに失敗」になる。後から入れるなら:
 
 ```sh
@@ -69,7 +69,7 @@ cargo build --release --no-default-features
 
 ### 兄弟クレートも一緒に直したいとき
 
-`misa-actuator` や `sbus` を namiashi-runner と併行して直す場合だけ、
+`misa-actuator` や `sbus` を misa-runner と併行して直す場合だけ、
 path override を張る:
 
 ```sh
@@ -79,7 +79,7 @@ path override を張る:
 
 **これを実行していない間、ローカルの兄弟チェックアウトへの変更はビルドに
 反映されない。** cargo は `Cargo.lock` が指す GitHub の revision を見る。
-「直したのに変わらない」の原因はたいていこれ。`cargo tree -p namiashi-hal`
+「直したのに変わらない」の原因はたいていこれ。`cargo tree -p misa-hal`
 で解決先（ローカルパスか git URL か）が確認できる。
 
 `.cargo/config.toml` は追跡していない（人ごと・マシンごとに違うため）。
@@ -90,18 +90,18 @@ path override を張る:
 1 段で分かる。
 
 ```sh
-namiashi check                 # 設定とモデルの検証（実機に触れない）
-namiashi ports                 # CH348 のポート一覧（何も開かない）
-namiashi dump --gait trot      # 歩容を実機なしで再生し可動域を検証
-namiashi imu  --secs 10        # IMU 受信の確認
-namiashi sbus --secs 10        # プロポ入力と解釈結果の確認
-namiashi legs --secs 10        # 脚バスの状態と実効周期（**指令は送らない**）
-namiashi calib scan            # 応答するモータ id を数える（指令は送らない）
-namiashi run  --config config/namiashi.toml
+misa-run check                 # 設定とモデルの検証（実機に触れない）
+misa-run ports                 # CH348 のポート一覧（何も開かない）
+misa-run dump --gait trot      # 歩容を実機なしで再生し可動域を検証
+misa-run imu  --secs 10        # IMU 受信の確認
+misa-run sbus --secs 10        # プロポ入力と解釈結果の確認
+misa-run legs --secs 10        # 脚バスの状態と実効周期（**指令は送らない**）
+misa-run calib scan            # 応答するモータ id を数える（指令は送らない）
+misa-run run  --config config/namiashi.toml
 ```
 
 設定は 1 枚の TOML（`config/namiashi.toml`）。雛形は
-`namiashi config --out config/namiashi.toml` で生成できる。
+`misa-run config --out config/namiashi.toml` で生成できる。
 
 ### プロポ割り当て（既定）
 
@@ -118,7 +118,7 @@ namiashi run  --config config/namiashi.toml
 | 9 | 腕サーボ（受信機が直接駆動。アプリは角度を**観測するだけ**） |
 
 チャンネル・エンドポイント・不感帯・エクスポは全部 `[teleop]` で変更できる。
-`namiashi sbus` を見ながら合わせるのが早い。
+`misa-run sbus` を見ながら合わせるのが早い。
 
 ## 校正（実機に通電したら最初にやること）
 
@@ -128,18 +128,18 @@ namiashi run  --config config/namiashi.toml
 
 ```sh
 # 1) 誰が居るか（指令は送らない）
-namiashi calib scan --max-id 8
+misa-run calib scan --max-id 8
 
 # 2) 可動域を実測（脱力させ、手で端から端まで動かす）
-namiashi calib range --leg FL --joint thigh --write config/namiashi.toml
+misa-run calib range --leg FL --joint thigh --write config/namiashi.toml
 
 # 3) 符号を確定（1 軸だけ 5° 動かし、モデルの + 方向か答える）
-namiashi calib move  --leg FL --joint thigh --write config/namiashi.toml
+misa-run calib move  --leg FL --joint thigh --write config/namiashi.toml
 
 #    2) と 3) を 12 軸ぶん繰り返す
 
 # 4) ゼロ点（指定した姿勢で保持してからゼロ出し、その姿勢角を記録）
-namiashi calib zero --pose constrain --write config/namiashi.toml
+misa-run calib zero --pose constrain --write config/namiashi.toml
 ```
 
 安全のための約束:
@@ -151,7 +151,7 @@ namiashi calib zero --pose constrain --write config/namiashi.toml
 - **`--write` を明示したときだけ**設定ファイルへ書き戻す
 
 `--write` の書き戻しは `AppConfig` から TOML を作り直すので、**手書きの
-コメントは消える**。`namiashi config --out` で生成したファイルを校正で
+コメントは消える**。`misa-run config --out` で生成したファイルを校正で
 上書きしていく運用を前提にしている。
 
 ## 安全側の作り
@@ -254,7 +254,7 @@ articara の **Live gait feed** に描かせて目で確認できる。実機な
 
 ```sh
 # 1) 配信側（実機なしで歩容だけ流す。--viz は自動で実時間になる）
-namiashi dump --gait trot --vx 0.1 --secs 60 --viz --viz-endpoint tcp/127.0.0.1:7447
+misa-run dump --gait trot --vx 0.1 --secs 60 --viz --viz-endpoint tcp/127.0.0.1:7447
 
 # 2) 受信側（別端末）
 cd ../articara && cargo run --release --features viz -- \
@@ -284,7 +284,7 @@ RS485 は半二重の要求応答で、待ち時間は USB の往復レイテン
 最新値を読むだけにしてある。
 
 こうすると制御周期がバスのジッタから切り離され、**実際に何 Hz 出ているかを
-`namiashi legs` で測ってから `control.rate_hz` を決められる**。
+`misa-run legs` で測ってから `control.rate_hz` を決められる**。
 
 ### 座標変換は HAL に閉じている
 
@@ -323,7 +323,7 @@ q_model = sign *  q_motor + zero_pose_rad
   "receiver_direct"`）。したがって**チキンヘッドと挨拶の腕動作は現状無効**。
   `teleop.arm` のチャンネル（既定 CH9）から角度を**観測**して、ログ・可視化・
   モデル状態には実際の角度を入れている。サーボの品種が決まったら
-  `ArmProtocol` に variant を足し、`namiashi_hal::arm::ArmServo` の実装を
+  `ArmProtocol` に variant を足し、`misa_hal::arm::ArmServo` の実装を
   差し込めば `is_app_driven() = true` になり、両方が自動的に有効になる。
 - **無応答モータ 1 台あたり約 20 ms 待つ。** `lkmotor_driver::Rs485Driver` が
   シリアルの read タイムアウトを固定 20 ms で開き、締切判定を read の後に
@@ -339,7 +339,7 @@ q_model = sign *  q_motor + zero_pose_rad
 
 ```
 crates/
-├── namiashi-hal/         実機の抽象化
+├── misa-hal/         実機の抽象化
 │   ├── ch348.rs          UART 番号 → ポート（探索は sbus::discover に委譲）
 │   ├── config.rs         配線・モータ id・符号・可動域（TOML）
 │   ├── legs.rs           RS485 脚バス ×4（バス 1 本 1 スレッド）
@@ -347,7 +347,7 @@ crates/
 │   ├── sbus.rs           S.BUS 受信スレッド（sbus クレートの上）
 │   ├── arm.rs            ArmServo トレイト + 受信機直結 / 未配線
 │   └── joint.rs          関節の並び順と値型
-└── namiashi-runner/      アプリ
+└── misa-runner/      アプリ
     ├── config.rs         制御・歩容・操縦・ポーズの設定
     ├── robot.rs          .misa の読み込みと歩容の組み立て
     ├── teleop.rs         S.BUS → 操縦指令

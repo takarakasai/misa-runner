@@ -1,4 +1,4 @@
-# handover — namiashi-runner
+# handover — misa-runner
 
 2026-08-17〜19 に PC 環境で作った内容の引き継ぎ。**コードが語れないこと**
 （なぜそうしたか、何が確かめてあって何が未確認か、次に何をするか）をここに置く。
@@ -21,8 +21,8 @@
 
 ```
 crates/
-├── namiashi-hal/     実機の抽象化（ポート探索・脚バス・IMU・S.BUS・腕）
-└── namiashi-runner/  アプリ（設定・歩容組み立て・操縦・状態機械・制御ループ）
+├── misa-hal/     実機の抽象化（ポート探索・脚バス・IMU・S.BUS・腕）
+└── misa-runner/  アプリ（設定・歩容組み立て・操縦・状態機械・制御ループ）
 ```
 
 ---
@@ -35,7 +35,7 @@ crates/
 | 項目 | 状態 | 根拠 |
 |---|---|---|
 | ビルド・テスト | ✅ | 94 テスト通過、clippy 警告なし、`--no-default-features` も通る |
-| CH348 ポート探索 | ✅ 実機 | `namiashi ports` が UART0–7 を正しく役割付け |
+| CH348 ポート探索 | ✅ 実機 | `misa-run ports` が UART0–7 を正しく役割付け |
 | IMU 受信 | ✅ 実機 | IWT603 @921600、重力 9.6 m/s²、resync 0 |
 | S.BUS 受信 | ✅ 実機 | 70 fps、desync 0、送信機 OFF で failsafe 判定が正しく効いた |
 | 脚バスを開く | ✅ 実機 | 4 ポート同時オープン成功 |
@@ -48,7 +48,7 @@ crates/
 **いちばん大きい未知は通信レート。** RS485 の 1 トランザクションは USB の往復
 レイテンシに律速され、それが何 µs なのかはモータを繋がないと分からない。
 `control.rate_hz` を 200 にできるのか 50 が精一杯なのか、Trot が現実的かは
-すべてここで決まる。`namiashi legs` が各バスの実効周期を出すので、**通電したら
+すべてここで決まる。`misa-run legs` が各バスの実効周期を出すので、**通電したら
 最初にこれを測ること**。
 
 ---
@@ -147,7 +147,7 @@ q_model = sign *  q_motor + zero_pose_rad        (sign = ±1)
 
 | リポジトリ | remote | 状態 | SBC に要る？ |
 |---|---|:--:|:--:|
-| namiashi-runner | `github.com/takarakasai/namiashi-runner` | ✅ push 済み | ✅ clone する |
+| misa-runner | `github.com/takarakasai/misa-runner` | ✅ push 済み | ✅ clone する |
 | wit-imu | `github.com/takarakasai/wit-imu` | ✅ push 済み | — cargo が取る |
 | misa-actuator | `github.com/takarakasai/misa-actuator` | ✅ 同期済み | — cargo が取る |
 | misarta | `github.com/takarakasai/misarta` | ✅ 同期済み | — cargo が取る |
@@ -167,17 +167,17 @@ q_model = sign *  q_motor + zero_pose_rad        (sign = ±1)
 ### 5.2 移行手順
 
 ```sh
-# SBC 側。これだけ。--recurse-submodules を忘れると models/ が空になる。
-git clone --recurse-submodules https://github.com/takarakasai/namiashi-runner.git
-cd namiashi-runner
+# SBC 側。これだけ。--recurse-submodules を忘れると models/namiashi/ が空になる。
+git clone --recurse-submodules https://github.com/takarakasai/misa-runner.git
+cd misa-runner
 cargo build --release --no-default-features     # viz 不要なら軽いほう
 
 # 実機に触れない順に確認
-./target/release/namiashi check
-./target/release/namiashi ports        # ch9344 が入っていないとここで落ちる
-./target/release/namiashi imu  --secs 10
-./target/release/namiashi sbus --secs 10
-./target/release/namiashi legs --secs 10        # 指令は送らない
+./target/release/misa-run check
+./target/release/misa-run ports        # ch9344 が入っていないとここで落ちる
+./target/release/misa-run imu  --secs 10
+./target/release/misa-run sbus --secs 10
+./target/release/misa-run legs --secs 10        # 指令は送らない
 ```
 
 `Cargo.lock` を追跡しているので、SBC は PC とまったく同じ revision を引く。
@@ -192,7 +192,7 @@ git 依存に切り替えた副作用として、**ローカルの兄弟チェ�
 ./scripts/dev-siblings.sh --off    # git 依存へ戻す
 ```
 
-`cargo tree -p namiashi-hal` で解決先（ローカルパスか git URL か）が見える。
+`cargo tree -p misa-hal` で解決先（ローカルパスか git URL か）が見える。
 **「直したのに変わらない」の原因はたいていこれ。**
 
 `paths` override ではなく `[patch]` を使っているのは、前者が workspace 継承
@@ -221,7 +221,7 @@ git 依存に切り替えた副作用として、**ローカルの兄弟チェ�
 問題になるなら起動側で:
 
 ```sh
-sudo chrt -f 50 ./namiashi run --config config/namiashi.toml
+sudo chrt -f 50 ./misa-run run --config config/namiashi.toml
 # CPU ガバナも performance に
 ```
 
@@ -249,8 +249,8 @@ sudo chrt -f 50 ./namiashi run --config config/namiashi.toml
 
 ## 7. 次にやること（推奨順）
 
-1. ~~`wit-imu` の push / `namiashi-runner` の remote~~ — **2026-08-19 完了**
-2. **モータに通電して `namiashi legs`** — 各バスの実効周期を測り、
+1. ~~`wit-imu` の push / `misa-runner` の remote~~ — **2026-08-19 完了**
+2. **モータに通電して `misa-run legs`** — 各バスの実効周期を測り、
    `control.rate_hz` を決める。ここが全ての前提
 3. **`calib` を 12 軸ぶん**（`scan` → `range` → `move` → `zero`）。
    1 軸ずつ、脚を浮かせて

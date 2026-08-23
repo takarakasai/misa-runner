@@ -56,7 +56,7 @@ response_timeout_ms = 20    # 立ち上げ中は 5 → 20
 `calib --write` は `config/namiashi.toml` を**丸ごと再生成**する（手書きコメントは消える）。
 
 ```sh
-cd ~/work/namiashi-runner
+cd ~/work/misa-runner
 git checkout -b calib/initial-bringup
 git add -A && git commit -m "wip: before calibration"
 ```
@@ -100,7 +100,7 @@ git add -A && git commit -m "wip: before calibration"
 ### 1-1. 設定とモデル
 
 ```sh
-./target/release/namiashi check --config config/namiashi.toml
+./target/release/misa-run check --config config/namiashi.toml
 ```
 
 **合格条件:**
@@ -112,7 +112,7 @@ git add -A && git commit -m "wip: before calibration"
 ### 1-2. ポートの役割付け
 
 ```sh
-./target/release/namiashi ports --config config/namiashi.toml
+./target/release/misa-run ports --config config/namiashi.toml
 ```
 
 **合格条件:**
@@ -136,10 +136,10 @@ git add -A && git commit -m "wip: before calibration"
 ### 2-2. id スキャン（脚ごと）★最初の関門★
 
 ```sh
-./target/release/namiashi calib scan --leg FL --max-id 8 --config config/namiashi.toml
-./target/release/namiashi calib scan --leg FR --max-id 8 --config config/namiashi.toml
-./target/release/namiashi calib scan --leg RL --max-id 8 --config config/namiashi.toml
-./target/release/namiashi calib scan --leg RR --max-id 8 --config config/namiashi.toml
+./target/release/misa-run calib scan --leg FL --max-id 8 --config config/namiashi.toml
+./target/release/misa-run calib scan --leg FR --max-id 8 --config config/namiashi.toml
+./target/release/misa-run calib scan --leg RL --max-id 8 --config config/namiashi.toml
+./target/release/misa-run calib scan --leg RR --max-id 8 --config config/namiashi.toml
 ```
 
 **指令は出さない**（State2 の読み出しのみ）。
@@ -164,7 +164,7 @@ git add -A && git commit -m "wip: before calibration"
 ### 2-3. 脚バスの実効周期
 
 ```sh
-./target/release/namiashi legs --secs 10 --config config/namiashi.toml
+./target/release/misa-run legs --secs 10 --config config/namiashi.toml
 ```
 
 **指令は送らない。**
@@ -203,7 +203,7 @@ PC の articara に実機の姿勢がそのまま出る。**指令は一切送�
 
 ```sh
 # SBC
-./target/release/namiashi legs --secs 0 --viz --config config/namiashi.toml
+./target/release/misa-run legs --secs 0 --viz --config config/namiashi.toml
 # PC（モデルは namiashi_description を clone するだけ。scp は要らない）
 cd articara && cargo run --release --features viz -- \
     --model ../namiashi_description/namiashi.misa
@@ -239,7 +239,7 @@ cd articara && cargo run --release --features viz -- \
 ### 3-1. IMU
 
 ```sh
-./target/release/namiashi imu --secs 10 --config config/namiashi.toml
+./target/release/misa-run imu --secs 10 --config config/namiashi.toml
 ```
 
 - [ ] 値が更新される
@@ -249,13 +249,13 @@ cd articara && cargo run --release --features viz -- \
 ### 3-2. S.BUS（プロポ）
 
 ```sh
-./target/release/namiashi sbus --secs 10 --config config/namiashi.toml
+./target/release/misa-run sbus --secs 10 --config config/namiashi.toml
 ```
 
 出力例（2026-08-21 実測）:
 
 ```
-namiashi sbus  /dev/ttyCH9344USB6  100000 8E2    65.7 fps  frames=198 slots=49 desync=0
+misa-run sbus  /dev/ttyCH9344USB6  100000 8E2    65.7 fps  frames=198 slots=49 desync=0
 link=OK   CH17:○  CH18:○   FRAME_LOST:no   FAILSAFE:no
 S.BUS2 Rx-Batt=4.9V Ext-Volt=26.0V
 ----------------------------------------------------------------------------
@@ -330,9 +330,9 @@ CN2 の結線（1=GND, 2=+5V, 3=RX）と受信機の S.BUS 出力設定。
 
 ```sh
 # 12 軸ぶん繰り返す。--write を付けたときだけ設定に書き戻る
-./target/release/namiashi calib range --leg FL --joint hip   --write config/namiashi.toml --config config/namiashi.toml
-./target/release/namiashi calib range --leg FL --joint thigh --write config/namiashi.toml --config config/namiashi.toml
-./target/release/namiashi calib range --leg FL --joint calf  --write config/namiashi.toml --config config/namiashi.toml
+./target/release/misa-run calib range --leg FL --joint hip   --write config/namiashi.toml --config config/namiashi.toml
+./target/release/misa-run calib range --leg FL --joint thigh --write config/namiashi.toml --config config/namiashi.toml
+./target/release/misa-run calib range --leg FL --joint calf  --write config/namiashi.toml --config config/namiashi.toml
 # FR / RL / RR も同様
 ```
 
@@ -363,7 +363,7 @@ CN2 の結線（1=GND, 2=+5V, 3=RX）と受信機の S.BUS 出力設定。
 終わったら**必ず `DisableJoint`** で戻す。既定の振り幅 5°、速度 0.3 rad/s。
 
 ```sh
-./target/release/namiashi calib move --leg FL --joint hip --write config/namiashi.toml --config config/namiashi.toml
+./target/release/misa-run calib move --leg FL --joint hip --write config/namiashi.toml --config config/namiashi.toml
 # 12 軸ぶん繰り返す
 ```
 
@@ -405,7 +405,7 @@ CN2 の結線（1=GND, 2=+5V, 3=RX）と受信機の S.BUS 出力設定。
 > 符号も狂うため。
 
 ```sh
-./target/release/namiashi calib zero --pose constrain --write config/namiashi.toml --config config/namiashi.toml
+./target/release/misa-run calib zero --pose constrain --write config/namiashi.toml --config config/namiashi.toml
 ```
 
 **手順:**
@@ -455,7 +455,7 @@ hip で 10〜15°、thigh で 4〜16° 外していた。calf は突き当て基
 値が実機と整合しているか確認する。
 
 ```sh
-./target/release/namiashi legs --secs 5 --config config/namiashi.toml
+./target/release/misa-run legs --secs 5 --config config/namiashi.toml
 ```
 
 - [ ] 各軸を手で端まで動かしたときの読み値が、設定の `min_rad`/`max_rad` の内側に収まる
@@ -470,7 +470,7 @@ hip で 10〜15°、thigh で 4〜16° 外していた。calf は突き当て基
 ### 7-1. まずモデル上で確認（実機に触れない）
 
 ```sh
-./target/release/namiashi dump --gait crawl --vx 0.05 --secs 10 --config config/namiashi.toml
+./target/release/misa-run dump --gait crawl --vx 0.05 --secs 10 --config config/namiashi.toml
 ```
 
 - [x] 関節角が可動域内に収まる（クランプ警告が出ない）
@@ -492,7 +492,7 @@ hip で 10〜15°、thigh で 4〜16° 外していた。calf は突き当て基
 ### 7-2. 受信機なしで起動
 
 ```sh
-./target/release/namiashi run --allow-no-sbus --config config/namiashi.toml
+./target/release/misa-run run --allow-no-sbus --config config/namiashi.toml
 ```
 
 - [x] **脚が浮いている**
@@ -548,7 +548,7 @@ calf がメカ突き当てに座っており、設定の下限がその突き当
 ## 段階 8: プロポ操縦【🔴】
 
 ```sh
-./target/release/namiashi run --config config/namiashi.toml
+./target/release/misa-run run --config config/namiashi.toml
 ```
 
 - [x] **CH5 が「脱力」位置**で起動する
@@ -698,7 +698,7 @@ namiashi は既定で `gait.crawl_use_linear = false` なので **Crawl / Walk /
 | IPA / cpufreq のジッタ判定（`run` の遅延最大で） | 同上「調査1」 |
 | RT 優先度の付与（`chrt -f 50` または systemd） | 同上「RT 優先度の付与」 |
 | ウォッチドッグ有効化 | [`boot_config.md`](boot_config.md) |
-| `namiashi.service` のインストール | [`runtime_tuning.md`](runtime_tuning.md) |
+| `misa-run.service` のインストール | [`runtime_tuning.md`](runtime_tuning.md) |
 
 ---
 

@@ -1872,6 +1872,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "misa-hal"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "lkmotor-driver",
+ "log",
+ "misa-actuator",
+ "sbus",
+ "sbus-protocol",
+ "serde",
+ "serialport",
+ "thiserror 2.0.20",
+ "toml",
+ "wit-imu",
+]
+
+[[package]]
+name = "misa-runner"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "libc",
+ "log",
+ "misa-hal",
+ "misarta",
+ "nalgebra",
+ "quadruped-gait",
+ "serde",
+ "serde_json",
+ "toml",
+ "zenoh",
+]
+
+[[package]]
 name = "misa-wbc"
 version = "0.1.0"
 source = "git+https://github.com/takarakasai/misa-wbc.git#92e42a59af30edca053ce9b61c7a74c40568753b"
@@ -1938,40 +1972,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "namiashi-hal"
-version = "0.1.0"
-dependencies = [
- "libc",
- "lkmotor-driver",
- "log",
- "misa-actuator",
- "sbus",
- "sbus-protocol",
- "serde",
- "serialport",
- "thiserror 2.0.20",
- "toml",
- "wit-imu",
-]
-
-[[package]]
-name = "namiashi-runner"
-version = "0.1.0"
-dependencies = [
- "env_logger",
- "libc",
- "log",
- "misarta",
- "nalgebra",
- "namiashi-hal",
- "quadruped-gait",
- "serde",
- "serde_json",
- "toml",
- "zenoh",
 ]
 
 [[package]]
