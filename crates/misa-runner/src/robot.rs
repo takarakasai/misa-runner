@@ -14,7 +14,7 @@ use quadruped_gait::{
     DEFAULT_FOOT_LINKS,
 };
 
-use crate::config::{AppConfig, GaitTuning};
+use crate::config::{AppConfig, GaitTuning, KneeShape};
 use crate::jointvec::JointVec;
 use crate::pose::PoseLibrary;
 use crate::teleop::GaitSelect;
@@ -103,8 +103,14 @@ impl Robot {
         let mode = gait_mode_of(select, tuning.crawl_use_linear);
         let mut ctrl =
             AnyGaitController::new(mode, cfg, self.kin_at_height(tuning.stance_height_m));
-        // 膝はすべて後ろ向き（namiashi は thigh + / calf − で畳む）。
-        ctrl.set_knee_pattern(KneePattern::BothBack);
+        // **膝の向きは機体ごとに違う。** 間違えると IK が鏡像の足先軌道を
+        // 作り、歩容は正しく動いているのに逆へ進む。
+        ctrl.set_knee_pattern(match tuning.knee_pattern {
+            KneeShape::BothBack => KneePattern::BothBack,
+            KneeShape::MammalianForward => KneePattern::MammalianForward,
+            KneeShape::MammalianReverse => KneePattern::MammalianReverse,
+            KneeShape::BothForward => KneePattern::BothForward,
+        });
         // LinearCrawl はこちらで胴体高さを持つ。CHAMP 系は
         // `nominal_foot_body` を見るので上の `kin_at_height` が効く。
         ctrl.set_body_height_m(tuning.stance_height_m);

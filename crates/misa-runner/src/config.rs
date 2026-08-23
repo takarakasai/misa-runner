@@ -186,6 +186,21 @@ impl AppConfig {
     }
 }
 
+/// 膝の曲がる向き。`quadruped_gait::KneePattern` に 1 対 1 で対応する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KneeShape {
+    /// `<<` 4 脚とも後ろ向き。
+    #[default]
+    BothBack,
+    /// `<>` 前が後ろ向き・後ろが前向き（哺乳類型）。
+    MammalianForward,
+    /// `><` 前が前向き・後ろが後ろ向き。
+    MammalianReverse,
+    /// `>>` 4 脚とも前向き。
+    BothForward,
+}
+
 /// 制御ループ全体の設定。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ControlConfig {
@@ -291,6 +306,13 @@ impl Default for ControlConfig {
 /// 種別ごとの上書きを分けてある。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GaitTuning {
+    /// 膝の曲がる向き。**機体ごとに違う。**
+    ///
+    /// ここを間違えると IK が鏡像の足先軌道を作り、**歩容は正しく動いて
+    /// いるのに逆方向へ進む**。namiashi は 4 脚とも後ろ向き（thigh + /
+    /// calf − で畳む）。
+    #[serde(default)]
+    pub knee_pattern: KneeShape,
     /// 立ち姿勢での胴体高さ (m)。
     #[serde(default = "default_stance_height")]
     pub stance_height_m: f64,
@@ -408,6 +430,7 @@ fn default_height_range() -> f64 {
 impl Default for GaitTuning {
     fn default() -> Self {
         Self {
+            knee_pattern: KneeShape::default(),
             stance_height_m: default_stance_height(),
             swing_height_m: default_swing_height(),
             max_vx_m_s: default_max_vx(),
