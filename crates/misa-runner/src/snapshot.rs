@@ -24,6 +24,7 @@
 // なので、警告を消して他の警告が埋もれないようにしておく。
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use misa_core::{
@@ -96,9 +97,15 @@ pub fn axis_layout(cfg: &AppConfig) -> Result<AxisLayout, String> {
 ///
 /// `max_observation_age` は制御周期から決める。バスが遅れて読み戻しが
 /// 止まったことを、周期いくつぶんで「見えていない」と判断するか。
+/// `model_limits` はモデルが宣言している可動域（[`crate::robot::Robot::limits`]）。
+///
+/// **優先するのはプロファイルの実測値。** 校正で確定した値のほうがモデルの
+/// 設計値より実機に近い。モデルは、校正値を PC が持たない機体（ブリッジ越し）
+/// と補助軸の受け皿になる。どちらも無ければ制限しない。
 pub fn safety_config(
     cfg: &AppConfig,
     layout: &AxisLayout,
+    model_limits: &BTreeMap<String, (f64, f64)>,
     control_period_s: f64,
     stale_ticks: f64,
 ) -> SafetyConfig {
@@ -122,10 +129,15 @@ pub fn safety_config(
                 }
             }
             None => {
-                for _ in 0..3 {
+                // 実測値が無いのでモデルの宣言を使う。
+                for joint in 0..3 {
+                    let id = AxisId::new((leg.index() * 3 + joint) as u16);
+                    let (min_rad, max_rad) = from_model(layout, model_limits, id);
                     axes.push(AxisLimits {
+                        min_rad,
+                        max_rad,
                         max_target_rate_rad_s: rate,
-                        ..AxisLimits::UNLIMITED
+                        max_torque_nm: 0.0,
                     });
                 }
             }
@@ -136,9 +148,13 @@ pub fn safety_config(
     // 無制限が危ないのは駆動する軸だけで、駆動しない軸は指令が出ない。
     for id in layout.aux() {
         let arm = (layout.head == Some(id)).then(|| serial.map(|h| &h.arm)).flatten();
+        let (min_rad, max_rad) = match arm {
+            Some(a) => (a.min_rad, a.max_rad),
+            None => from_model(layout, model_limits, id),
+        };
         axes.push(AxisLimits {
-            min_rad: arm.map_or(f64::NEG_INFINITY, |a| a.min_rad),
-            max_rad: arm.map_or(f64::INFINITY, |a| a.max_rad),
+            min_rad,
+            max_rad,
             max_target_rate_rad_s: rate,
             max_torque_nm: 0.0,
         });
@@ -149,6 +165,20 @@ pub fn safety_config(
             control_period_s * stale_ticks.max(1.0),
         ),
     }
+}
+
+/// 軸の可動域をモデルの宣言から引く。宣言が無ければ無制限。
+fn from_model(
+    layout: &AxisLayout,
+    model_limits: &BTreeMap<String, (f64, f64)>,
+    id: AxisId,
+) -> (f64, f64) {
+    layout
+        .table
+        .name(id)
+        .and_then(|n| model_limits.get(n))
+        .copied()
+        .unwrap_or((f64::NEG_INFINITY, f64::INFINITY))
 }
 
 /// 実機の読み戻しを [`Observation`] へ。
@@ -330,6 +360,42 @@ mod tests {
         }
     }
 
+    /// **プロファイルに可動域が無い機体は、モデルの宣言を使う。**
+    ///
+    /// ブリッジ越しの機体は校正値を PC が持たない。ここが無制限のままだと
+    /// ゲートが何も丸めず、`dump` も「すべて範囲内」と言ってしまう。
+    #[test]
+    fn a_robot_without_calibration_takes_its_limits_from_the_model() {
+        let mut cfg = AppConfig::default();
+        cfg.hardware = misa_hal::config::HardwareConfig::Ros2(Default::default());
+        let lay = axis_layout(&cfg).unwrap();
+
+        let mut model = BTreeMap::new();
+        model.insert("FL_thigh_joint".to_string(), (-2.5, 2.5));
+        let sc = safety_config(&cfg, &lay, &model, 0.005, 5.0);
+
+        let id = lay.table.id_of("FL_thigh_joint").unwrap();
+        assert_eq!(sc.axes[id.index()].min_rad, -2.5);
+        assert_eq!(sc.axes[id.index()].max_rad, 2.5);
+        // 宣言が無い軸は無制限のまま。0 rad に固定しない。
+        let other = lay.table.id_of("FL_hip_joint").unwrap();
+        assert!(sc.axes[other.index()].min_rad.is_infinite());
+    }
+
+    /// **実測値があるほうを優先する。** 校正で確定した値のほうが実機に近い。
+    #[test]
+    fn a_calibrated_axis_keeps_its_measured_range_over_the_models() {
+        let cfg = AppConfig::default();
+        let lay = axis_layout(&cfg).unwrap();
+        let mut model = BTreeMap::new();
+        model.insert("FL_hip_joint".to_string(), (-9.9, 9.9));
+        let sc = safety_config(&cfg, &lay, &model, 0.005, 5.0);
+
+        let sh = cfg.hardware.serial().unwrap();
+        let m = &sh.bus_for(LegSlot::Fl).unwrap().motors[0];
+        assert_eq!(sc.axes[0].min_rad, m.min_rad, "モデルの値に上書きされている");
+    }
+
     /// **チキンヘッドの相手が 2 本ある設定は弾く。**
     #[test]
     fn two_head_axes_are_rejected() {
@@ -433,7 +499,7 @@ mod tests {
         .unwrap();
         let cfg = crate::config::AppConfig::from_toml(&text).unwrap();
         let lay = axis_layout(&cfg).unwrap();
-        let sc = safety_config(&cfg, &lay, 1.0 / cfg.control.rate_hz, 5.0);
+        let sc = safety_config(&cfg, &lay, &BTreeMap::new(), 1.0 / cfg.control.rate_hz, 5.0);
         assert_eq!(sc.axes.len(), lay.table.len());
 
         // FL の hip は設定の 1 本目のバスの 1 個目のモータ。

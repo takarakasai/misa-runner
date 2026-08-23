@@ -5,6 +5,8 @@
 //! 手書きの数値表にしないことで、モデルを直したのにコード側が古いまま、
 //! という食い違いが起きないようにする（`go2-gait-runner` と同じ方針）。
 
+use std::collections::BTreeMap;
+
 use misarta::model::Model;
 use quadruped_gait::{
     auto_detect_kinematics_config, joint_signs, AnyGaitController, ControllerOutput, GaitConfig,
@@ -26,6 +28,21 @@ pub struct Robot {
     pub poses: PoseLibrary,
     /// 運動学の自動検出に使った姿勢（`nq` 長）。
     pub home_q: Vec<f64>,
+    /// モデルが宣言している可動域（`[joint.limit]` の `lower` / `upper`）。
+    ///
+    /// **`lower == upper` の関節は入れない。** `.misa` の `limit` は
+    /// `#[serde(default)]` なので、宣言が無いと両方 0 になる。それを
+    /// 「0 rad に固定」と読むと、可動域が無い関節を全部 0 へ丸めてしまう。
+    ///
+    /// 校正値を PC が持たない機体（ブリッジ越し）では、これが可動域の
+    /// 唯一の出どころになる。
+    pub limits: BTreeMap<String, (f64, f64)>,
+    /// 胴体リンクの名前（`.misa` の `root`）。
+    ///
+    /// **機体ごとに違う**（namiashi は `trunk`、keel は `base_link`）。
+    /// 決め打ちにすると、シムで姿勢と位置が NaN のまま「転倒なし」と
+    /// 出てしまう。
+    pub root_link: String,
 }
 
 impl Robot {
@@ -46,6 +63,15 @@ impl Robot {
         let (model, _visual, _collision) = misarta::native::build_model(&parsed.file)
             .map_err(|e| format!("モデルの構築に失敗: {e:?}"))?;
 
+        let limits: BTreeMap<String, (f64, f64)> = parsed
+            .file
+            .joint
+            .iter()
+            .filter(|j| j.limit.lower != j.limit.upper)
+            .map(|j| (j.name.clone(), (j.limit.lower, j.limit.upper)))
+            .collect();
+
+        let root_link = parsed.file.robot.root.clone();
         let poses = PoseLibrary::from_misa(&parsed.file);
         let posture = resolve_kinematics_posture(&poses, kinematics_pose);
         let home_q = build_q(&model, &posture);
@@ -60,6 +86,8 @@ impl Robot {
             signs,
             poses,
             home_q,
+            limits,
+            root_link,
         })
     }
 
@@ -166,6 +194,42 @@ impl Robot {
 }
 
 /// 選択された歩容に対応する `quadruped-gait` の歩容種別。
+/// **電源投入時（伏せ）の姿勢。** 物理の初期姿勢と、机上再生の始点。
+///
+/// 出どころは 3 通りあり、この順に見る。
+///
+/// 1. `control.rest_pose` — モデルの姿勢名。明示されていればこれ
+/// 2. 校正値（`zero_pose_rad`）— 定義上そこが電源投入時のモータ角 0
+/// 3. モデルの home
+///
+/// **2 は校正値を PC が持つ構成にしか無い。** ブリッジ越しの機体では
+/// 1 か 3 になる。ここをゼロベクトルにすると、可動域の外から始まる
+/// （実際 keel は calf が −2.7..−0.8 なので 0 rad は範囲外）。
+pub fn rest_pose(cfg: &AppConfig, robot: &Robot) -> JointVec {
+    let home = robot.poses.home();
+    if let Some(name) = cfg.control.rest_pose.as_deref() {
+        match robot.poses.pose(name) {
+            Some(p) => return robot.poses.resolve(&p.angles, home),
+            None => log::warn!(
+                "control.rest_pose {name:?} がモデルにありません。ほかの手がかりを使います"
+            ),
+        }
+    }
+    let Ok(serial) = cfg.hardware.serial() else {
+        return home;
+    };
+    let mut q = home;
+    for slot in misa_hal::joint::LegSlot::ALL {
+        let Some(bus) = serial.bus_for(slot) else {
+            continue;
+        };
+        for (k, m) in bus.motors.iter().enumerate().take(3) {
+            q.legs[slot.index()][k] = m.zero_pose_rad;
+        }
+    }
+    q
+}
+
 pub fn gait_type_of(select: GaitSelect) -> GaitType {
     match select {
         GaitSelect::Crawl => GaitType::Crawl,

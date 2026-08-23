@@ -41,12 +41,13 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let every = cli.usize("every").unwrap_or(200).max(1);
 
     let robot = crate::robot::load_from_config(cfg)?;
+    let model_limits = robot.limits.clone();
     let layout = crate::snapshot::axis_layout(cfg)?;
     let dt = 1.0 / cfg.control.rate_hz;
 
     // **物理の初期姿勢は伏せ姿勢。** 実機は電源投入時にそこにいるので、
     // 立ち上がりの軌道を同じ始点から見るため。
-    let crouch = crouch_pose(cfg);
+    let crouch = crate::robot::rest_pose(cfg, &robot);
     let home: Vec<(String, f64)> = layout
         .table
         .axes()
@@ -56,7 +57,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             let leg = i / 3;
             let k = i % 3;
             // 脚だけ。補助軸（腕・車輪）の初期姿勢はモデルの既定に任せる。
-            (i < crate::snapshot::AxisLayout::LEG_AXES).then(|| (a.name.clone(), crouch[leg][k]))
+            (i < crate::snapshot::AxisLayout::LEG_AXES).then(|| (a.name.clone(), crouch.legs[leg][k]))
         })
         .collect();
 
@@ -67,12 +68,13 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         actuator_kv: cli.f64("kv").unwrap_or(1.0),
         base_height_m: cli.f64("base-height").unwrap_or(0.20),
         home,
+        root_link: robot.root_link.clone(),
         ..SimOptions::default()
     };
     let mut plant = MujocoPlant::new(layout.table.clone(), &opts)?;
 
     let mut controller = Controller::new(robot, cfg.clone());
-    let mut shadow_gate = misa_core::SafetyGate::new(crate::snapshot::safety_config(cfg, &layout, dt, 5.0));
+    let mut shadow_gate = misa_core::SafetyGate::new(crate::snapshot::safety_config(cfg, &layout, &model_limits, dt, 5.0));
     let recorder = match cli.str("record") {
         Some(path) => {
             let header = misa_core::record::Header {
@@ -211,16 +213,3 @@ fn jointvec_from(obs: &misa_core::Observation) -> crate::jointvec::JointVec {
     q
 }
 
-/// 伏せ姿勢のモデル角。定義上そのまま `zero_pose_rad`。
-fn crouch_pose(cfg: &AppConfig) -> [[f64; 3]; 4] {
-    let mut q = [[0.0; 3]; 4];
-    for (slot, leg) in misa_hal::joint::LegSlot::ALL.iter().zip(q.iter_mut()) {
-        let Some(bus) = cfg.hardware.serial().ok().and_then(|h| h.bus_for(*slot)) else {
-            continue;
-        };
-        for (m, dst) in bus.motors.iter().zip(leg.iter_mut()) {
-            *dst = m.zero_pose_rad;
-        }
-    }
-    q
-}

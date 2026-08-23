@@ -458,6 +458,8 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
             }
         );
     }
+    // Controller へ move する前に控えておく。
+    let model_limits = robot.limits.clone();
     let mut controller = Controller::with_arm(robot, cfg.clone(), arm_app_driven);
 
     let mut publisher = open_viz(&opts.viz)?;
@@ -472,7 +474,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
     // 同じで、記録に載る SafetyVerdict だけがゲートの判断。配線する前に、
     // 生きたデータでゲートが何を丸めるつもりだったかを見ておくためにある。
     let layout = crate::snapshot::axis_layout(&cfg)?;
-    let mut shadow_gate = misa_core::SafetyGate::new(crate::snapshot::safety_config(&cfg, &layout, period.as_secs_f64(), STALE_TICKS));
+    let mut shadow_gate = misa_core::SafetyGate::new(crate::snapshot::safety_config(&cfg, &layout, &model_limits, period.as_secs_f64(), STALE_TICKS));
     let recorder = match opts.record.as_deref() {
         Some(path) => {
             let header = misa_core::record::Header {

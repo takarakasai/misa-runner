@@ -12,6 +12,8 @@ model = "../mdls/keel/mvp_v12.misa"
 rate_hz = 200.0
 start_pose = "constrain2"
 kinematics_pose = "home"
+# 電源投入時の姿勢。校正値を PC が持たないので、モデルの姿勢名で指す。
+rest_pose = "constrain2"
 
 # keel のモデルが持つポーズは home / constrain2 / test。namiashi の
 # greeting は無いので、演出は名前を空にして無効にしてある。
@@ -19,6 +21,15 @@ kinematics_pose = "home"
 greeting = ""
 greeting_alt = ""
 
+# **歩容の値はまだ当たっていない。** namiashi の値を出発点に置いてあるだけで、
+# keel は脚間隔が 1.7 倍（hip 間 0.49 m 対 0.29 m）ある。MuJoCo で回すと
+# 立てはするが、前進指令で後退する（足が滑っている）。実機を触る前に
+# `misa-run sim` で詰めること。
+#
+#   cargo run --features sim -- sim --robot robots/keel.toml \
+#       --gait trot --vx 0.15 --secs 10 --kp 200 --kv 2.0 --base-height 0.35
+#
+# kp = 60（namiashi の値）だと自重を支えられず崩れる。200 で立つ。
 [gait]
 stance_height_m = 0.30
 swing_height_m = 0.06

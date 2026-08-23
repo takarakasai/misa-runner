@@ -192,6 +192,14 @@ pub struct ControlConfig {
     /// ロボットモデル (`.misa`)。ポーズ・シーケンスもここから読む。
     #[serde(default = "default_model_path")]
     pub model: String,
+    /// **電源投入時の姿勢**（伏せ）。物理の初期姿勢と、脱力からの遷移の始点。
+    ///
+    /// 省略時は、校正値を PC が持つ構成なら `zero_pose_rad`（定義上そこが
+    /// 電源投入時のモータ角 0）、持たない構成ならモデルの home。
+    /// **ブリッジ越しの機体には `zero_pose_rad` が無い**ので、そこでは
+    /// ここにモデルの姿勢名を書く。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rest_pose: Option<String>,
     /// 制御ループの周期 (Hz)。バス周期以下であること。
     #[serde(default = "default_rate_hz")]
     pub rate_hz: f64,
@@ -266,6 +274,7 @@ impl Default for ControlConfig {
     fn default() -> Self {
         Self {
             model: default_model_path(),
+            rest_pose: None,
             rate_hz: default_rate_hz(),
             transition_s: default_transition_s(),
             start_pose: default_start_pose(),

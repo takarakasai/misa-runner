@@ -43,6 +43,9 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let realtime = cli.flag("realtime") || viz_cfg.enabled;
 
     let robot = crate::robot::load_from_config(cfg)?;
+    // Controller へ move する前に控えておく。
+    let model_limits = robot.limits.clone();
+    let rest = crate::robot::rest_pose(cfg, &robot);
     let mut controller = Controller::new(robot, cfg.clone());
     let dt = 1.0 / cfg.control.rate_hz;
     let imu = level_imu();
@@ -54,7 +57,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     //
     // 伏せ姿勢のモデル角は定義上そのまま `zero_pose_rad`（電源投入時に
     // モータ角 0 = 伏せ、`q_model = sign * 0 + zero_pose_rad`）。
-    let measured = crouch_pose(cfg);
+    let measured = rest;
 
     let mut cmd = Intent {
         velocity: Velocity::ZERO,
@@ -99,8 +102,8 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // 制御ループを触る改修は「dump を録って差分する」で検証できる。
     // ゲートは `run` と同じく影で回すだけ（出力は捨てる）。
     let layout = crate::snapshot::axis_layout(cfg)?;
-    let mut shadow_gate =
-        misa_core::SafetyGate::new(crate::snapshot::safety_config(cfg, &layout, dt, 5.0));
+    let limits = crate::snapshot::safety_config(cfg, &layout, &model_limits, dt, 5.0);
+    let mut shadow_gate = misa_core::SafetyGate::new(limits.clone());
     let recorder = match cli.str("record") {
         Some(path) => {
             let header = misa_core::record::Header {
@@ -117,7 +120,6 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     };
 
     let mut violations: Vec<String> = Vec::new();
-    let mut checked = true;
     let steps = (seconds / dt).ceil() as usize;
     let period = Duration::from_secs_f64(dt);
     let mut next = Instant::now();
@@ -133,7 +135,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             };
         }
         let out = controller.tick(&cmd, &measured, imu.rpy_rad, dt);
-        checked &= check_limits(cfg, &out.targets, t, &mut violations);
+        check_limits(&limits, &layout, &out.targets, t, &mut violations);
         if i % every == 0 {
             println!("{t:5.2}  {:<12} {}", out.state.label(), row(&out.targets));
         }
@@ -183,11 +185,12 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         }
     }
 
-    if !checked {
-        println!("\n可動域: **検証していません**（PC が可動域を持たない構成。向こうの仕事）");
-        Ok(())
-    } else if violations.is_empty() {
-        println!("\n可動域: すべて範囲内");
+    if violations.is_empty() {
+        println!(
+            "\n可動域: すべて範囲内（{}/{} 軸に可動域の宣言あり）",
+            bounded_axes(&limits),
+            limits.axes.len()
+        );
         Ok(())
     } else {
         println!("\n可動域を超えた指令が {} 件あります:", violations.len());
@@ -201,26 +204,6 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     }
 }
 
-/// [`crate::runner::open_viz`] と同じ。無効なら `None`。
-/// 電源投入姿勢（伏せ）のモデル角。`zero_pose_rad` そのもの。
-///
-/// `q_model = sign * q_motor + zero_pose_rad` で、電源投入時は
-/// `q_motor = 0`。つまり **`zero_pose_rad` の並びが伏せ姿勢**。
-fn crouch_pose(cfg: &AppConfig) -> JointVec {
-    let mut q = JointVec::zeros();
-    for (slot, leg) in misa_hal::joint::LegSlot::ALL
-        .iter()
-        .zip(q.legs.iter_mut())
-    {
-        let Some(bus) = cfg.hardware.serial().ok().and_then(|h| h.bus_for(*slot)) else {
-            continue;
-        };
-        for (m, dst) in bus.motors.iter().zip(leg.iter_mut()) {
-            *dst = m.zero_pose_rad;
-        }
-    }
-    q
-}
 
 fn open_viz(cfg: &VizConfig) -> Result<Option<viz::Publisher>, String> {
     if !cfg.enabled {
@@ -255,29 +238,52 @@ fn row(q: &JointVec) -> String {
     s
 }
 
-/// 可動域は実機設定 (`hardware.legs.bus[].motors[]`) が持っているものを使う。
-/// モデルの `<limit>` ではなく実機の設定を見るのは、実際にクランプするのが
-/// そちらだから。
+/// 可動域を超えた指令を拾う。
 ///
-/// **検証できたかを返す。** 可動域を PC が持たない構成（ブリッジ越し）では
-/// できないので、それを「範囲内」と言わないために区別する。
-fn check_limits(cfg: &AppConfig, q: &JointVec, t: f64, out: &mut Vec<String>) -> bool {
-    let Ok(serial) = cfg.hardware.serial() else {
-        return false;
+/// **見るのは `SafetyGate` に渡すのと同じ [`AxisLimits`]。** 実測値
+/// （プロファイル）があればそれ、無ければモデルの `[joint.limit]`、
+/// どちらも無ければ無制限。ここで別々に設定を読み直すと、ゲートが丸める
+/// 範囲と検証する範囲がずれる。
+fn check_limits(
+    limits: &misa_core::SafetyConfig,
+    layout: &crate::snapshot::AxisLayout,
+    q: &JointVec,
+    t: f64,
+    out: &mut Vec<String>,
+) {
+    let mut check = |id: misa_core::AxisId, value: f64| {
+        let Some(lim) = limits.axes.get(id.index()) else {
+            return;
+        };
+        if value < lim.min_rad || value > lim.max_rad {
+            let name = layout.table.name(id).unwrap_or("?");
+            out.push(format!(
+                "t={t:5.2}s {name} = {value:+.4} rad（範囲 {:+.3}..{:+.3}）",
+                lim.min_rad, lim.max_rad
+            ));
+        }
     };
-    for bus in &serial.legs.bus {
-        let Ok(slot) = bus.leg_slot() else { continue };
-        for (k, motor) in bus.motors.iter().enumerate() {
-            let value = q.legs[slot.index()][k];
-            if value < motor.min_rad || value > motor.max_rad {
-                out.push(format!(
-                    "t={t:5.2}s {}_{}_joint = {value:+.4} rad（範囲 {:+.3}..{:+.3}）",
-                    bus.leg, motor.kind, motor.min_rad, motor.max_rad
-                ));
-            }
+    for leg in 0..4 {
+        for k in 0..3 {
+            check(
+                misa_core::AxisId::new((leg * 3 + k) as u16),
+                q.legs[leg][k],
+            );
         }
     }
-    true
+    if let Some(id) = layout.head {
+        check(id, q.arm);
+    }
+}
+
+/// 可動域の宣言がある軸の数。「すべて範囲内」がどれだけの検証に基づくかを
+/// 添えるため。**無制限の軸ばかりで「範囲内」と言うのは何も言っていない。**
+fn bounded_axes(limits: &misa_core::SafetyConfig) -> usize {
+    limits
+        .axes
+        .iter()
+        .filter(|a| a.min_rad.is_finite() && a.max_rad.is_finite())
+        .count()
 }
 
 fn level_imu() -> ImuSample {
