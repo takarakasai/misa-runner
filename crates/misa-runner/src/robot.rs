@@ -103,8 +103,8 @@ impl Robot {
         let mode = gait_mode_of(select, tuning.crawl_use_linear);
         let mut ctrl =
             AnyGaitController::new(mode, cfg, self.kin_at_height(tuning.stance_height_m));
-        // **膝の向きは機体ごとに違う。** 間違えると IK が鏡像の足先軌道を
-        // 作り、歩容は正しく動いているのに逆へ進む。
+        // **膝の向きは機体ごとに違う。** 取れる向きはモデルの可動域が
+        // 決めるので、`dump` / `sim` の可動域検査で確かめてから選ぶ。
         ctrl.set_knee_pattern(match tuning.knee_pattern {
             KneeShape::BothBack => KneePattern::BothBack,
             KneeShape::MammalianForward => KneePattern::MammalianForward,
@@ -460,6 +460,93 @@ mod tests {
         );
     }
 
+    /// **同梱プロファイルは、モデルが宣言する可動域の中だけで歩くこと。**
+    ///
+    /// これが無かったあいだ、keel に `knee_pattern = "<>"` を入れて掃引し、
+    /// 「いちばん速く前へ進む設定」として採ってしまった (2026-09-01)。keel の
+    /// calf は `-2.705..-0.838` で常に負なので、後脚に正の膝角を要求する `<>`
+    /// は物理的に取れない。**それでも MuJoCo はそれらしく動く** — 脚が可動域に
+    /// 当たって長さが変わり、歩行に見えるものが出る。数字だけ見ていると
+    /// 良い結果に見えるので、ここで落とす。
+    ///
+    /// keel のモデルはリポジトリの外（`../mdls/`）にあるので、無い環境では
+    /// その 1 台を飛ばす。**あるのに落ちる、が拾いたい状態。**
+    #[test]
+    fn every_shipped_profile_stays_inside_the_model_limits() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(format!("{root}/robots")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let mut cfg = AppConfig::from_toml(&text).unwrap();
+            // プロファイルのモデルパスはリポジトリルート相対。
+            if !cfg.control.model.starts_with('/') {
+                cfg.control.model = format!("{root}/{}", cfg.control.model);
+            }
+            if !std::path::Path::new(&cfg.control.model).exists() {
+                println!("飛ばす: {} （モデル {} が無い）", cfg.name, cfg.control.model);
+                continue;
+            }
+            checked += 1;
+            let robot = load_from_config(&cfg).unwrap();
+            let model_limits = robot.limits.clone();
+            let rest = rest_pose(&cfg, &robot);
+            let layout = crate::snapshot::axis_layout(&cfg).unwrap();
+            let dt = 1.0 / cfg.control.rate_hz;
+            let limits = crate::snapshot::safety_config(&cfg, &layout, &model_limits, dt, 5.0);
+            for select in [GaitSelect::Crawl, GaitSelect::Walk, GaitSelect::Trot] {
+                let mut controller = crate::controller::Controller::new(robot_for(&cfg), cfg.clone());
+                let mut intent = misa_core::Intent {
+                    mode: crate::teleop::ModeRequest::Walk,
+                    gait: select,
+                    link_ok: true,
+                    aux_rad: vec![None],
+                    ..misa_core::Intent::default()
+                };
+                let mut violations = Vec::new();
+                for i in 0..(8.0 / dt) as usize {
+                    if controller.state() == crate::controller::State::Active {
+                        intent.velocity = misa_core::Velocity {
+                            vx_m_s: cfg.gait.max_vx_m_s * 0.3,
+                            vy_m_s: 0.0,
+                            wz_rad_s: 0.0,
+                        };
+                    }
+                    let out = controller.tick(&intent, &rest, [0.0; 3], dt);
+                    crate::dump::check_limits(
+                        &limits,
+                        &layout,
+                        &out.targets,
+                        i as f64 * dt,
+                        &mut violations,
+                    );
+                }
+                assert!(
+                    violations.is_empty(),
+                    "{} の {:?} が可動域を {} 件破っています。最初の 3 件:\n  {}",
+                    cfg.name,
+                    select,
+                    violations.len(),
+                    violations
+                        .iter()
+                        .take(3)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("\n  ")
+                );
+            }
+        }
+        assert!(checked > 0, "プロファイルを 1 つも検査できていません");
+    }
+
+    /// 上の試験用。`Controller::new` がモデルを move するので歩容ごとに読み直す。
+    fn robot_for(cfg: &AppConfig) -> Robot {
+        load_from_config(cfg).unwrap()
+    }
+
     /// 同梱モデルの絶対パス（`crates/misa-runner` から見たリポジトリルート）。
     fn shipped_model_path() -> String {
         format!("{}/../../models/namiashi/namiashi.misa", env!("CARGO_MANIFEST_DIR"))
@@ -482,3 +569,4 @@ mod tests {
         assert_eq!(resolve_kinematics_posture(&lib, "nope"), home);
     }
 }
+

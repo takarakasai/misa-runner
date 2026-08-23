@@ -244,7 +244,7 @@ fn row(q: &JointVec) -> String {
 /// （プロファイル）があればそれ、無ければモデルの `[joint.limit]`、
 /// どちらも無ければ無制限。ここで別々に設定を読み直すと、ゲートが丸める
 /// 範囲と検証する範囲がずれる。
-fn check_limits(
+pub(crate) fn check_limits(
     limits: &misa_core::SafetyConfig,
     layout: &crate::snapshot::AxisLayout,
     q: &JointVec,

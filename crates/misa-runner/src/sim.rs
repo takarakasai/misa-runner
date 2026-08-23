@@ -166,7 +166,16 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         .head
         .is_some_and(|id| plant.capabilities().driven.get(id.index()) == Some(&true));
     let mut controller = Controller::with_arm(robot, cfg.clone(), head_driven);
-    let mut shadow_gate = misa_core::SafetyGate::new(crate::snapshot::safety_config(cfg, &layout, &model_limits, dt, 5.0));
+    // **可動域は `dump` と同じ表で、同じ関数で見る。**
+    //
+    // ここを入れる前は `sim` だけが素通りしていた。可動域を破る膝の向きを
+    // 設定に入れたまま掃引して、「速く前へ進む」設定として選んでしまった
+    // ことがある (2026-09-01)。実際には後脚の膝が可動域に当たって脚の
+    // 長さが変わっていただけで、歩行ではなかった。**動力学が付くと
+    // それらしく動いてしまうぶん、シムのほうが誤魔化されやすい。**
+    let limits = crate::snapshot::safety_config(cfg, &layout, &model_limits, dt, 5.0);
+    let mut violations: Vec<String> = Vec::new();
+    let mut shadow_gate = misa_core::SafetyGate::new(limits.clone());
     let recorder = match cli.str("record") {
         Some(path) => {
             let header = misa_core::record::Header {
@@ -185,12 +194,15 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let mut obs = misa_core::Observation::empty(layout.table.len(), 4);
     plant.exchange(&misa_core::Command::idle(layout.table.len()), &mut obs)?;
 
+    let start = plant.base_position().unwrap_or([0.0; 3]);
+    let start_yaw = obs.imu.map(|m| m.rpy_rad[2]).unwrap_or(0.0);
+
     println!(
         "MuJoCo で歩容 {} / v=({vx:+.3}, {vy:+.3}, {wz:+.3}) / {:.0} Hz / {seconds:.1} s",
         gait.label(),
         cfg.control.rate_hz
     );
-    println!("t[s]   状態         胴体 z[m]  roll   pitch  接地");
+    println!("t[s]   状態         胴体 z[m]  roll   pitch  yaw    接地");
 
     // `--secs 0` で操縦者が止めるまで（Ctrl-C）。
     let steps = if seconds <= 0.0 && interactive {
@@ -223,6 +235,8 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         let measured = jointvec_from(&obs);
         let attitude = obs.imu.map(|m| m.rpy_rad).unwrap_or([0.0; 3]);
         let out = controller.tick(&cmd, &measured, attitude, dt);
+
+        crate::dump::check_limits(&limits, &layout, &out.targets, t, &mut violations);
 
         let outgoing = crate::snapshot::command(
             &layout,
@@ -299,10 +313,11 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                 })
                 .collect();
             println!(
-                "{t:5.2}  {:<12} {z:8.3}  {:+.3} {:+.3}  {feet}",
+                "{t:5.2}  {:<12} {z:8.3}  {:+.3} {:+.3} {:+.3}  {feet}",
                 out.state.label(),
                 att[0],
-                att[1]
+                att[1],
+                att[2]
             );
         }
     }
@@ -323,12 +338,36 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let _ = &mut video;
 
     let end = plant.base_position().unwrap_or([f64::NAN; 3]);
+    // **世界座標の移動量だけでは「前へ歩いたか」は分からない。** 機体が
+    // ヨーしていれば前進が世界の −x に出る。歩容の指令は機体座標なので、
+    // 出発時の向きへ射影した前後・左右も添える。
+    let yaw0 = start_yaw;
+    let (dx, dy) = (end[0] - start[0], end[1] - start[1]);
+    let (s0, c0) = yaw0.sin_cos();
+    let (fwd, lat) = (dx * c0 + dy * s0, -dx * s0 + dy * c0);
+    let yaw_end = obs.imu.map(|m| m.rpy_rad[2]).unwrap_or(f64::NAN);
     println!(
         "\n終端 胴体位置 ({:+.3}, {:+.3}, {:+.3})  最低高さ {min_z:.3} m",
         end[0], end[1], end[2]
     );
+    println!(
+        "機体座標の移動 前後 {fwd:+.3} m / 左右 {lat:+.3} m  ヨー {:+.1}°（出発 {:+.1}°）",
+        yaw_end.to_degrees(),
+        yaw0.to_degrees()
+    );
+    if !violations.is_empty() {
+        println!("\n可動域を超えた指令が {} 件あります:", violations.len());
+        for v in violations.iter().take(20) {
+            println!("  {v}");
+        }
+    }
     match fell {
         Some(t) => Err(format!("**転倒しました**（t={t:.2} s で胴体が 1 rad 以上傾いた）")),
+        None if !violations.is_empty() => Err(format!(
+            "可動域を超える指令が {} 件出ています。この結果を歩容の良し悪しの\
+             判断に使わないでください（脚が可動域に当たって長さが変わります）",
+            violations.len()
+        )),
         None => {
             println!("転倒なし");
             Ok(())
