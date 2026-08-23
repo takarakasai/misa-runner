@@ -394,6 +394,7 @@ const VALUE_FLAGS: &[&str] = &[
     "kp",
     "kv",
     "base-height",
+    "pilot",
     "config",
     "secs",
     "gait",

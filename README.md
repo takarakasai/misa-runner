@@ -176,6 +176,29 @@ cargo run --release --features sim -- \
     sim --robot robots/namiashi.toml --gait trot --vx 0.15 --secs 8
 ```
 
+### プロポで操縦しながら見る
+
+`--pilot sbus` で**実物の送信機から操縦できる**。要るのは受信機と CH348 基板
+だけで、脚もモータも要らない。チャンネル割り当て・不感帯・エクスポという
+間違えやすいところを、実機を壊さずに確かめられる。
+
+```sh
+# 1) MuJoCo 側（プロポで操縦 + articara へ配信）
+cargo run --release --features sim -- sim --robot robots/namiashi.toml \
+    --pilot sbus --secs 0 --viz --viz-endpoint tcp/127.0.0.1:7447
+
+# 2) 別端末で articara（Live gait feed で購読）
+cd ../articara && cargo run --release --features viz -- \
+    --model ../namiashi_description/namiashi.misa
+```
+
+**`--viz` か `--pilot sbus` を付けると自動で実時間になる。** 付けないと
+MuJoCo を全力で回すので、10 秒ぶんが 1 秒で終わって目でも手でも追えない。
+`--realtime` で明示もできる。
+
+配信は **planned（指令）と measured（MuJoCo の実測）の両方**。受け側が
+ゴーストで重ねて描くので、追従できていない軸が目で分かる。
+
 ```text
 t[s]   状態         胴体 z[m]  roll   pitch  接地
  3.00  立ち姿勢へ           0.213  -0.001 +0.000  ■■■■

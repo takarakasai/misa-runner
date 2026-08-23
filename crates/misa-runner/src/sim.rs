@@ -16,7 +16,7 @@
 //! **脱力も再現されない**（位置アクチュエータにはその概念が無いので、
 //! `Idle` の軸はその場で保持される）。
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use misa_core::{Pilot as _, Plant as _};
 use misa_plant_mujoco::{MujocoPlant, SimOptions};
@@ -25,6 +25,7 @@ use crate::config::AppConfig;
 use crate::controller::{Controller, State};
 use crate::teleop::{GaitSelect, ModeRequest};
 use misa_core::{Intent, Velocity};
+use crate::viz;
 use crate::Cli;
 
 pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
@@ -39,6 +40,34 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let wz = cli.f64("wz").unwrap_or(0.0);
     let seconds = cli.f64("secs").unwrap_or(6.0);
     let every = cli.usize("every").unwrap_or(200).max(1);
+    let viz_cfg = crate::viz_config(cli);
+    // **可視化するなら実時間で流す。** 全力で回すと 10 秒ぶんが 1 秒で
+    // 終わって、目でも手でも追えない。操縦するときも同じ。
+    let realtime = cli.flag("realtime") || viz_cfg.enabled || cli.str("pilot") == Some("sbus");
+
+    // **Pilot を先に開く。** 受信機が無いのにモデルを読んでから落ちると、
+    // 待たされたうえで原因が最後に出る。
+    // **台本もプロポも同じ Pilot。** どちらから入っても制御則は同じ経路を
+    // 通るので、プロポの解釈（チャンネル・不感帯・エクスポ）を実機を
+    // 壊さずに確かめられる。
+    let mut pilot: Box<dyn misa_core::Pilot> = match cli.str("pilot").unwrap_or("script") {
+        "script" => Box::new(crate::pilot::ScriptPilot::new(Intent {
+            mode: ModeRequest::Walk,
+            gait,
+            aux_rad: vec![None],
+            link_ok: true,
+            ..Intent::default()
+        })),
+        "sbus" => {
+            // 受信機だけ開く。脚バスも IMU も MuJoCo の側にある。
+            let map = misa_hal::ch348::PortMap::discover().map_err(|e| e.to_string())?;
+            let p = crate::pilot::SbusPilot::connect_with(cfg, &map, false)?;
+            println!("プロポから操縦します（CH5 が脱力位置で待機）");
+            Box::new(p)
+        }
+        other => return Err(format!("未知の pilot {other:?}（script|sbus）")),
+    };
+    let scripted = cli.str("pilot").unwrap_or("script") == "script";
 
     let robot = crate::robot::load_from_config(cfg)?;
     let model_limits = robot.limits.clone();
@@ -89,15 +118,6 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         None => None,
     };
 
-    // **台本も Pilot。** プロポと同じ穴から意図が入るので、実機と同じ
-    // 制御則がそのまま回る。
-    let mut pilot = crate::pilot::ScriptPilot::new(Intent {
-        mode: ModeRequest::Walk,
-        gait,
-        aux_rad: vec![None],
-        link_ok: true,
-        ..Intent::default()
-    });
 
     let mut obs = misa_core::Observation::empty(layout.table.len(), 4);
     plant.exchange(&misa_core::Command::idle(layout.table.len()), &mut obs)?;
@@ -111,19 +131,27 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
 
     let steps = (seconds / dt).ceil() as usize;
     let mut min_z = f64::INFINITY;
+    let mut script_velocity = Velocity::ZERO;
+    let mut publisher = crate::runner::open_viz(&viz_cfg)?;
+    let period = Duration::from_secs_f64(dt);
+    let mut next = Instant::now();
     let mut fell = None;
 
     for i in 0..steps {
         let t = i as f64 * dt;
-        // 立ち上がってから速度を入れる。遷移中に入れても意味がない。
-        if controller.state() == State::Active {
-            pilot.intent_mut().velocity = Velocity {
+        // 台本のときだけ、立ち上がってから速度を入れる。プロポのときは
+        // 操縦者が入れるので触らない。
+        if scripted && controller.state() == State::Active {
+            script_velocity = Velocity {
                 vx_m_s: vx,
                 vy_m_s: vy,
                 wz_rad_s: wz,
             };
         }
-        let cmd = pilot.poll(obs.time);
+        let mut cmd = pilot.poll(obs.time);
+        if scripted {
+            cmd.velocity = script_velocity;
+        }
         let measured = jointvec_from(&obs);
         let attitude = obs.imu.map(|m| m.rpy_rad).unwrap_or([0.0; 3]);
         let out = controller.tick(&cmd, &measured, attitude, dt);
@@ -156,6 +184,33 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         if fell.is_none() && (att[0].abs() > 1.0 || att[1].abs() > 1.0) {
             fell = Some(t);
         }
+        // **planned（指令）と measured（MuJoCo の実測）を両方流す。**
+        // 受け側はゴーストで重ねて描くので、追従できていない軸が目で分かる。
+        if let Some(p) = publisher.as_mut() {
+            let body = controller.body_view();
+            let measured_body = viz::BodyView {
+                rp: [att[0], att[1]],
+                ..body
+            };
+            let planned = out.targets;
+            p.maybe_publish(|seq| {
+                viz::Frames::both(
+                    viz::frame(seq, t, &planned, &body),
+                    viz::frame(seq, t, &measured, &measured_body),
+                )
+            });
+        }
+
+        if realtime {
+            next += period;
+            let now = Instant::now();
+            if next > now {
+                std::thread::sleep(next - now);
+            } else {
+                next = now;
+            }
+        }
+
         if i % every == 0 {
             let feet: String = obs
                 .contacts
