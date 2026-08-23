@@ -130,7 +130,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             cmd.vy_m_s = vy;
             cmd.wz_rad_s = wz;
         }
-        let out = controller.tick(&cmd, &measured, &imu, dt);
+        let out = controller.tick(&cmd, &measured, imu.rpy_rad, dt);
         check_limits(cfg, &out.targets, t, &mut violations);
         if i % every == 0 {
             println!("{t:5.2}  {:<12} {}", out.state.label(), row(&out.targets));

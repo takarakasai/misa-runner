@@ -32,7 +32,7 @@
 //! | 語彙: [`Time`] / [`Observation`] / [`Command`] / [`Intent`] | ここ |
 //! | [`SafetyGate`]（指令を書き換えてよい唯一の場所） | 部品はここ。配線は記録の後 |
 //! | 記録と再生: [`Frame`] / [`diff_commands`] | ここ |
-//! | `Plant`（全軸・1 tick の `exchange`） | 未 |
+//! | [`Plant`]（全軸・1 tick の `exchange`） | ここ |
 //!
 //! いまはまだ制御ループがこの型を使っていない。実装との橋渡しは
 //! `misa-runner` 側の変換にあり、そこがこの語彙で実機の状態を表せることの
@@ -42,6 +42,7 @@ pub mod axis;
 pub mod command;
 pub mod intent;
 pub mod observation;
+pub mod plant;
 pub mod record;
 pub mod safety;
 pub mod time;
@@ -50,6 +51,7 @@ pub use axis::{Axis, AxisId, AxisRole, AxisTable};
 pub use command::{AxisCommand, Command, ControlMode};
 pub use intent::{GaitSelect, Intent, ModeRequest, PoseSlot, Velocity};
 pub use observation::{AxisHealth, AxisState, Contact, Imu, Observation};
+pub use plant::{Plant, PlantCaps};
 pub use record::{diff_commands, Divergence, Frame, Header, FORMAT_VERSION};
 pub use safety::{AxisLimits, SafetyConfig, SafetyGate, SafetyVerdict};
 pub use time::Time;

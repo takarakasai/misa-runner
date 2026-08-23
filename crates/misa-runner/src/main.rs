@@ -20,6 +20,7 @@ mod controller;
 mod diag;
 mod dump;
 mod jointvec;
+mod plant;
 mod pose;
 mod record;
 mod robot;

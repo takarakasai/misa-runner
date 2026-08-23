@@ -19,6 +19,8 @@ use crate::config::AppConfig;
 use crate::controller::{Controller, State};
 use crate::jointvec::JointVec;
 use crate::robot::Robot;
+use misa_core::Plant as _;
+
 use crate::teleop::Teleop;
 use crate::viz::{self, VizConfig};
 
@@ -362,10 +364,10 @@ impl Default for RunOptions {
 
 /// 制御ループ本体。Ctrl-C か致命的エラーで戻る。
 pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String> {
-    let mut hw = Hardware::connect(&cfg)?;
+    let mut plant = crate::plant::SerialPlant::connect(&cfg)?;
 
     // 受信機を待つ。プロポが無い状態で起立させないための入口チェック。
-    match hw.sbus.wait_ready(Duration::from_secs(3)) {
+    match plant.hw().sbus.wait_ready(Duration::from_secs(3)) {
         Ok(_) => log::info!("S.BUS 受信を確認しました"),
         Err(e) if opts.allow_no_sbus => {
             log::warn!("S.BUS が来ていません ({e})。--allow-no-sbus 指定のため続行します")
@@ -377,7 +379,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
             ))
         }
     }
-    match hw.imu.wait_ready(Duration::from_secs(2)) {
+    match plant.hw().imu.wait_ready(Duration::from_secs(2)) {
         Ok(_) => log::info!("IMU を確認しました"),
         // IMU はチキンヘッドと姿勢フィードバックにしか使っていないので、
         // 無くても歩容そのものは回る。止めずに警告に留める。
@@ -391,7 +393,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
     // なっていた。異常終了から再起動すると崩れた姿勢が原点になる、という
     // 危うさもあった。いまは電源を入れ直さない限り原点は動かない。
     if !opts.skip_zero {
-        hw.legs
+        plant.hw().legs
             .wait_anchored(Duration::from_secs(3))
             .map_err(|e| format!("{e}（モータの電源とボーレートを確認してください）"))?;
         log::info!("マルチターンフレームを確立しました");
@@ -407,7 +409,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
     // 0 を掴むと、実際には −2.7 rad にある calf の目標がいきなり 0 になり、
     // **最初の起立で暴れる**。`--skip-zero` でも省略しない — 読めない 12 軸を
     // 相手に制御ループを回すこと自体が危ない。
-    hw.legs
+    plant.hw().legs
         .wait_first_read(Duration::from_secs(2))
         .map_err(|e| format!("{e}（12 軸すべてが応答している必要があります）"))?;
     log::info!("12 軸の初回読み出しを確認しました");
@@ -422,7 +424,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
     // `--allow-no-sbus` のときは見ない。受信が無い＝フェイルセーフ＝起立が
     // その指定の意味そのもので、そこで止めても意味がない。
     if !opts.allow_no_sbus {
-        let sbus = hw.sbus.state();
+        let sbus = plant.hw().sbus.state();
         if cfg.teleop.mode.position(&sbus) != 0 {
             return Err(format!(
                 "{RETRYABLE}CH5（モード）が脱力位置にありません（いま {} 段目 / raw {}）。                 **脱力に戻してから起動してください。** このまま起動すると                 操作なしで立ち上がります",
@@ -441,18 +443,18 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
 
     // **原点の張り直しは CH5 の確認より後。** 張り直しはそのときの姿勢を
     // 無条件に原点にするので、起動を続ける気が無い回でやってはいけない。
-    zero_multiturn_once(&cfg, &hw)?;
-    verify_crouch_frame(&cfg, &hw);
+    zero_multiturn_once(&cfg, plant.hw())?;
+    verify_crouch_frame(&cfg, plant.hw());
 
     let stop = install_signal_handler();
     let mut teleop = Teleop::new(cfg.teleop.clone(), &cfg.gait, &cfg.hardware.arm);
     let teleop_timeout = Duration::from_millis(cfg.control.teleop_timeout_ms);
     let period = Duration::from_secs_f64(1.0 / cfg.control.rate_hz);
-    let arm_app_driven = hw.arm.is_app_driven();
+    let arm_app_driven = plant.hw().arm.is_app_driven();
     if !arm_app_driven {
         log::info!(
             "腕はアプリから駆動しません（{}）。目標角にはプロポからの観測値を置きます",
-            if hw.arm.is_connected() {
+            if plant.hw().arm.is_connected() {
                 "受信機直結"
             } else {
                 "未配線"
@@ -509,8 +511,20 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         cfg.hardware.legs.bus_rate_hz
     );
 
+    // 最初の観測を 1 回取っておく。指令は全軸脱力。
+    //
+    // **`exchange` は「出して、受け取る」で 1 往復。** したがって `tick` が
+    // 見る観測は前周期に持ち帰ったものになる（200 Hz で 5 ms）。指令のほうは
+    // `tick` の直後に出るので遅れない。要求応答の配備先（keel の中間層、
+    // Unitree の lowcmd/lowstate）では消せない性質なので、実機が只で読める
+    // namiashi でも同じ形に揃えてある。
+    let mut obs = misa_core::Observation::empty(axis_table.len(), 4);
+    plant
+        .exchange(&misa_core::Command::idle(axis_table.len()), &mut obs)
+        .map_err(|e| format!("実機の初回読み出しに失敗: {e}"))?;
+
     while !stop.load(Ordering::Relaxed) {
-        let sbus = hw.sbus.state();
+        let sbus = plant.hw().sbus.state();
         let usable = sbus.is_usable(teleop_timeout);
         // 受信が無いときの扱いは 2 通りあり、混ぜてはいけない。
         //
@@ -525,26 +539,26 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         } else {
             teleop.update(&sbus, usable)
         };
-        let imu = hw.imu.sample_or_level();
         // 受信機直結の腕は、プロポのチャンネルから読んだ角度が唯一の手がかり。
         if let Some(observed) = cmd.arm_rad {
-            hw.arm.observe(observed);
+            plant.hw_mut().arm.observe(observed);
         }
-        let measured = hw.measured(hw.arm.position());
+        let measured = jointvec_from(&obs);
+        let attitude = obs.imu.map(|i| i.rpy_rad).unwrap_or([0.0; 3]);
 
-        let out = controller.tick(&cmd, &measured, &imu, period.as_secs_f64());
+        let out = controller.tick(&cmd, &measured, attitude, period.as_secs_f64());
 
         // モータの投入・切断は状態が変わった瞬間だけ。毎周期投げると
         // バスの帯域を食うし、`motor_run` の連打はモータ側にも優しくない。
         let want_enabled = out.leg_mode != JointMode::Idle;
         if want_enabled != motors_enabled {
-            let req = if want_enabled {
-                BusRequest::Enable
+            let r = if want_enabled {
+                plant.arm()
             } else {
-                BusRequest::Disable
+                plant.disarm()
             };
-            if let Err(e) = hw.legs.request_all(req) {
-                log::error!("{req:?} を送れません: {e}");
+            if let Err(e) = r {
+                log::error!("モータの投入／切断を送れません: {e}");
                 break;
             }
             motors_enabled = want_enabled;
@@ -554,54 +568,43 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         if out.leg_mode != JointMode::Idle {
             watch.tick(&out.targets, &measured);
         }
-        write_targets(&hw, &out.targets, out.leg_mode, &cfg);
-        if arm_app_driven {
-            if let Err(e) = hw.arm.set_position(out.targets.arm) {
-                log::warn!("腕サーボへの指令に失敗: {e}");
-            }
-        }
+        let outgoing = crate::snapshot::command(
+            &out.targets,
+            cfg.hardware.legs.default_max_speed_rad_s,
+            out.leg_mode == JointMode::Idle,
+        );
 
+        // 記録は**送る指令**と、その指令を計算するのに使った観測の組。
+        // ゲートは影で回すだけで、出力（`shadow`）は捨てる。
         if let Some(rec) = recorder.as_ref() {
-            let dt = last_tick.elapsed();
-            let mut statuses = [[misa_hal::legs::JointStatus::default(); 3]; 4];
-            for (i, bus) in hw.legs.buses().iter().enumerate() {
-                statuses[i] = bus.status();
-            }
-            let obs = crate::snapshot::observation(
-                misa_core::Time::from_secs_f64(started.elapsed().as_secs_f64()),
-                &hw.legs.states(),
-                &statuses,
-                hw.arm.position(),
-                &imu,
-                imu.stamp.elapsed(),
-            );
-            let mut shadow = crate::snapshot::command(
-                &out.targets,
-                cfg.hardware.legs.default_max_speed_rad_s,
-                out.leg_mode == JointMode::Idle,
-            );
-            let verdict = shadow_gate.apply(&mut shadow, &obs, dt);
+            let mut shadow = outgoing.clone();
+            let verdict = shadow_gate.apply(&mut shadow, &obs, last_tick.elapsed());
             rec.push(misa_core::record::Frame {
                 seq: ticks,
                 time: obs.time,
                 intent: crate::snapshot::intent(obs.time, &cmd),
-                observation: obs,
-                command: shadow,
+                observation: obs.clone(),
+                command: outgoing.clone(),
                 verdict,
             });
         }
         last_tick = Instant::now();
+
+        if let Err(e) = plant.exchange(&outgoing, &mut obs) {
+            log::error!("実機との往復に失敗: {e}");
+            break;
+        }
 
         if let Some(p) = publisher.as_mut() {
             // 最初の読み戻しが済むまで measured を送らない。ゼロ姿勢のフレームは
             // 受け側で「崩れ落ちたロボット」として描かれる。
             // 一度立ったら見に行かない（`all_ok` は 12 軸ぶんロックを取る）。
             if !measured_seen {
-                measured_seen = hw.legs.all_ok();
+                measured_seen = plant.hw().legs.all_ok();
             }
             let body = controller.body_view();
             let t = started.elapsed().as_secs_f64();
-            let att = imu.rpy_rad;
+            let att = attitude;
             p.maybe_publish(|seq| {
                 let planned = viz::frame(seq, t, &out.targets, &body);
                 if !measured_seen {
@@ -628,7 +631,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
             && last_status.elapsed().as_secs_f64() >= opts.status_interval_s
         {
             log_status(
-                &hw,
+                plant.hw(),
                 &controller,
                 &cmd,
                 ticks,
@@ -662,11 +665,11 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
 
     log::info!("停止要求を受けました。脱力します");
     let idle = [JointCommand::default(); 3];
-    for bus in hw.legs.buses() {
+    for bus in plant.hw().legs.buses() {
         bus.set_commands(idle);
     }
-    let _ = hw.legs.request_all(BusRequest::Disable);
-    let _ = hw.arm.relax();
+    let _ = plant.hw().legs.request_all(BusRequest::Disable);
+    let _ = plant.hw_mut().arm.relax();
     // バススレッドが Disable を実際に送るまで待ってから drop する。
     std::thread::sleep(Duration::from_millis(100));
     Ok(())
@@ -684,20 +687,23 @@ pub(crate) fn open_viz(cfg: &VizConfig) -> Result<Option<viz::Publisher>, String
 }
 
 /// 目標角を 4 本のバスへ配る。
-fn write_targets(hw: &Hardware, targets: &JointVec, mode: JointMode, cfg: &AppConfig) {
-    let speed = cfg.hardware.legs.default_max_speed_rad_s;
-    let mut cmds = [[JointCommand::default(); 3]; 4];
-    for (bus, leg) in cmds.iter_mut().zip(targets.legs.iter()) {
-        for (cmd, &q) in bus.iter_mut().zip(leg.iter()) {
-            *cmd = JointCommand {
-                mode,
-                position_rad: q,
-                max_speed_rad_s: speed,
-                torque_nm: 0.0,
-            };
+/// 観測を関節ベクトルへ。並びは [`crate::snapshot::axis_table`] と同じ。
+///
+/// 制御則がまだ [`JointVec`] を受け取るための橋渡し。Policy が
+/// `Observation` を直接取るようになったら消える。
+fn jointvec_from(obs: &misa_core::Observation) -> JointVec {
+    let mut q = JointVec::zeros();
+    for leg in 0..4 {
+        for k in 0..3 {
+            if let Some(a) = obs.get(misa_core::AxisId::new((leg * 3 + k) as u16)) {
+                q.legs[leg][k] = a.position_rad;
+            }
         }
     }
-    hw.legs.set_all(&cmds);
+    if let Some(a) = obs.get(misa_core::AxisId::new(12)) {
+        q.arm = a.position_rad;
+    }
+    q
 }
 
 fn log_status(

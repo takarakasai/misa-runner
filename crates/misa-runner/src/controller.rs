@@ -15,7 +15,6 @@
 //! 同じことを 2 か所で書くことになる。
 
 use misarta::trajectory::InterpolationKind;
-use misa_hal::imu::ImuSample;
 use misa_hal::joint::JointMode;
 use quadruped_gait::{AnyGaitController, GaitGenerator};
 
@@ -191,7 +190,7 @@ impl Controller {
         &mut self,
         cmd: &OperatorCommand,
         measured: &JointVec,
-        imu: &ImuSample,
+        attitude_rad: [f64; 3],
         dt: f64,
     ) -> ControlOutput {
         let before = self.state;
@@ -214,7 +213,7 @@ impl Controller {
             State::GoingToStart => self.tick_going_to_start(cmd, dt),
             State::HoldingStart => self.tick_holding_start(cmd),
             State::GoingToStance => self.tick_transition(dt, State::Active),
-            State::Active => self.tick_active(cmd, imu, dt),
+            State::Active => self.tick_active(cmd, attitude_rad, dt),
             State::PlayingPose => self.tick_pose(cmd, dt),
         }
 
@@ -360,7 +359,7 @@ impl Controller {
         }
     }
 
-    fn tick_active(&mut self, cmd: &OperatorCommand, imu: &ImuSample, dt: f64) {
+    fn tick_active(&mut self, cmd: &OperatorCommand, attitude_rad: [f64; 3], dt: f64) {
         if cmd.play_pose {
             // 押した瞬間の選択スイッチで決める。再生中に動かしても
             // 切り替わらない。
@@ -405,12 +404,12 @@ impl Controller {
         let v = self.ramp_velocity(want, dt);
         self.gait.set_velocity_cmd(velocity_cmd(v[0], v[1], v[2]));
         self.gait
-            .set_body_attitude_observed(imu.rpy_rad[0], imu.rpy_rad[1]);
+            .set_body_attitude_observed(attitude_rad[0], attitude_rad[1]);
         let out = self.gait.tick(dt);
         if !out.all_reachable() {
             log::warn!("IK が届かない脚があります（姿勢がクランプされました）");
         }
-        let arm = self.arm_target(cmd, imu.rpy_rad[1], dt);
+        let arm = self.arm_target(cmd, attitude_rad[1], dt);
         self.tilt_toward(cmd.body_attitude_rad, dt);
         self.body_view = BodyView {
             xy: [
@@ -637,14 +636,9 @@ mod tests {
     use super::*;
     use crate::teleop::{GaitSelect, ModeRequest};
 
-    fn imu() -> ImuSample {
-        ImuSample {
-            rpy_rad: [0.0; 3],
-            gyro_rad_s: [0.0; 3],
-            accel_m_s2: [0.0, 0.0, 9.80665],
-            temperature_c: 25.0,
-            stamp: std::time::Instant::now(),
-        }
+    /// 水平の姿勢。胴体姿勢を使う試験だけがここを変える。
+    fn imu() -> [f64; 3] {
+        [0.0; 3]
     }
 
     fn cmd(mode: ModeRequest) -> OperatorCommand {
@@ -691,7 +685,7 @@ mod tests {
             let mut stand = cmd(ModeRequest::Walk);
             stand.gait = select;
             run_until(&mut c, &stand, State::Active, 20.0);
-            let mut prev = c.tick(&stand, &JointVec::zeros(), &imu(), dt).targets;
+            let mut prev = c.tick(&stand, &JointVec::zeros(), imu(), dt).targets;
 
             let mut go = stand;
             go.vx_m_s = 0.10;
@@ -699,7 +693,7 @@ mod tests {
             // 0 = 歩き出し、1 = 停止。**跳びの性質が違う。**
             for (phase_i, phase) in [go, stand].into_iter().enumerate() {
                 for _ in 0..400 {
-                    let q = c.tick(&phase, &JointVec::zeros(), &imu(), dt).targets;
+                    let q = c.tick(&phase, &JointVec::zeros(), imu(), dt).targets;
                     for l in 0..4 {
                         for k in 0..3 {
                             let r = (q.legs[l][k] - prev.legs[l][k]).abs() / dt;
@@ -756,7 +750,7 @@ mod tests {
             go.vx_m_s = 0.10;
             run_until(&mut c, &go, State::Active, 20.0);
             for _ in 0..400 {
-                c.tick(&go, &JointVec::zeros(), &imu(), dt);
+                c.tick(&go, &JointVec::zeros(), imu(), dt);
             }
             // 中立を 25 ms 通過して反対側へ。
             let mut centre = go;
@@ -764,7 +758,7 @@ mod tests {
             let mut back = go;
             back.vx_m_s = -0.10;
             for _ in 0..5 {
-                c.tick(&centre, &JointVec::zeros(), &imu(), dt);
+                c.tick(&centre, &JointVec::zeros(), imu(), dt);
                 assert!(
                     c.ramped_v.iter().any(|v| *v != 0.0),
                     "{} で中立通過の瞬間に速度がちょうど 0 になった                     （歩容が立脚静止へ落ちる）",
@@ -772,7 +766,7 @@ mod tests {
                 );
             }
             for _ in 0..5 {
-                c.tick(&back, &JointVec::zeros(), &imu(), dt);
+                c.tick(&back, &JointVec::zeros(), imu(), dt);
             }
         }
     }
@@ -804,7 +798,7 @@ mod tests {
                 go.wz_rad_s = 0.6;
                 run_until(&mut c, &go, State::Active, 20.0);
                 for _ in 0..400 {
-                    c.tick(&go, &JointVec::zeros(), &imu(), dt);
+                    c.tick(&go, &JointVec::zeros(), imu(), dt);
                 }
                 // 中立へ戻す。歩容が完全に静止するまでの時間を測る。
                 let centre = {
@@ -814,9 +808,9 @@ mod tests {
                     x
                 };
                 let mut stopped_at = None;
-                let mut prev = c.tick(&centre, &JointVec::zeros(), &imu(), dt).targets;
+                let mut prev = c.tick(&centre, &JointVec::zeros(), imu(), dt).targets;
                 for i in 1..600 {
-                    let q = c.tick(&centre, &JointVec::zeros(), &imu(), dt).targets;
+                    let q = c.tick(&centre, &JointVec::zeros(), imu(), dt).targets;
                     // 目標がまったく動かなくなったら静止。
                     if q.max_abs_diff(&prev) < 1e-12 && c.ramped_v.iter().all(|v| *v == 0.0) {
                         stopped_at = Some(i as f64 * dt);
@@ -853,7 +847,7 @@ mod tests {
         let mut c2 = controller();
         run_until(&mut c2, &cmd(ModeRequest::Walk), State::Active, 20.0);
         for _ in 0..10 {
-            c2.tick(&go, &JointVec::zeros(), &imu(), dt);
+            c2.tick(&go, &JointVec::zeros(), imu(), dt);
         }
         assert!(
             c2.ramped_v[0] < 0.15 * 0.5,
@@ -862,7 +856,7 @@ mod tests {
         );
         // 中立へ戻すときも同じレート。
         let before = c2.ramped_v[0];
-        c2.tick(&cmd(ModeRequest::Walk), &JointVec::zeros(), &imu(), dt);
+        c2.tick(&cmd(ModeRequest::Walk), &JointVec::zeros(), imu(), dt);
         assert!(c2.ramped_v[0] < before);
         assert!(c2.ramped_v[0] > 0.0, "1 周期で 0 まで落ちている");
     }
@@ -871,7 +865,7 @@ mod tests {
         let dt = 0.005;
         let mut t = 0.0;
         while t < max_s {
-            let out = c.tick(command, &JointVec::zeros(), &imu(), dt);
+            let out = c.tick(command, &JointVec::zeros(), imu(), dt);
             if out.state == want {
                 return;
             }
@@ -883,7 +877,7 @@ mod tests {
     #[test]
     fn it_starts_relaxed_and_sends_no_position_command() {
         let mut c = controller();
-        let out = c.tick(&cmd(ModeRequest::Relax), &JointVec::zeros(), &imu(), 0.005);
+        let out = c.tick(&cmd(ModeRequest::Relax), &JointVec::zeros(), imu(), 0.005);
         assert_eq!(out.state, State::Relaxed);
         assert_eq!(out.leg_mode, JointMode::Idle);
     }
@@ -894,7 +888,7 @@ mod tests {
         let mut c = controller();
         let mut measured = JointVec::zeros();
         measured.legs[2][1] = 0.61;
-        let out = c.tick(&cmd(ModeRequest::Relax), &measured, &imu(), 0.005);
+        let out = c.tick(&cmd(ModeRequest::Relax), &measured, imu(), 0.005);
         assert_eq!(out.targets, measured);
     }
 
@@ -902,12 +896,12 @@ mod tests {
     fn standing_goes_through_the_start_pose_then_the_stance() {
         let mut c = controller();
         let stand = cmd(ModeRequest::Walk);
-        c.tick(&stand, &JointVec::zeros(), &imu(), 0.005);
+        c.tick(&stand, &JointVec::zeros(), imu(), 0.005);
         assert_eq!(c.state(), State::GoingToStart);
         run_until(&mut c, &stand, State::GoingToStance, 10.0);
         run_until(&mut c, &stand, State::Active, 10.0);
         assert_eq!(
-            c.tick(&stand, &JointVec::zeros(), &imu(), 0.005).leg_mode,
+            c.tick(&stand, &JointVec::zeros(), imu(), 0.005).leg_mode,
             JointMode::Position
         );
     }
@@ -925,7 +919,7 @@ mod tests {
             .pose(&cfg.control.start_pose)
             .map(|p| c.robot().poses.resolve(&p.angles, JointVec::zeros()))
             .expect("start_pose がモデルにありません");
-        let out = c.tick(&stand, &JointVec::zeros(), &imu(), 0.0);
+        let out = c.tick(&stand, &JointVec::zeros(), imu(), 0.0);
         assert!(
             out.targets.max_abs_diff(&start) < 1e-6,
             "start_pose に着く前に次の遷移へ進んでいます"
@@ -940,18 +934,18 @@ mod tests {
         let mut c = controller();
         run_until(&mut c, &cmd(ModeRequest::Stand), State::HoldingStart, 20.0);
         let held = c
-            .tick(&cmd(ModeRequest::Stand), &JointVec::zeros(), &imu(), 0.005)
+            .tick(&cmd(ModeRequest::Stand), &JointVec::zeros(), imu(), 0.005)
             .targets;
         // 通電したまま保持する。**脱力しない。**
-        let out = c.tick(&cmd(ModeRequest::Stand), &JointVec::zeros(), &imu(), 0.005);
+        let out = c.tick(&cmd(ModeRequest::Stand), &JointVec::zeros(), imu(), 0.005);
         assert_eq!(out.state, State::HoldingStart);
         assert_eq!(out.leg_mode, JointMode::Position);
         // 何周期回しても動かない。
         for _ in 0..200 {
-            c.tick(&cmd(ModeRequest::Stand), &JointVec::zeros(), &imu(), 0.005);
+            c.tick(&cmd(ModeRequest::Stand), &JointVec::zeros(), imu(), 0.005);
         }
         let still = c
-            .tick(&cmd(ModeRequest::Stand), &JointVec::zeros(), &imu(), 0.005)
+            .tick(&cmd(ModeRequest::Stand), &JointVec::zeros(), imu(), 0.005)
             .targets;
         assert!(
             still.max_abs_diff(&held) < 1e-9,
@@ -981,12 +975,12 @@ mod tests {
         go.vx_m_s = 0.10;
         run_until(&mut c, &go, State::Active, 20.0);
         for _ in 0..400 {
-            c.tick(&go, &JointVec::zeros(), &imu(), dt);
+            c.tick(&go, &JointVec::zeros(), imu(), dt);
         }
         // 受信断の指令（モードは歩行のまま、速度ゼロ、link_ok = false）。
         let lost = OperatorCommand::failsafe(GaitSelect::Crawl, ModeRequest::Walk);
         for _ in 0..600 {
-            let out = c.tick(&lost, &JointVec::zeros(), &imu(), dt);
+            let out = c.tick(&lost, &JointVec::zeros(), imu(), dt);
             assert_eq!(
                 out.state,
                 State::Active,
@@ -1015,7 +1009,7 @@ mod tests {
         // 放っておいても歩容へは進まない。
         for _ in 0..2000 {
             assert_eq!(
-                c.tick(&bench, &JointVec::zeros(), &imu(), 0.005).state,
+                c.tick(&bench, &JointVec::zeros(), imu(), 0.005).state,
                 State::HoldingStart
             );
         }
@@ -1030,7 +1024,7 @@ mod tests {
         // 上段のままスティック中立なら、立ち姿勢で止まっていられる。
         for _ in 0..100 {
             assert_eq!(
-                c.tick(&cmd(ModeRequest::Walk), &JointVec::zeros(), &imu(), 0.005)
+                c.tick(&cmd(ModeRequest::Walk), &JointVec::zeros(), imu(), 0.005)
                     .state,
                 State::Active
             );
@@ -1043,13 +1037,13 @@ mod tests {
     fn relax_takes_effect_from_any_state() {
         let mut c = controller();
         run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
-        let out = c.tick(&cmd(ModeRequest::Relax), &JointVec::zeros(), &imu(), 0.005);
+        let out = c.tick(&cmd(ModeRequest::Relax), &JointVec::zeros(), imu(), 0.005);
         assert_eq!(out.state, State::Relaxed);
         assert_eq!(out.leg_mode, JointMode::Idle);
         // 初期姿勢の保持中からも同じ。
         let mut c = controller();
         run_until(&mut c, &cmd(ModeRequest::Stand), State::HoldingStart, 20.0);
-        let out = c.tick(&cmd(ModeRequest::Relax), &JointVec::zeros(), &imu(), 0.005);
+        let out = c.tick(&cmd(ModeRequest::Relax), &JointVec::zeros(), imu(), 0.005);
         assert_eq!(out.state, State::Relaxed);
         assert_eq!(out.leg_mode, JointMode::Idle);
     }
@@ -1059,13 +1053,13 @@ mod tests {
         let mut c = controller();
         run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
         let stance = c
-            .tick(&cmd(ModeRequest::Walk), &JointVec::zeros(), &imu(), 0.0)
+            .tick(&cmd(ModeRequest::Walk), &JointVec::zeros(), imu(), 0.0)
             .targets;
         let mut walk = cmd(ModeRequest::Walk);
         walk.vx_m_s = 0.1;
         let mut moved = false;
         for _ in 0..400 {
-            let out = c.tick(&walk, &JointVec::zeros(), &imu(), 0.005);
+            let out = c.tick(&walk, &JointVec::zeros(), imu(), 0.005);
             if out.targets.max_abs_diff(&stance) > 1e-3 {
                 moved = true;
             }
@@ -1092,8 +1086,8 @@ mod tests {
         let mut chicken = go;
         chicken.chicken_head = true;
         for _ in 0..400 {
-            let qa = a.tick(&go, &JointVec::zeros(), &imu(), dt).targets;
-            let qb = b.tick(&chicken, &JointVec::zeros(), &imu(), dt).targets;
+            let qa = a.tick(&go, &JointVec::zeros(), imu(), dt).targets;
+            let qb = b.tick(&chicken, &JointVec::zeros(), imu(), dt).targets;
             assert_eq!(qa, qb, "無効なはずの胴体姿勢で出力が変わった");
         }
     }
@@ -1110,9 +1104,9 @@ mod tests {
         let stand = cmd(ModeRequest::Walk);
         run_until(&mut c, &stand, State::Active, 20.0);
         for _ in 0..200 {
-            c.tick(&stand, &JointVec::zeros(), &imu(), dt);
+            c.tick(&stand, &JointVec::zeros(), imu(), dt);
         }
-        let flat = c.tick(&stand, &JointVec::zeros(), &imu(), dt).targets;
+        let flat = c.tick(&stand, &JointVec::zeros(), imu(), dt).targets;
 
         // ロールを入れる。
         let mut roll = stand;
@@ -1120,7 +1114,7 @@ mod tests {
         roll.body_attitude_rad = [0.15, 0.0, 0.0];
         let mut tilted = flat;
         for _ in 0..100 {
-            tilted = c.tick(&roll, &JointVec::zeros(), &imu(), dt).targets;
+            tilted = c.tick(&roll, &JointVec::zeros(), imu(), dt).targets;
         }
         assert!(
             tilted.max_abs_diff(&flat) > 0.02,
@@ -1137,7 +1131,7 @@ mod tests {
         minus.body_attitude_rad = [-0.15, 0.0, 0.0];
         let mut mirrored = flat;
         for _ in 0..200 {
-            mirrored = c.tick(&minus, &JointVec::zeros(), &imu(), dt).targets;
+            mirrored = c.tick(&minus, &JointVec::zeros(), imu(), dt).targets;
         }
         for l in 0..4 {
             let up = tilted.legs[l][0] - flat.legs[l][0];
@@ -1161,14 +1155,14 @@ mod tests {
 
         // 戻す前に元姿勢へ。
         for _ in 0..200 {
-            c.tick(&stand, &JointVec::zeros(), &imu(), dt);
+            c.tick(&stand, &JointVec::zeros(), imu(), dt);
         }
 
         // 戻せば元の姿勢へ。
         for _ in 0..200 {
-            c.tick(&stand, &JointVec::zeros(), &imu(), dt);
+            c.tick(&stand, &JointVec::zeros(), imu(), dt);
         }
-        let back = c.tick(&stand, &JointVec::zeros(), &imu(), dt).targets;
+        let back = c.tick(&stand, &JointVec::zeros(), imu(), dt).targets;
         assert!(
             back.max_abs_diff(&flat) < 1e-6,
             "姿勢を戻しても元に戻らない"
@@ -1191,16 +1185,16 @@ mod tests {
         let stand = cmd(ModeRequest::Walk);
         run_until(&mut c, &stand, State::Active, 20.0);
         for _ in 0..200 {
-            c.tick(&stand, &JointVec::zeros(), &imu(), dt);
+            c.tick(&stand, &JointVec::zeros(), imu(), dt);
         }
-        let flat = c.tick(&stand, &JointVec::zeros(), &imu(), dt).targets;
+        let flat = c.tick(&stand, &JointVec::zeros(), imu(), dt).targets;
 
         let mut yaw = stand;
         yaw.chicken_head = true;
         yaw.body_attitude_rad = [0.0, 0.0, 0.4];
         let mut twisted = flat;
         for _ in 0..200 {
-            twisted = c.tick(&yaw, &JointVec::zeros(), &imu(), dt).targets;
+            twisted = c.tick(&yaw, &JointVec::zeros(), imu(), dt).targets;
         }
         // 前脚と後脚の hip が逆向きに動く。これがひねりの証拠。
         let front = twisted.legs[0][0] - flat.legs[0][0]; // FL
@@ -1224,14 +1218,14 @@ mod tests {
         let stand = cmd(ModeRequest::Walk);
         run_until(&mut c, &stand, State::Active, 20.0);
         for _ in 0..200 {
-            c.tick(&stand, &JointVec::zeros(), &imu(), dt);
+            c.tick(&stand, &JointVec::zeros(), imu(), dt);
         }
-        let before = c.tick(&stand, &JointVec::zeros(), &imu(), dt).targets;
+        let before = c.tick(&stand, &JointVec::zeros(), imu(), dt).targets;
 
         // 静止中なら切り替わる。
         let mut to_trot = stand;
         to_trot.gait = GaitSelect::Trot;
-        let after = c.tick(&to_trot, &JointVec::zeros(), &imu(), dt).targets;
+        let after = c.tick(&to_trot, &JointVec::zeros(), imu(), dt).targets;
         assert_eq!(c.gait_select(), GaitSelect::Trot, "静止中に歩容を選べない");
         assert_eq!(c.state(), State::Active);
 
@@ -1248,11 +1242,11 @@ mod tests {
         let mut moving = to_trot;
         moving.vx_m_s = 0.10;
         for _ in 0..200 {
-            c.tick(&moving, &JointVec::zeros(), &imu(), dt);
+            c.tick(&moving, &JointVec::zeros(), imu(), dt);
         }
         let mut to_crawl = moving;
         to_crawl.gait = GaitSelect::Crawl;
-        c.tick(&to_crawl, &JointVec::zeros(), &imu(), dt);
+        c.tick(&to_crawl, &JointVec::zeros(), imu(), dt);
         assert_eq!(
             c.gait_select(),
             GaitSelect::Trot,
@@ -1273,7 +1267,7 @@ mod tests {
 
         let mut hold_trot = cmd(ModeRequest::Stand);
         hold_trot.gait = GaitSelect::Trot;
-        c.tick(&hold_trot, &JointVec::zeros(), &imu(), 0.005);
+        c.tick(&hold_trot, &JointVec::zeros(), imu(), 0.005);
         assert_eq!(
             c.gait_select(),
             GaitSelect::Trot,
@@ -1285,7 +1279,7 @@ mod tests {
         // 何度でも選び直せる。
         let mut hold_walk = cmd(ModeRequest::Stand);
         hold_walk.gait = GaitSelect::Walk;
-        c.tick(&hold_walk, &JointVec::zeros(), &imu(), 0.005);
+        c.tick(&hold_walk, &JointVec::zeros(), imu(), 0.005);
         assert_eq!(c.gait_select(), GaitSelect::Walk);
 
         // そのまま歩容へ入れば、選んだ歩容で歩き出す。
@@ -1300,7 +1294,7 @@ mod tests {
         let mut c = controller();
         let mut relax_trot = cmd(ModeRequest::Relax);
         relax_trot.gait = GaitSelect::Trot;
-        c.tick(&relax_trot, &JointVec::zeros(), &imu(), 0.005);
+        c.tick(&relax_trot, &JointVec::zeros(), imu(), 0.005);
         assert_eq!(c.gait_select(), GaitSelect::Trot);
 
         // 起立の途中も Trot のまま要求し続ける（遷移中の切り替えは許される）。
@@ -1312,7 +1306,7 @@ mod tests {
         // Active 中の切り替え要求は無視される（踏み替えの途中で歩容が飛ばない）。
         let mut walk_crawl = cmd(ModeRequest::Walk);
         walk_crawl.gait = GaitSelect::Crawl;
-        c.tick(&walk_crawl, &JointVec::zeros(), &imu(), 0.005);
+        c.tick(&walk_crawl, &JointVec::zeros(), imu(), 0.005);
         assert_eq!(c.gait_select(), GaitSelect::Trot);
     }
 
@@ -1325,7 +1319,7 @@ mod tests {
         run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
         let mut play = cmd(ModeRequest::Walk);
         play.play_pose = true;
-        let out = c.tick(&play, &JointVec::zeros(), &imu(), 0.005);
+        let out = c.tick(&play, &JointVec::zeros(), imu(), 0.005);
         assert_eq!(out.state, State::Active);
     }
 
@@ -1337,14 +1331,11 @@ mod tests {
         let mut with_arm = cmd(ModeRequest::Walk);
         with_arm.chicken_head = true;
         with_arm.arm_rad = Some(-0.7);
-        let pitched = ImuSample {
-            rpy_rad: [0.0, 0.4, 0.0],
-            ..imu()
-        };
+        let pitched = [0.0, 0.4, 0.0];
         for _ in 0..200 {
-            c.tick(&with_arm, &JointVec::zeros(), &pitched, 0.005);
+            c.tick(&with_arm, &JointVec::zeros(), pitched, 0.005);
         }
-        let out = c.tick(&with_arm, &JointVec::zeros(), &pitched, 0.005);
+        let out = c.tick(&with_arm, &JointVec::zeros(), pitched, 0.005);
         assert!(
             (out.targets.arm + 0.7).abs() < 1e-9,
             "腕の目標が観測値ではなくチキンヘッドの出力になっています: {}",
@@ -1360,14 +1351,11 @@ mod tests {
         run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
         let mut on = cmd(ModeRequest::Walk);
         on.chicken_head = true;
-        let pitched = ImuSample {
-            rpy_rad: [0.0, 0.4, 0.0],
-            ..imu()
-        };
+        let pitched = [0.0, 0.4, 0.0];
         for _ in 0..2000 {
-            c.tick(&on, &JointVec::zeros(), &pitched, 0.005);
+            c.tick(&on, &JointVec::zeros(), pitched, 0.005);
         }
-        let out = c.tick(&on, &JointVec::zeros(), &pitched, 0.005);
+        let out = c.tick(&on, &JointVec::zeros(), pitched, 0.005);
         // 胴体ピッチ +0.4 を打ち消すので腕は −0.4 付近。
         assert!(
             (out.targets.arm + 0.4).abs() < 1e-3,
@@ -1382,10 +1370,10 @@ mod tests {
         run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
         let mut seen = cmd(ModeRequest::Walk);
         seen.arm_rad = Some(0.3);
-        c.tick(&seen, &JointVec::zeros(), &imu(), 0.005);
+        c.tick(&seen, &JointVec::zeros(), imu(), 0.005);
         // 受信断で観測値が無くなっても 0 へ飛ばない。
         let lost = OperatorCommand::failsafe(GaitSelect::Crawl, ModeRequest::Stand);
-        let out = c.tick(&lost, &JointVec::zeros(), &imu(), 0.005);
+        let out = c.tick(&lost, &JointVec::zeros(), imu(), 0.005);
         assert!((out.targets.arm - 0.3).abs() < 1e-9, "{}", out.targets.arm);
     }
 
@@ -1400,7 +1388,7 @@ mod tests {
         let mut play = cmd(ModeRequest::Walk);
         play.play_pose = true;
         assert_eq!(
-            c.tick(&play, &JointVec::zeros(), &imu(), 0.005).state,
+            c.tick(&play, &JointVec::zeros(), imu(), 0.005).state,
             State::PlayingPose
         );
         run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
