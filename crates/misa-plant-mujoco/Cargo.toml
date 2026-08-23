@@ -1,0 +1,20 @@
+# misa-plant-mujoco — articara の MuJoCo を Plant にする。
+#
+# **これが 2 つ目の Plant 実装。** 実装が 1 つしかないトレイトは、それが
+# 正しい継ぎ目かどうか誰にも分からない。動力学を確かめるためだけでなく、
+# 抽象の検証としてここにある。
+#
+# ビルドには MuJoCo 3.8 の共有ライブラリが要る:
+#   export MUJOCO_DYNAMIC_LINK_DIR=$HOME/.mujoco/mujoco-3.8.0/lib
+[package]
+name = "misa-plant-mujoco"
+description = "articara の MuJoCo シミュレータを misa-core の Plant として使う。"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Takara Kasai <takara.kasai@gmail.com>"]
+
+[dependencies]
+misa-core = { path = "../misa-core" }
+articara = { git = "https://github.com/takarakasai/articara.git", default-features = false, features = ["mujoco"] }
+log = "0.4"

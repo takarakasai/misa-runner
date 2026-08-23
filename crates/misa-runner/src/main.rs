@@ -24,6 +24,8 @@ mod plant;
 mod pose;
 mod record;
 mod robot;
+#[cfg(feature = "sim")]
+mod sim;
 mod runner;
 mod snapshot;
 mod teleop;
@@ -77,6 +79,10 @@ fn dispatch(cli: &Cli) -> Result<(), String> {
     match command {
         "check" => diag::check(&cfg),
         "dump" => dump::run(&cfg, cli),
+        #[cfg(feature = "sim")]
+        "sim" => sim::run(&cfg, cli),
+        #[cfg(not(feature = "sim"))]
+        "sim" => Err("このビルドには sim が入っていません（--features sim で有効化）".into()),
         "calib" => calib::run(&cfg, cli),
         "imu" => diag::imu(&cfg, secs_or_forever(cli, 10.0)),
         "sbus" => diag::sbus(&cfg, secs_or_forever(cli, 10.0), cli.flag("plain")),
@@ -258,6 +264,8 @@ fn print_help() {
   calib  <sub>              符号・ゼロ点・可動域を実機で確定して設定に書き戻す
   run    [--record PATH]    制御ループ（プロポ操縦）
                             --record で毎周期を記録する（別スレッドで書く）
+  sim    [--gait G] [--vx V] MuJoCo で動力学込みに回す（--features sim のビルド）
+         [--secs S] [--kp K] [--kv K] [--base-height M] [--record PATH]
   replay LOG [LOG2]         記録の要約。2 つ渡すと指令を差分する
                             [--limit N] 差分の表示件数（既定 20）
 
@@ -382,6 +390,9 @@ const VALUE_FLAGS: &[&str] = &[
     "robot",
     "record",
     "limit",
+    "kp",
+    "kv",
+    "base-height",
     "config",
     "secs",
     "gait",

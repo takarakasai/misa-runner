@@ -320,6 +320,36 @@ mod tests {
     /// 差し替えたときにここが落ちれば、実機で「ポーズが無い」と気づく前に
     /// 分かる。
     #[test]
+    /// **同梱プロファイルが名指しする姿勢も、モデルに在ること。**
+    ///
+    /// 既定値だけを見る上の試験は通るのに、`robots/namiashi.toml` が
+    /// 存在しない姿勢名を指していた（`start_pose = "start"`。モデルにあるのは
+    /// `constrain`）。無いときは警告を出して立ち姿勢へ直行するので、
+    /// **CH5 中段の初期姿勢保持が黙って効かなくなる。** MuJoCo で回して
+    /// 初めて気づいた類なので、試験で押さえる。
+    #[test]
+    fn the_shipped_profile_names_poses_that_exist_in_the_model() {
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../robots/namiashi.toml"
+        ))
+        .unwrap();
+        let mut cfg = AppConfig::from_toml(&text).unwrap();
+        cfg.control.model = shipped_model_path();
+        let robot = load_from_config(&cfg).expect("同梱モデルを読めません");
+        for (what, name) in [
+            ("初期姿勢 control.start_pose", &cfg.control.start_pose),
+            ("運動学の基準姿勢 control.kinematics_pose", &cfg.control.kinematics_pose),
+        ] {
+            assert!(
+                robot.poses.pose(name).is_some(),
+                "{what} {name:?} がモデルにありません。ある姿勢: {:?}",
+                robot.poses.pose_names().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
     fn the_shipped_model_has_every_pose_the_default_config_names() {
         let mut cfg = AppConfig::default();
         // 既定のパスはリポジトリルート相対。テストの作業ディレクトリは

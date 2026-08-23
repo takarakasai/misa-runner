@@ -155,6 +155,37 @@ misa-run calib zero --pose constrain --write robots/namiashi.toml
 コメントは消える**。`misa-run config --out` で生成したファイルを校正で
 上書きしていく運用を前提にしている。
 
+## 動力学で確かめる（MuJoCo）
+
+`dump` が「指令がそのまま実現したら関節角はどうなるか」なのに対し、`sim` は
+**重力と接触の中で本当に立っていられるか**を見る。articara の MuJoCo を
+`Plant` の実装として使うので、実機と同じ制御則・同じ `exchange` を通る。
+
+```sh
+export MUJOCO_DYNAMIC_LINK_DIR=$HOME/.mujoco/mujoco-3.8.0/lib
+export LD_LIBRARY_PATH=$MUJOCO_DYNAMIC_LINK_DIR
+cargo run --release --features sim -- \
+    sim --robot robots/namiashi.toml --gait trot --vx 0.15 --secs 8
+```
+
+```text
+t[s]   状態         胴体 z[m]  roll   pitch  接地
+ 3.00  立ち姿勢へ           0.213  -0.001 +0.000  ■■■■
+ 4.50  歩容              0.209  +0.005 -0.004  □■■□
+ 6.00  歩容              0.212  -0.033 -0.022  ■□■■
+終端 胴体位置 (+0.601, +0.101, +0.211)  最低高さ 0.033 m
+転倒なし
+```
+
+胴体が 1 rad 以上傾いたら転倒として終了コード 1 を返す。`--record` も付く。
+
+**MuJoCo は既定のビルドに入っていない。** `misa-plant-mujoco` はワークスペースの
+メンバから外してあるので、MuJoCo を入れていない環境でも `cargo test` は通る。
+
+見られないもの: RS485 の往復遅れ・バスのジッタ・モータの一次遅れ・受信断。
+**脱力も再現されない**（位置アクチュエータにその概念が無いので `Idle` の軸は
+その場で保持される）。ここを通ったから実機が通るとは考えないこと。
+
 ## 記録と再生
 
 `--record PATH` を付けると、毎周期の **意図・観測・指令・安全判定** を 1 本の

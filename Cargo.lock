@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "RustyXML"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b5ace29ee3216de37c0546865ad08edef58b0f9e76838ed8959a84a990e58c5"
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -150,6 +156,23 @@ name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+
+[[package]]
+name = "articara"
+version = "0.1.0"
+source = "git+https://github.com/takarakasai/articara.git#80a5afa5d39b9c07f29989ee3fc874de16355a0d"
+dependencies = [
+ "legged-estimation",
+ "log",
+ "misarta",
+ "misarta-formats",
+ "mujoco-rs",
+ "nalgebra",
+ "parry3d",
+ "quadruped-gait 0.1.0 (git+https://github.com/takarakasai/articara.git)",
+ "roxmltree",
+ "urdf-rs",
+]
 
 [[package]]
 name = "asn1-rs"
@@ -1719,6 +1742,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "legged-estimation"
+version = "0.1.0"
+source = "git+https://github.com/takarakasai/articara.git#80a5afa5d39b9c07f29989ee3fc874de16355a0d"
+dependencies = [
+ "nalgebra",
+ "quadruped-gait 0.1.0 (git+https://github.com/takarakasai/articara.git)",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1917,6 +1949,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "misa-plant-mujoco"
+version = "0.1.0"
+dependencies = [
+ "articara",
+ "log",
+ "misa-core",
+]
+
+[[package]]
 name = "misa-runner"
 version = "0.1.0"
 dependencies = [
@@ -1925,10 +1966,11 @@ dependencies = [
  "log",
  "misa-core",
  "misa-hal",
+ "misa-plant-mujoco",
  "misarta",
  "nalgebra",
  "postcard",
- "quadruped-gait",
+ "quadruped-gait 0.1.0 (git+https://github.com/takarakasai/quadruped-gait.git)",
  "serde",
  "serde_json",
  "toml",
@@ -1957,6 +1999,27 @@ dependencies = [
  "stl_io",
  "tobj",
  "toml",
+]
+
+[[package]]
+name = "misarta-formats"
+version = "0.1.0"
+source = "git+https://github.com/takarakasai/misarta.git#5f677580c460cb1b83203fd71ce31e6c83f39478"
+dependencies = [
+ "misarta",
+ "nalgebra",
+ "roxmltree",
+]
+
+[[package]]
+name = "mujoco-rs"
+version = "4.0.1+mj-3.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34beda400f8c14ea890a4c11b1e62602a1b756da86656ef2e75512d311639359"
+dependencies = [
+ "bytemuck",
+ "paste",
+ "pkg-config",
 ]
 
 [[package]]
@@ -2219,6 +2282,34 @@ name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba"
+
+[[package]]
+name = "parry3d"
+version = "0.25.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e99471b7b6870f7fe406d5611dd4b4c9b07aa3e5436b1d27e1515f9832bb0c6b"
+dependencies = [
+ "approx",
+ "arrayvec",
+ "bitflags 2.13.1",
+ "downcast-rs",
+ "either",
+ "ena",
+ "foldhash 0.2.0",
+ "hashbrown 0.16.1",
+ "log",
+ "nalgebra",
+ "num-derive",
+ "num-traits",
+ "ordered-float",
+ "rstar",
+ "simba",
+ "slab",
+ "smallvec",
+ "spade",
+ "static_assertions",
+ "thiserror 2.0.20",
+]
 
 [[package]]
 name = "parry3d-f64"
@@ -2512,6 +2603,17 @@ dependencies = [
 [[package]]
 name = "quadruped-gait"
 version = "0.1.0"
+source = "git+https://github.com/takarakasai/articara.git#80a5afa5d39b9c07f29989ee3fc874de16355a0d"
+dependencies = [
+ "clarabel",
+ "log",
+ "misarta",
+ "nalgebra",
+]
+
+[[package]]
+name = "quadruped-gait"
+version = "0.1.0"
 source = "git+https://github.com/takarakasai/quadruped-gait.git#d2ce2f3ea63795fce85bb9831809747b0768bc9f"
 dependencies = [
  "clarabel",
@@ -2519,6 +2621,16 @@ dependencies = [
  "misa-wbc",
  "misarta",
  "nalgebra",
+ "serde",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.36.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7649a7b4df05aed9ea7ec6f628c67c9953a43869b8bc50929569b2999d443fe"
+dependencies = [
+ "memchr",
  "serde",
 ]
 
@@ -3082,6 +3194,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11fc7cc2c76d73e0f27ee52abbd64eec84d46f370c88371120433196934e4b7f"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "serde-xml-rs"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb3aa78ecda1ebc9ec9847d5d3aba7d618823446a049ba2491940506da6e2782"
+dependencies = [
+ "log",
+ "serde",
+ "thiserror 1.0.69",
+ "xml-rs",
 ]
 
 [[package]]
@@ -3937,6 +4061,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "urdf-rs"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "074515a3e6dc230bbbdcf35830fd71b67b55ae2ac22bc4ff69d89412fc84b830"
+dependencies = [
+ "RustyXML",
+ "quick-xml",
+ "regex",
+ "serde",
+ "serde-xml-rs",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4372,6 +4510,12 @@ dependencies = [
  "thiserror 2.0.20",
  "time",
 ]
+
+[[package]]
+name = "xml-rs"
+version = "0.8.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 
 [[package]]
 name = "yasna"

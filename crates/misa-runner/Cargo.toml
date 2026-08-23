@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 misa-core.workspace = true
 postcard.workspace = true
+misa-plant-mujoco = { path = "../misa-plant-mujoco", optional = true }
 misa-hal.workspace = true
 libc.workspace = true
 misarta.workspace = true
@@ -27,5 +28,8 @@ serde_json = { workspace = true, optional = true }
 
 [features]
 default = ["viz"]
+# MuJoCo で動力学込みに回す（`misa-run sim`）。MuJoCo 3.8 の共有ライブラリが
+# 要るので既定では外してある:  export MUJOCO_DYNAMIC_LINK_DIR=$HOME/.mujoco/mujoco-3.8.0/lib
+sim = ["dep:misa-plant-mujoco"]
 # ライブ可視化。`quadruped-gait/viz` が GaitVizFrame に serde を付ける。
 viz = ["dep:zenoh", "dep:serde_json", "quadruped-gait/viz"]

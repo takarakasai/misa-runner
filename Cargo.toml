@@ -9,6 +9,11 @@
 [workspace]
 resolver = "2"
 members = ["crates/misa-core", "crates/misa-hal", "crates/misa-runner"]
+# **MuJoCo を要求する crate はメンバに入れない。** 入れると MuJoCo を入れて
+# いない環境で `cargo test --workspace` が通らなくなり、「clone して
+# cargo build」で立ち上がるという前提が崩れる。misa-runner の `sim` feature を
+# 付けたときだけ path 依存として引かれる。
+exclude = ["crates/misa-plant-mujoco"]
 
 [workspace.package]
 version = "0.1.0"
