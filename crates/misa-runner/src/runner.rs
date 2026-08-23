@@ -13,22 +13,20 @@ use misa_hal::ch348::PortMap;
 use misa_hal::imu::ImuReader;
 use misa_hal::joint::{JointCommand, JointMode, LegSlot, LEG_JOINT_KINDS};
 use misa_hal::legs::{BusRequest, LegArray};
-use misa_hal::sbus::SbusReceiver;
 
 use crate::config::AppConfig;
 use crate::controller::{Controller, State};
 use crate::jointvec::JointVec;
 use crate::robot::Robot;
+use misa_core::Pilot as _;
 use misa_core::Plant as _;
 
-use crate::teleop::Teleop;
 use crate::viz::{self, VizConfig};
 
 /// 実機に繋いだ一式。
 pub struct Hardware {
     pub legs: LegArray,
     pub imu: ImuReader,
-    pub sbus: SbusReceiver,
     pub arm: Box<dyn ArmServo>,
 }
 
@@ -38,22 +36,20 @@ impl Hardware {
     /// **UART 番号の探索は最初に 1 回だけ。** 探索はデバイスを `open` する
     /// ので、1 本開くたびに調べ直すと 2 本目以降が自分自身の `EBUSY` で
     /// 失敗する（実機で踏んだ）。
-    pub fn connect(cfg: &AppConfig) -> Result<Self, String> {
-        let map = PortMap::discover().map_err(|e| e.to_string())?;
-        let legs = LegArray::connect_with(&cfg.hardware, &map, &cfg.name).map_err(|e| e.to_string())?;
+    /// **探索は呼び出し側で 1 回だけ。** 探索はデバイスを `open` するので、
+    /// 1 本開くたびに調べ直すと 2 本目以降が自分自身の `EBUSY` で失敗する
+    /// （実機で踏んだ）。受信機（`SbusPilot`）とも同じ地図を共有する。
+    pub fn connect_with(cfg: &AppConfig, map: &PortMap) -> Result<Self, String> {
+        let legs = LegArray::connect_with(&cfg.hardware, map, &cfg.name).map_err(|e| e.to_string())?;
         for bus in legs.buses() {
             log::info!("脚 {} → {}", bus.leg().prefix(), bus.port());
         }
-        let imu = ImuReader::connect_with(&cfg.hardware.imu, &map).map_err(|e| e.to_string())?;
+        let imu = ImuReader::connect_with(&cfg.hardware.imu, map).map_err(|e| e.to_string())?;
         log::info!("IMU → {}", imu.port());
-        let sbus =
-            SbusReceiver::connect_with(&cfg.hardware.sbus, &map).map_err(|e| e.to_string())?;
-        log::info!("S.BUS → {}", sbus.port());
         let arm = misa_hal::arm::connect(&cfg.hardware.arm).map_err(|e| e.to_string())?;
         Ok(Self {
             legs,
             imu,
-            sbus,
             arm,
         })
     }
@@ -364,11 +360,14 @@ impl Default for RunOptions {
 
 /// 制御ループ本体。Ctrl-C か致命的エラーで戻る。
 pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String> {
-    let mut plant = crate::plant::SerialPlant::connect(&cfg)?;
+    // **探索は 1 回だけ。** 脚バス・IMU・受信機で同じ地図を使う。
+    let map = PortMap::discover().map_err(|e| e.to_string())?;
+    let mut plant = crate::plant::SerialPlant::connect_with(&cfg, &map)?;
+    let mut pilot = crate::pilot::SbusPilot::connect_with(&cfg, &map, opts.allow_no_sbus)?;
 
     // 受信機を待つ。プロポが無い状態で起立させないための入口チェック。
-    match plant.hw().sbus.wait_ready(Duration::from_secs(3)) {
-        Ok(_) => log::info!("S.BUS 受信を確認しました"),
+    match pilot.wait_ready(Duration::from_secs(3)) {
+        Ok(()) => log::info!("S.BUS 受信を確認しました"),
         Err(e) if opts.allow_no_sbus => {
             log::warn!("S.BUS が来ていません ({e})。--allow-no-sbus 指定のため続行します")
         }
@@ -424,7 +423,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
     // `--allow-no-sbus` のときは見ない。受信が無い＝フェイルセーフ＝起立が
     // その指定の意味そのもので、そこで止めても意味がない。
     if !opts.allow_no_sbus {
-        let sbus = plant.hw().sbus.state();
+        let sbus = pilot.state();
         if cfg.teleop.mode.position(&sbus) != 0 {
             return Err(format!(
                 "{RETRYABLE}CH5（モード）が脱力位置にありません（いま {} 段目 / raw {}）。                 **脱力に戻してから起動してください。** このまま起動すると                 操作なしで立ち上がります",
@@ -433,8 +432,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
                     .mode
                     .channel
                     .checked_sub(1)
-                    .and_then(|i| sbus.channels.get(i))
-                    .copied()
+                    .and_then(|i| sbus.channels.get(i).copied())
                     .unwrap_or(0),
             ));
         }
@@ -447,8 +445,6 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
     verify_crouch_frame(&cfg, plant.hw());
 
     let stop = install_signal_handler();
-    let mut teleop = Teleop::new(cfg.teleop.clone(), &cfg.gait, &cfg.hardware.arm);
-    let teleop_timeout = Duration::from_millis(cfg.control.teleop_timeout_ms);
     let period = Duration::from_secs_f64(1.0 / cfg.control.rate_hz);
     let arm_app_driven = plant.hw().arm.is_app_driven();
     if !arm_app_driven {
@@ -524,23 +520,13 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         .map_err(|e| format!("実機の初回読み出しに失敗: {e}"))?;
 
     while !stop.load(Ordering::Relaxed) {
-        let sbus = plant.hw().sbus.state();
-        let usable = sbus.is_usable(teleop_timeout);
-        // 受信が無いときの扱いは 2 通りあり、混ぜてはいけない。
-        //
-        // - **フェイルセーフ**（受信していたのに切れた）… 活動度を上げない。
-        //   脱力中に切れたら脱力のまま。`Teleop::update` が面倒を見る
-        // - **ベンチ**（`--allow-no-sbus`、受信機がそもそも無い）… 起立させたい
-        //
-        // かつては前者が一律 `Stand` を返しており、後者はそれに乗っかって
-        // いた。結果として**脱力中に受信が切れると立ち上がっていた**。
-        let cmd = if !usable && opts.allow_no_sbus {
-            teleop.bench_stand()
-        } else {
-            teleop.update(&sbus, usable)
-        };
+
+        // **受信が無いときの扱いは 2 通りあり、混ぜてはいけない。**
+        // その判断は `SbusPilot` が持つ（受信断は活動度を上げない、
+        // `--allow-no-sbus` のベンチは起立させたい）。
+        let cmd = pilot.poll(obs.time);
         // 受信機直結の腕は、プロポのチャンネルから読んだ角度が唯一の手がかり。
-        if let Some(observed) = cmd.arm_rad {
+        if let Some(observed) = cmd.aux(0) {
             plant.hw_mut().arm.observe(observed);
         }
         let measured = jointvec_from(&obs);
@@ -582,7 +568,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
             rec.push(misa_core::record::Frame {
                 seq: ticks,
                 time: obs.time,
-                intent: crate::snapshot::intent(obs.time, &cmd),
+                intent: cmd.clone(),
                 observation: obs.clone(),
                 command: outgoing.clone(),
                 verdict,
@@ -632,6 +618,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         {
             log_status(
                 plant.hw(),
+                &pilot,
                 &controller,
                 &cmd,
                 ticks,
@@ -708,8 +695,9 @@ fn jointvec_from(obs: &misa_core::Observation) -> JointVec {
 
 fn log_status(
     hw: &Hardware,
+    pilot: &crate::pilot::SbusPilot,
     controller: &Controller,
-    cmd: &crate::teleop::OperatorCommand,
+    cmd: &misa_core::Intent,
     ticks: u64,
     worst_overrun: Duration,
     fault_hint_shown: &mut bool,
@@ -733,15 +721,15 @@ fn log_status(
         .fold(f64::NEG_INFINITY, f64::max);
     let faults = hw.legs.faults();
     let imu = hw.imu.stats();
-    let sbus = hw.sbus.state();
+    let sbus = pilot.state();
     log::info!(
         "[{}] {} v=({:+.3},{:+.3},{:+.3}) 脚[{}] err={} 最高温{} IMU {:.0}Hz \
          S.BUS {}f/{}desync tick={} 遅延最大={:.1}ms 追従最大={}",
         controller.state().label(),
         controller.gait_select().label(),
-        cmd.vx_m_s,
-        cmd.vy_m_s,
-        cmd.wz_rad_s,
+        cmd.velocity.vx_m_s,
+        cmd.velocity.vy_m_s,
+        cmd.velocity.wz_rad_s,
         rates.join(" "),
         errors,
         if hottest.is_finite() {

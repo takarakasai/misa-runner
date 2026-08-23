@@ -14,7 +14,8 @@ use misa_hal::sbus::{SbusReceiver, SbusState, CHANNELS};
 
 use crate::config::AppConfig;
 use crate::jointvec::JointVec;
-use crate::teleop::{OperatorCommand, Teleop, TeleopConfig};
+use crate::teleop::{Teleop, TeleopConfig};
+use misa_core::Intent;
 use crate::viz::{self, VizConfig};
 
 /// `ports` — CH348 のポートを物理 UART 番号つきで並べる。何も開かない。
@@ -212,7 +213,7 @@ fn channel_roles(t: &TeleopConfig) -> [&'static str; CHANNELS] {
 fn monitor_lines(
     port: &str,
     state: &SbusState,
-    cmd: &OperatorCommand,
+    cmd: &Intent,
     roles: &[&'static str; CHANNELS],
 ) -> Vec<String> {
     let c = &state.counters;
@@ -254,13 +255,13 @@ fn monitor_lines(
     out.push(rule);
     out.push(format!(
         "  vx={:+.3} m/s   vy={:+.3} m/s   wz={:+.3} rad/s   高さ={:+.3} m",
-        cmd.vx_m_s, cmd.vy_m_s, cmd.wz_rad_s, cmd.height_offset_m
+        cmd.velocity.vx_m_s, cmd.velocity.vy_m_s, cmd.velocity.wz_rad_s, cmd.height_offset_m
     ));
     // **姿勢モードが on の間、vy と高さは 0 になり、代わりに roll/pitch が出る。**
     // 上の行だけ見ていると「スティックを倒しているのに vy が 0」で悩む。
     out.push(format!(
         "  姿勢={}   roll={:+.3}   pitch={:+.3}   yaw={:+.3} rad",
-        if cmd.chicken_head { "on" } else { "off" },
+        if cmd.stabilize_head { "on" } else { "off" },
         cmd.body_attitude_rad[0],
         cmd.body_attitude_rad[1],
         cmd.body_attitude_rad[2]
@@ -270,8 +271,8 @@ fn monitor_lines(
         cmd.mode,
         cmd.gait.label(),
         if cmd.play_pose { "再生" } else { "-" },
-        if cmd.play_alt { "alt" } else { "既定" },
-        match cmd.arm_rad {
+        if cmd.pose_slot.0 != 0 { "alt" } else { "既定" },
+        match cmd.aux(0) {
             Some(q) => format!("{q:+.3}rad"),
             None => "-".to_string(),
         }
@@ -280,7 +281,7 @@ fn monitor_lines(
 }
 
 /// `--plain` の 1 行出力。grep やログに落とすとき用。
-fn plain_line(state: &SbusState, cmd: &OperatorCommand) -> String {
+fn plain_line(state: &SbusState, cmd: &Intent) -> String {
     let raw: Vec<String> = state.channels[..8]
         .iter()
         .enumerate()
@@ -290,19 +291,19 @@ fn plain_line(state: &SbusState, cmd: &OperatorCommand) -> String {
         "{}  |  v=({:+.3},{:+.3},{:+.3}) h={:+.3} mode={:?} gait={} pose={} alt={} \
          att={}({:+.3},{:+.3},{:+.3}) arm={} {} {} {:.0}fps frames={} desync={}",
         raw.join(" "),
-        cmd.vx_m_s,
-        cmd.vy_m_s,
-        cmd.wz_rad_s,
+        cmd.velocity.vx_m_s,
+        cmd.velocity.vy_m_s,
+        cmd.velocity.wz_rad_s,
         cmd.height_offset_m,
         cmd.mode,
         cmd.gait.label(),
         cmd.play_pose,
-        cmd.play_alt,
-        cmd.chicken_head,
+        cmd.pose_slot.0 != 0,
+        cmd.stabilize_head,
         cmd.body_attitude_rad[0],
         cmd.body_attitude_rad[1],
         cmd.body_attitude_rad[2],
-        match cmd.arm_rad {
+        match cmd.aux(0) {
             Some(q) => format!("{q:+.3}rad"),
             None => "-".to_string(),
         },

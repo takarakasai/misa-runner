@@ -23,7 +23,7 @@ use crate::config::AppConfig;
 use crate::jointvec::JointVec;
 use crate::pose::PosePlayer;
 use crate::robot::{velocity_cmd, Robot};
-use crate::teleop::{GaitSelect, ModeRequest, OperatorCommand};
+use misa_core::{GaitSelect, Intent, ModeRequest};
 use crate::viz::BodyView;
 
 /// 状態機械の状態。
@@ -188,7 +188,7 @@ impl Controller {
     /// 起立に移った瞬間に「今いる位置」から遷移が始まる（0 rad へ飛ばない）。
     pub fn tick(
         &mut self,
-        cmd: &OperatorCommand,
+        cmd: &Intent,
         measured: &JointVec,
         attitude_rad: [f64; 3],
         dt: f64,
@@ -234,7 +234,7 @@ impl Controller {
         }
     }
 
-    fn tick_relaxed(&mut self, cmd: &OperatorCommand, measured: &JointVec) {
+    fn tick_relaxed(&mut self, cmd: &Intent, measured: &JointVec) {
         // 脱力中の「目標」は実測値。次に起立するときの始点になる。
         self.targets = *measured;
         if cmd.mode != ModeRequest::Relax {
@@ -259,7 +259,7 @@ impl Controller {
     }
 
     /// 初期姿勢へ向かう遷移。着いたら**保持**する（歩行要求があれば通す）。
-    fn tick_going_to_start(&mut self, cmd: &OperatorCommand, dt: f64) {
+    fn tick_going_to_start(&mut self, cmd: &Intent, dt: f64) {
         let done = match self.player.as_mut() {
             Some(player) => {
                 self.targets = player.tick(dt);
@@ -281,10 +281,10 @@ impl Controller {
     /// 初期姿勢で保持。歩行要求で立ち姿勢へ。
     ///
     /// **目標は動かさない。** 脱力要求は [`Self::tick`] の共通処理が拾う。
-    fn tick_holding_start(&mut self, cmd: &OperatorCommand) {
+    fn tick_holding_start(&mut self, cmd: &Intent) {
         // 腕を駆動できない構成では、目標にも観測値を置いて食い違わせない。
         if !self.arm_app_driven {
-            if let Some(observed) = cmd.arm_rad {
+            if let Some(observed) = cmd.aux(0) {
                 self.targets.arm = observed;
             }
         }
@@ -359,11 +359,11 @@ impl Controller {
         }
     }
 
-    fn tick_active(&mut self, cmd: &OperatorCommand, attitude_rad: [f64; 3], dt: f64) {
+    fn tick_active(&mut self, cmd: &Intent, attitude_rad: [f64; 3], dt: f64) {
         if cmd.play_pose {
             // 押した瞬間の選択スイッチで決める。再生中に動かしても
             // 切り替わらない。
-            self.alt_pose_requested = cmd.play_alt;
+            self.alt_pose_requested = cmd.pose_slot.0 != 0;
             self.start_pose_playback();
             return;
         }
@@ -397,7 +397,7 @@ impl Controller {
             self.warned_body_height = true;
         }
         let want = match cmd.mode {
-            ModeRequest::Walk => [cmd.vx_m_s, cmd.vy_m_s, cmd.wz_rad_s],
+            ModeRequest::Walk => [cmd.velocity.vx_m_s, cmd.velocity.vy_m_s, cmd.velocity.wz_rad_s],
             // 起立中は歩容を止める（速度ゼロ = 接地したまま）。
             _ => [0.0; 3],
         };
@@ -460,7 +460,7 @@ impl Controller {
         }
     }
 
-    fn tick_pose(&mut self, cmd: &OperatorCommand, dt: f64) {
+    fn tick_pose(&mut self, cmd: &Intent, dt: f64) {
         let done = match self.player.as_mut() {
             Some(player) => {
                 self.targets = player.tick(dt);
@@ -471,7 +471,7 @@ impl Controller {
         // 腕を駆動できない構成では、ポーズが腕を動かすつもりでも実機は
         // 受信機に従う。目標にも観測値を置いて食い違わせない。
         if !self.arm_app_driven {
-            if let Some(observed) = cmd.arm_rad {
+            if let Some(observed) = cmd.aux(0) {
                 self.targets.arm = observed;
             }
         }
@@ -510,23 +510,23 @@ impl Controller {
     ///
     /// 駆動できるならチキンヘッドの出力、できないなら観測値
     /// （観測もできなければ直前値を保つ）。
-    fn arm_target(&mut self, cmd: &OperatorCommand, body_pitch_rad: f64, dt: f64) -> f64 {
+    fn arm_target(&mut self, cmd: &Intent, body_pitch_rad: f64, dt: f64) -> f64 {
         if self.arm_app_driven {
-            return self.chicken.update(cmd.chicken_head, body_pitch_rad, dt);
+            return self.chicken.update(cmd.stabilize_head, body_pitch_rad, dt);
         }
         // **CH8 が胴体姿勢に割り当たっているなら、腕の話は出さない。**
         // `body_attitude_max_rad > 0` のとき CH8 は姿勢モードのスイッチで、
         // 腕を動かすつもりで入れているわけではない。毎回警告すると
         // 「姿勢モードを使うたびに何か壊れている」ように読める。
         let ch8_is_attitude = self.cfg.gait.body_attitude_max_rad > 0.0;
-        if cmd.chicken_head && !ch8_is_attitude && !self.warned_chicken_head {
+        if cmd.stabilize_head && !ch8_is_attitude && !self.warned_chicken_head {
             log::warn!(
                 "チキンヘッドが ON ですが、腕はアプリから駆動できない構成です\
                  （受信機直結 / 未配線）。指令は出しません"
             );
             self.warned_chicken_head = true;
         }
-        cmd.arm_rad.unwrap_or(self.targets.arm)
+        cmd.aux(0).unwrap_or(self.targets.arm)
     }
 
     fn enter_relaxed(&mut self) {
@@ -641,20 +641,13 @@ mod tests {
         [0.0; 3]
     }
 
-    fn cmd(mode: ModeRequest) -> OperatorCommand {
-        OperatorCommand {
-            vx_m_s: 0.0,
-            vy_m_s: 0.0,
-            wz_rad_s: 0.0,
-            height_offset_m: 0.0,
-            arm_rad: None,
+    fn cmd(mode: ModeRequest) -> Intent {
+        Intent {
             mode,
             gait: GaitSelect::Crawl,
-            play_pose: false,
-            play_alt: false,
-            chicken_head: false,
-            body_attitude_rad: [0.0; 3],
+            aux_rad: vec![None],
             link_ok: true,
+            ..Intent::default()
         }
     }
 
@@ -687,11 +680,11 @@ mod tests {
             run_until(&mut c, &stand, State::Active, 20.0);
             let mut prev = c.tick(&stand, &JointVec::zeros(), imu(), dt).targets;
 
-            let mut go = stand;
-            go.vx_m_s = 0.10;
+            let mut go = stand.clone();
+            go.velocity.vx_m_s = 0.10;
             let mut worst = [0.0f64; 2];
             // 0 = 歩き出し、1 = 停止。**跳びの性質が違う。**
-            for (phase_i, phase) in [go, stand].into_iter().enumerate() {
+            for (phase_i, phase) in [go.clone(), stand.clone()].into_iter().enumerate() {
                 for _ in 0..400 {
                     let q = c.tick(&phase, &JointVec::zeros(), imu(), dt).targets;
                     for l in 0..4 {
@@ -747,16 +740,16 @@ mod tests {
             let mut c = controller();
             let mut go = cmd(ModeRequest::Walk);
             go.gait = select;
-            go.vx_m_s = 0.10;
+            go.velocity.vx_m_s = 0.10;
             run_until(&mut c, &go, State::Active, 20.0);
             for _ in 0..400 {
                 c.tick(&go, &JointVec::zeros(), imu(), dt);
             }
             // 中立を 25 ms 通過して反対側へ。
-            let mut centre = go;
-            centre.vx_m_s = 0.0;
-            let mut back = go;
-            back.vx_m_s = -0.10;
+            let mut centre = go.clone();
+            centre.velocity.vx_m_s = 0.0;
+            let mut back = go.clone();
+            back.velocity.vx_m_s = -0.10;
             for _ in 0..5 {
                 c.tick(&centre, &JointVec::zeros(), imu(), dt);
                 assert!(
@@ -794,8 +787,8 @@ mod tests {
                 let mut c = Controller::new(robot, cfg);
                 let mut go = cmd(ModeRequest::Walk);
                 go.gait = select;
-                go.vx_m_s = 0.15;
-                go.wz_rad_s = 0.6;
+                go.velocity.vx_m_s = 0.15;
+                go.velocity.wz_rad_s = 0.6;
                 run_until(&mut c, &go, State::Active, 20.0);
                 for _ in 0..400 {
                     c.tick(&go, &JointVec::zeros(), imu(), dt);
@@ -803,8 +796,8 @@ mod tests {
                 // 中立へ戻す。歩容が完全に静止するまでの時間を測る。
                 let centre = {
                     let mut x = go;
-                    x.vx_m_s = 0.0;
-                    x.wz_rad_s = 0.0;
+                    x.velocity.vx_m_s = 0.0;
+                    x.velocity.wz_rad_s = 0.0;
                     x
                 };
                 let mut stopped_at = None;
@@ -841,7 +834,7 @@ mod tests {
         let mut c = Controller::new(robot, cfg);
         let dt = 0.01;
         let mut go = cmd(ModeRequest::Walk);
-        go.vx_m_s = 0.15;
+        go.velocity.vx_m_s = 0.15;
         run_until(&mut c, &go, State::Active, 20.0);
         // 全開まで 0.5 s かかる → 0.1 s 時点では半分にも達していない。
         let mut c2 = controller();
@@ -861,7 +854,7 @@ mod tests {
         assert!(c2.ramped_v[0] > 0.0, "1 周期で 0 まで落ちている");
     }
 
-    fn run_until(c: &mut Controller, command: &OperatorCommand, want: State, max_s: f64) {
+    fn run_until(c: &mut Controller, command: &Intent, want: State, max_s: f64) {
         let dt = 0.005;
         let mut t = 0.0;
         while t < max_s {
@@ -972,13 +965,13 @@ mod tests {
         let dt = 0.005;
         let mut c = controller();
         let mut go = cmd(ModeRequest::Walk);
-        go.vx_m_s = 0.10;
+        go.velocity.vx_m_s = 0.10;
         run_until(&mut c, &go, State::Active, 20.0);
         for _ in 0..400 {
             c.tick(&go, &JointVec::zeros(), imu(), dt);
         }
         // 受信断の指令（モードは歩行のまま、速度ゼロ、link_ok = false）。
-        let lost = OperatorCommand::failsafe(GaitSelect::Crawl, ModeRequest::Walk);
+        let lost = cmd(ModeRequest::Walk).failsafe();
         for _ in 0..600 {
             let out = c.tick(&lost, &JointVec::zeros(), imu(), dt);
             assert_eq!(
@@ -1056,7 +1049,7 @@ mod tests {
             .tick(&cmd(ModeRequest::Walk), &JointVec::zeros(), imu(), 0.0)
             .targets;
         let mut walk = cmd(ModeRequest::Walk);
-        walk.vx_m_s = 0.1;
+        walk.velocity.vx_m_s = 0.1;
         let mut moved = false;
         for _ in 0..400 {
             let out = c.tick(&walk, &JointVec::zeros(), imu(), 0.005);
@@ -1079,12 +1072,12 @@ mod tests {
         let mut a = controller();
         let mut b = controller();
         let mut go = cmd(ModeRequest::Walk);
-        go.vx_m_s = 0.10;
+        go.velocity.vx_m_s = 0.10;
         run_until(&mut a, &go, State::Active, 20.0);
         run_until(&mut b, &go, State::Active, 20.0);
         // 片方だけ CH8 を入れる。上限が 0 なので指令は [0, 0] のまま。
-        let mut chicken = go;
-        chicken.chicken_head = true;
+        let mut chicken = go.clone();
+        chicken.stabilize_head = true;
         for _ in 0..400 {
             let qa = a.tick(&go, &JointVec::zeros(), imu(), dt).targets;
             let qb = b.tick(&chicken, &JointVec::zeros(), imu(), dt).targets;
@@ -1109,8 +1102,8 @@ mod tests {
         let flat = c.tick(&stand, &JointVec::zeros(), imu(), dt).targets;
 
         // ロールを入れる。
-        let mut roll = stand;
-        roll.chicken_head = true;
+        let mut roll = stand.clone();
+        roll.stabilize_head = true;
         roll.body_attitude_rad = [0.15, 0.0, 0.0];
         let mut tilted = flat;
         for _ in 0..100 {
@@ -1190,7 +1183,7 @@ mod tests {
         let flat = c.tick(&stand, &JointVec::zeros(), imu(), dt).targets;
 
         let mut yaw = stand;
-        yaw.chicken_head = true;
+        yaw.stabilize_head = true;
         yaw.body_attitude_rad = [0.0, 0.0, 0.4];
         let mut twisted = flat;
         for _ in 0..200 {
@@ -1240,7 +1233,7 @@ mod tests {
 
         // 歩き出したら切り替わらない。
         let mut moving = to_trot;
-        moving.vx_m_s = 0.10;
+        moving.velocity.vx_m_s = 0.10;
         for _ in 0..200 {
             c.tick(&moving, &JointVec::zeros(), imu(), dt);
         }
@@ -1329,8 +1322,8 @@ mod tests {
         let mut c = controller();
         run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
         let mut with_arm = cmd(ModeRequest::Walk);
-        with_arm.chicken_head = true;
-        with_arm.arm_rad = Some(-0.7);
+        with_arm.stabilize_head = true;
+        with_arm.aux_rad = vec![Some(-0.7)];
         let pitched = [0.0, 0.4, 0.0];
         for _ in 0..200 {
             c.tick(&with_arm, &JointVec::zeros(), pitched, 0.005);
@@ -1350,7 +1343,7 @@ mod tests {
         let mut c = Controller::with_arm(robot, cfg, true);
         run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
         let mut on = cmd(ModeRequest::Walk);
-        on.chicken_head = true;
+        on.stabilize_head = true;
         let pitched = [0.0, 0.4, 0.0];
         for _ in 0..2000 {
             c.tick(&on, &JointVec::zeros(), pitched, 0.005);
@@ -1369,10 +1362,10 @@ mod tests {
         let mut c = controller();
         run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
         let mut seen = cmd(ModeRequest::Walk);
-        seen.arm_rad = Some(0.3);
+        seen.aux_rad = vec![Some(0.3)];
         c.tick(&seen, &JointVec::zeros(), imu(), 0.005);
         // 受信断で観測値が無くなっても 0 へ飛ばない。
-        let lost = OperatorCommand::failsafe(GaitSelect::Crawl, ModeRequest::Stand);
+        let lost = cmd(ModeRequest::Stand).failsafe();
         let out = c.tick(&lost, &JointVec::zeros(), imu(), 0.005);
         assert!((out.targets.arm - 0.3).abs() < 1e-9, "{}", out.targets.arm);
     }

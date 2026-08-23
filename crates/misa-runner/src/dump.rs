@@ -12,7 +12,8 @@ use misa_hal::joint::JOINT_NAMES;
 use crate::config::AppConfig;
 use crate::controller::{Controller, State};
 use crate::jointvec::JointVec;
-use crate::teleop::{GaitSelect, ModeRequest, OperatorCommand};
+use crate::teleop::{GaitSelect, ModeRequest};
+use misa_core::{Intent, Velocity};
 use crate::viz::{self, VizConfig};
 use crate::Cli;
 
@@ -55,26 +56,24 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // モータ角 0 = 伏せ、`q_model = sign * 0 + zero_pose_rad`）。
     let measured = crouch_pose(cfg);
 
-    let mut cmd = OperatorCommand {
-        vx_m_s: 0.0,
-        vy_m_s: 0.0,
-        wz_rad_s: 0.0,
+    let mut cmd = Intent {
+        velocity: Velocity::ZERO,
         height_offset_m: 0.0,
-        arm_rad: None,
+        aux_rad: vec![None],
         // **`Stand` ではない。** CH5 中段は初期姿勢で保持する仕様になったので、
         // `Stand` のままだとそこで止まって歩容へ進まない。速度は
         // `State::Active` に入ってから入れるので、最初から `Walk` でよい。
         mode: ModeRequest::Walk,
         gait,
         play_pose: false,
-        play_alt: false,
         // **`chicken_head` は立てない。** 姿勢は `body_attitude_rad` を直接
         // 渡すので不要で、立てると「腕が駆動できない」警告が出るだけ。
         // CH8 は実機で CH1/CH3 を読み替えるためのスイッチであって、
         // ここでは通る道が違う。
-        chicken_head: false,
+        stabilize_head: false,
         body_attitude_rad: tilt,
         link_ok: true,
+        ..Intent::default()
     };
 
     println!(
@@ -126,9 +125,11 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         // 立ち上がってから歩き出す。遷移が終わるまで速度は入れない。
         if controller.state() == State::Active {
             cmd.mode = ModeRequest::Walk;
-            cmd.vx_m_s = vx;
-            cmd.vy_m_s = vy;
-            cmd.wz_rad_s = wz;
+            cmd.velocity = Velocity {
+                vx_m_s: vx,
+                vy_m_s: vy,
+                wz_rad_s: wz,
+            };
         }
         let out = controller.tick(&cmd, &measured, imu.rpy_rad, dt);
         check_limits(cfg, &out.targets, t, &mut violations);
@@ -156,7 +157,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             rec.push(misa_core::record::Frame {
                 seq: i as u64,
                 time,
-                intent: crate::snapshot::intent(time, &cmd),
+                intent: cmd.clone(),
                 observation: obs,
                 command: shadow,
                 verdict,

@@ -27,8 +27,8 @@
 use std::time::Duration;
 
 use misa_core::{
-    Axis, AxisCommand, AxisId, AxisLimits, AxisRole, AxisTable, Command, ControlMode, Imu, Intent,
-    Observation, PoseSlot, SafetyConfig, Time, Velocity,
+    Axis, AxisCommand, AxisId, AxisLimits, AxisRole, AxisTable, Command, ControlMode, Imu,
+    Observation, SafetyConfig, Time,
 };
 use misa_hal::config::HardwareConfig;
 use misa_hal::joint::LegSlot;
@@ -37,7 +37,6 @@ use misa_hal::joint::{JointState, ARM_JOINT_NAME, JOINT_NAMES};
 use misa_hal::legs::JointStatus;
 
 use crate::jointvec::JointVec;
-use crate::teleop::OperatorCommand;
 
 /// 脚 12 軸 + 腕 1 軸の並び。[`JointVec`] と同じ順序。
 ///
@@ -97,30 +96,6 @@ pub fn safety_config(hw: &HardwareConfig, control_period_s: f64, stale_ticks: f6
         max_observation_age: std::time::Duration::from_secs_f64(
             control_period_s * stale_ticks.max(1.0),
         ),
-    }
-}
-
-/// 操縦指令を [`Intent`] へ。
-pub fn intent(time: Time, cmd: &OperatorCommand) -> Intent {
-    Intent {
-        time,
-        velocity: Velocity {
-            vx_m_s: cmd.vx_m_s,
-            vy_m_s: cmd.vy_m_s,
-            wz_rad_s: cmd.wz_rad_s,
-        },
-        body_attitude_rad: cmd.body_attitude_rad,
-        height_offset_m: cmd.height_offset_m,
-        mode: cmd.mode,
-        gait: cmd.gait,
-        // **押し続けても 1 回**という立ち上がりの意味は上流が持っている。
-        // どの枠を再生するかだけをここで番号に写す。
-        play_pose: cmd
-            .play_pose
-            .then(|| PoseSlot(u8::from(cmd.play_alt))),
-        stabilize_head: cmd.chicken_head,
-        aux_rad: vec![cmd.arm_rad],
-        link_ok: cmd.link_ok,
     }
 }
 
@@ -197,7 +172,6 @@ pub fn command(targets: &JointVec, max_speed_rad_s: f64, relaxed: bool) -> Comma
 #[cfg(test)]
 mod tests {
     use super::*;
-    use misa_core::{GaitSelect, ModeRequest};
 
     /// 試験用の IMU サンプル。`ImuSample` は受信時刻を持つので `Default` が無い。
     fn imu_sample() -> ImuSample {
@@ -210,9 +184,6 @@ mod tests {
         }
     }
 
-    fn idle_operator() -> OperatorCommand {
-        OperatorCommand::failsafe(GaitSelect::Crawl, ModeRequest::Relax)
-    }
 
     /// **軸表と、Observation / Command の長さが揃っていること。**
     ///
@@ -317,26 +288,5 @@ mod tests {
         assert_eq!(sc.axes[12].min_rad, cfg.hardware.arm.min_rad);
     }
 
-    #[test]
-    fn the_operator_command_becomes_an_intent() {
-        let mut op = idle_operator();
-        op.vx_m_s = 0.2;
-        op.play_pose = true;
-        op.play_alt = true;
-        op.chicken_head = true;
-        op.arm_rad = Some(0.4);
 
-        let i = intent(Time::from_secs_f64(1.0), &op);
-        assert_eq!(i.velocity.vx_m_s, 0.2);
-        assert_eq!(i.play_pose, Some(PoseSlot(1)));
-        assert!(i.stabilize_head);
-        assert_eq!(i.aux_rad, vec![Some(0.4)]);
-    }
-
-    /// ポーズ再生が押されていなければ、どの枠も選ばれないこと。
-    #[test]
-    fn no_pose_is_selected_unless_the_switch_was_pressed() {
-        let op = idle_operator();
-        assert_eq!(intent(Time::ZERO, &op).play_pose, None);
-    }
 }

@@ -18,12 +18,13 @@
 
 use std::time::Duration;
 
-use misa_core::Plant as _;
+use misa_core::{Pilot as _, Plant as _};
 use misa_plant_mujoco::{MujocoPlant, SimOptions};
 
 use crate::config::AppConfig;
 use crate::controller::{Controller, State};
-use crate::teleop::{GaitSelect, ModeRequest, OperatorCommand};
+use crate::teleop::{GaitSelect, ModeRequest};
+use misa_core::{Intent, Velocity};
 use crate::Cli;
 
 pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
@@ -88,20 +89,15 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         None => None,
     };
 
-    let mut cmd = OperatorCommand {
-        vx_m_s: 0.0,
-        vy_m_s: 0.0,
-        wz_rad_s: 0.0,
-        height_offset_m: 0.0,
-        arm_rad: None,
+    // **台本も Pilot。** プロポと同じ穴から意図が入るので、実機と同じ
+    // 制御則がそのまま回る。
+    let mut pilot = crate::pilot::ScriptPilot::new(Intent {
         mode: ModeRequest::Walk,
         gait,
-        play_pose: false,
-        play_alt: false,
-        chicken_head: false,
-        body_attitude_rad: [0.0; 3],
+        aux_rad: vec![None],
         link_ok: true,
-    };
+        ..Intent::default()
+    });
 
     let mut obs = misa_core::Observation::empty(axis_table.len(), 4);
     plant.exchange(&misa_core::Command::idle(axis_table.len()), &mut obs)?;
@@ -119,11 +115,15 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
 
     for i in 0..steps {
         let t = i as f64 * dt;
+        // 立ち上がってから速度を入れる。遷移中に入れても意味がない。
         if controller.state() == State::Active {
-            cmd.vx_m_s = vx;
-            cmd.vy_m_s = vy;
-            cmd.wz_rad_s = wz;
+            pilot.intent_mut().velocity = Velocity {
+                vx_m_s: vx,
+                vy_m_s: vy,
+                wz_rad_s: wz,
+            };
         }
+        let cmd = pilot.poll(obs.time);
         let measured = jointvec_from(&obs);
         let attitude = obs.imu.map(|m| m.rpy_rad).unwrap_or([0.0; 3]);
         let out = controller.tick(&cmd, &measured, attitude, dt);
@@ -140,7 +140,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             rec.push(misa_core::record::Frame {
                 seq: i as u64,
                 time: obs.time,
-                intent: crate::snapshot::intent(obs.time, &cmd),
+                intent: cmd.clone(),
                 observation: obs.clone(),
                 command: outgoing.clone(),
                 verdict,

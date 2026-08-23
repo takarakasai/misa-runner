@@ -101,7 +101,7 @@ impl GaitSelect {
 ///
 /// 番号にしているのは、`greeting` / `greeting_alt` のような**機体固有の名前を
 /// この層に持ち込まない**ため。意味づけはプロファイルの仕事。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PoseSlot(pub u8);
 
 /// 1 周期ぶんの意図。
@@ -117,7 +117,12 @@ pub struct Intent {
     pub mode: ModeRequest,
     pub gait: GaitSelect,
     /// 立ち上がりで 1 回だけ効く、ポーズ再生の要求。
-    pub play_pose: Option<PoseSlot>,
+    pub play_pose: bool,
+    /// どの枠を再生するか。
+    ///
+    /// **再生要求が無くても読める。** 操縦者は押す前に選択を確かめたいので
+    /// （`misa-run sbus` の表示がそれ）、`play_pose` に畳んではいけない。
+    pub pose_slot: PoseSlot,
     /// 胴体の傾きを打ち消すようにヘッド軸を動かすか（チキンヘッド）。
     pub stabilize_head: bool,
     /// 補助軸への要求または観測 [rad]。並びは
@@ -129,6 +134,15 @@ pub struct Intent {
 }
 
 impl Intent {
+    /// 補助軸の要求または観測。並びは [`crate::axis::AxisTable::aux`] と同じ。
+    ///
+    /// 駆動していない軸には**観測値**が入る（受信機直結の腕など）ので、
+    /// 「指令が無い」と「その軸が無い」の区別はここではなく
+    /// [`crate::plant::PlantCaps::driven`] が持つ。
+    pub fn aux(&self, index: usize) -> Option<f64> {
+        self.aux_rad.get(index).copied().flatten()
+    }
+
     /// 受信が切れたときの意図。
     ///
     /// **モードは変えず、速度と姿勢要求だけを落とす。** 立っているなら
@@ -139,12 +153,26 @@ impl Intent {
             velocity: Velocity::ZERO,
             body_attitude_rad: [0.0; 3],
             mode: self.mode.capped_for_failsafe(),
-            play_pose: None,
+            play_pose: false,
             stabilize_head: false,
             link_ok: false,
             ..self.clone()
         }
     }
+}
+
+/// 意図を作るもの。
+///
+/// **チャンネル番号を知っているのは実装だけ。** プロポ・ゲームパッド・
+/// キーボード・台本・ネットワークが同じ穴に入るので、シミュレータや CI は
+/// 台本を流し込める。
+pub trait Pilot {
+    /// この周期の意図。`now` は [`crate::plant::Plant`] が供給した時刻。
+    ///
+    /// **入力が切れていても意図は返す。** 何も返さない選択肢を作ると、
+    /// 呼び出し側が「前回の意図を使い回す」ことになり、受信断で速度が
+    /// 残り続ける。切れたことは [`Intent::link_ok`] で伝える。
+    fn poll(&mut self, now: Time) -> Intent;
 }
 
 #[cfg(test)]
@@ -160,7 +188,8 @@ mod tests {
             },
             body_attitude_rad: [0.1, 0.2, 0.3],
             mode: ModeRequest::Walk,
-            play_pose: Some(PoseSlot(1)),
+            play_pose: true,
+            pose_slot: PoseSlot(1),
             stabilize_head: true,
             link_ok: true,
             ..Intent::default()
@@ -183,7 +212,9 @@ mod tests {
     #[test]
     fn losing_the_link_does_not_fire_a_pose() {
         let f = walking().failsafe();
-        assert_eq!(f.play_pose, None);
+        assert!(!f.play_pose);
+        // どの枠が選ばれているかは残る。落とすのは「いま撃て」のほうだけ。
+        assert_eq!(f.pose_slot, PoseSlot(1));
         assert!(!f.stabilize_head);
     }
 

@@ -6,10 +6,9 @@
 //!
 //! # S.BUS はここに入らない
 //!
-//! 操縦入力は観測ではなく**意図**なので、`Plant` ではなく `Pilot` の側。
-//! ただし分離はまだ済んでいないので、当面 [`SerialPlant`] が受信機を抱えた
-//! ままにして [`SerialPlant::hw`] から触らせている。Pilot を切り出す段で
-//! ここから出ていく。
+//! 操縦入力は観測ではなく**意図**なので、`Plant` ではなく [`crate::pilot`] の
+//! 側。ポートの探索（`PortMap`）だけは両者で共有する — 探索はデバイスを
+//! `open` するので、別々にやると 2 本目が自分自身の `EBUSY` で失敗する。
 
 use misa_core::{
     AxisId, AxisTable, Command, ControlMode, Imu, Observation, Plant, PlantCaps,
@@ -32,8 +31,8 @@ pub struct SerialPlant {
 }
 
 impl SerialPlant {
-    pub fn connect(cfg: &AppConfig) -> Result<Self, String> {
-        let hw = Hardware::connect(cfg)?;
+    pub fn connect_with(cfg: &AppConfig, map: &misa_hal::ch348::PortMap) -> Result<Self, String> {
+        let hw = Hardware::connect_with(cfg, map)?;
         let axes = snapshot::axis_table();
 
         // **腕は「繋がっている」と「こちらの指令で動く」が別。**
@@ -61,7 +60,7 @@ impl SerialPlant {
         })
     }
 
-    /// 受信機と、状態表示のための直接アクセス。**Pilot を切り出すまでの経過措置。**
+    /// 状態表示のための直接アクセス。
     pub fn hw(&self) -> &Hardware {
         &self.hw
     }

@@ -49,7 +49,7 @@ pub mod time;
 
 pub use axis::{Axis, AxisId, AxisRole, AxisTable};
 pub use command::{AxisCommand, Command, ControlMode};
-pub use intent::{GaitSelect, Intent, ModeRequest, PoseSlot, Velocity};
+pub use intent::{GaitSelect, Intent, ModeRequest, Pilot, PoseSlot, Velocity};
 pub use observation::{AxisHealth, AxisState, Contact, Imu, Observation};
 pub use plant::{Plant, PlantCaps};
 pub use record::{diff_commands, Divergence, Frame, Header, FORMAT_VERSION};
