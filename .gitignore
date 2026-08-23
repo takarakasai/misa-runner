@@ -1,4 +1,7 @@
 /target
+# **除外した crate は自前の target を持つ。** ルート限定の /target では
+# 拾えないので、どこにあっても無視する。
+**/target/
 # Cargo.lock は追跡する。これはライブラリではなく**アプリ**で、SBC と PC で
 # 同じ依存バージョンをビルドできることのほうが大事（go2-gait-runner と同じ方針）。
 **/*.rs.bk
@@ -12,3 +15,5 @@
 /ros/build/
 /ros/install/
 /ros/log/
+# 動画とフレーム。大きいので追跡しない（作り方は README）。
+/videos/

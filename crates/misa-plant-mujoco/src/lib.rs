@@ -90,6 +90,30 @@ pub struct MujocoPlant {
     root_link: String,
     /// 1 tick で進める MuJoCo のフレーム数。
     frames_per_tick: u32,
+    #[cfg(feature = "render")]
+    render: Option<Render>,
+}
+
+/// オフスクリーン描画の設定。
+#[cfg(feature = "render")]
+pub struct RenderOptions {
+    pub outdir: String,
+    pub width: u32,
+    pub height: u32,
+    /// カメラの方位 [deg]。90 で真横（x-z 面）、180 で真後ろ。
+    pub azimuth: f64,
+    pub elevation: f64,
+    /// 胴体からの距離 [m]。**機体の大きさで変える。**
+    pub distance: f64,
+    /// 注視点の高さ [m]。
+    pub look_z: f64,
+}
+
+#[cfg(feature = "render")]
+struct Render {
+    renderer: mujoco::renderer::MjRenderer,
+    outdir: String,
+    frame: usize,
 }
 
 impl MujocoPlant {
@@ -165,7 +189,76 @@ impl MujocoPlant {
             feet: opts.feet.clone(),
             root_link: opts.root_link.clone(),
             frames_per_tick,
+            #[cfg(feature = "render")]
+            render: None,
         })
+    }
+
+    /// オフスクリーン描画を始める（`--features render`）。
+    ///
+    /// **GUI は要らない。** EGL でヘッドレスに描いて PNG を並べ、あとで
+    /// ffmpeg にまとめる。articara の GUI へ Zenoh で流すのとは別経路で、
+    /// あちらは関節角だけ（接地も地面も出ない）。
+    #[cfg(feature = "render")]
+    pub fn start_recording(&mut self, opts: &RenderOptions) -> Result<(), String> {
+        use mujoco::renderer::MjRenderer;
+        use mujoco::prelude::*;
+
+        std::fs::create_dir_all(&opts.outdir)
+            .map_err(|e| format!("{} を作れません: {e}", opts.outdir))?;
+        let model = self.sim.mj_model();
+        let mut renderer = MjRenderer::builder()
+            .width(opts.width)
+            .height(opts.height)
+            .num_visual_user_geom(0)
+            .num_visual_internal_geom(0)
+            .rgb(true)
+            .depth(false)
+            .build(model.clone())
+            .map_err(|e| format!("オフスクリーン描画を作れません（EGL）: {e:?}"))?;
+
+        let body = model
+            .body(&self.root_link)
+            .ok_or_else(|| format!("胴体リンク {} がモデルにありません", self.root_link))?;
+        let mut cam = MjvCamera::new_tracking(body.id);
+        cam.azimuth = opts.azimuth;
+        cam.elevation = opts.elevation;
+        cam.distance = opts.distance;
+        cam.lookat = [0.0, 0.0, opts.look_z];
+        renderer.set_camera(cam);
+
+        self.render = Some(Render {
+            renderer,
+            outdir: opts.outdir.clone(),
+            frame: 0,
+        });
+        Ok(())
+    }
+
+    /// 1 フレーム保存する。呼ぶ間隔が動画のフレームレートになる。
+    #[cfg(feature = "render")]
+    pub fn capture(&mut self) -> Result<(), String> {
+        let Some(r) = self.render.as_mut() else {
+            return Ok(());
+        };
+        r.renderer
+            .sync_data(self.sim.mj_data_mut())
+            .map_err(|e| format!("描画の同期に失敗: {e:?}"))?;
+        r.renderer
+            .render()
+            .map_err(|e| format!("描画に失敗: {e:?}"))?;
+        let path = format!("{}/frame_{:05}.png", r.outdir, r.frame);
+        r.renderer
+            .save_rgb(&path)
+            .map_err(|e| format!("{path} を書けません: {e:?}"))?;
+        r.frame += 1;
+        Ok(())
+    }
+
+    /// 保存したフレーム数。
+    #[cfg(feature = "render")]
+    pub fn frames(&self) -> usize {
+        self.render.as_ref().map_or(0, |r| r.frame)
     }
 
     /// 胴体のワールド位置。転倒判定や進んだ距離を見るのに使う。

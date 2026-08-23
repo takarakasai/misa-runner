@@ -404,6 +404,14 @@ const VALUE_FLAGS: &[&str] = &[
     "kv",
     "base-height",
     "pilot",
+    "video",
+    "fps",
+    "width",
+    "height",
+    "cam-az",
+    "cam-el",
+    "cam-dist",
+    "cam-z",
     "config",
     "secs",
     "gait",
@@ -450,6 +458,7 @@ const BOOL_FLAGS: &[&str] = &[
     "realtime",
     "plain",
     "forever",
+    "chicken",
 ];
 
 impl Cli {

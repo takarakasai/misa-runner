@@ -217,6 +217,102 @@ t[s]   状態         胴体 z[m]  roll   pitch  接地
 **脱力も再現されない**（位置アクチュエータにその概念が無いので `Idle` の軸は
 その場で保持される）。ここを通ったから実機が通るとは考えないこと。
 
+### keel を MuJoCo で動かす（ROS 2 から操縦して articara で見る）
+
+2 台目の機体をひととおり動かす手順。**実機はいらない。**
+
+環境（毎回いる）:
+
+```sh
+source /opt/ros/jazzy/setup.bash
+export AMENT_PREFIX_PATH=$PWD/ros/install/misa_msgs:$PWD/ref/ksm_mvp_real_ws/install:$AMENT_PREFIX_PATH
+export LD_LIBRARY_PATH=$PWD/ros/install/misa_msgs/lib:$PWD/ref/ksm_mvp_real_ws/install/lib:$LD_LIBRARY_PATH
+export PYTHONPATH=$PWD/ros/install/misa_msgs/lib/python3.12/site-packages:$PYTHONPATH
+export MUJOCO_DYNAMIC_LINK_DIR=$HOME/.mujoco/mujoco-3.8.0/lib
+export LD_LIBRARY_PATH=$MUJOCO_DYNAMIC_LINK_DIR:$LD_LIBRARY_PATH
+```
+
+初回だけ `cd ros && colcon build --packages-select misa_msgs && cd ..`。
+
+```sh
+# 1) runner（MuJoCo + 配信 + ROS 操縦）。--secs 0 で Ctrl-C まで
+cargo run --release --features sim,ros2 -- \
+    sim --robot robots/keel.toml --pilot ros2 --gait trot --secs 0 \
+        --kp 200 --kv 2.0 --base-height 0.35 \
+        --viz --viz-endpoint tcp/127.0.0.1:7447
+
+# 2) 別端末で articara。Live gait feed に tcp/127.0.0.1:7447 を入れて Start
+cd ../articara && cargo run --release --features viz -- --model ../mdls/keel/mvp_v12.misa
+
+# 3) さらに別端末で操縦。**トピックは名前空間つき**
+ros2 service call /keel/misa_run/set_gait misa_msgs/srv/SetGait '{gait: 2}'
+ros2 service call /keel/misa_run/set_mode misa_msgs/srv/SetMode '{mode: 2}'
+ros2 topic pub -r 20 /keel/cmd_vel geometry_msgs/msg/Twist '{linear: {x: 0.12}}'
+```
+
+`cmd_vel` を止めると 300 ms 後に速度が 0 に落ちて、その場で立つ
+（**モードは変えない**）。
+
+**`--kp 200 --kv 2.0` は必須。** namiashi の既定（60 / 1.0）だと keel は
+自重を支えられず崩れる。
+
+**歩容の値はまだ当たっていない。** 前進指令で後退する（脚間隔が namiashi の
+1.7 倍なのに `[gait]` が namiashi の値のまま）。**これを詰めるのがこの環境の
+使いどころ**で、`stance_height_m` / `swing_height_m` / `*_cycle_s` を振って
+終端の胴体位置を見るのが早い。
+
+**車輪 4 軸は articara に出ない。** `GaitVizFrame` が脚 12 関節しか運ばない
+ため。MuJoCo の中では存在していて、指令は出していない（歩容の仕事ではない
+ので脱力のまま）。
+
+台本だけで回すなら `--pilot ros2` を外して `--vx 0.15` などを渡す。ROS 2 の
+口が要らないので `--features sim` だけでビルドできる。
+
+### MuJoCo の絵を動画にする
+
+`--viz`（articara へ Zenoh）は**関節角だけ**で、接地も地面も出ない。動きを
+動画で残すなら、MuJoCo をオフスクリーン（EGL）で描いて PNG を並べ、ffmpeg で
+まとめる。GUI もディスプレイも要らない。
+
+```sh
+cargo run --release --features render -- sim --robot robots/keel.toml \
+    --gait trot --vx 0.12 --secs 9 --kp 200 --kv 2.0 --base-height 0.35 \
+    --video /tmp/keel --cam-dist 2.2 --cam-el -18 --cam-az 120
+
+ffmpeg -framerate 30 -i /tmp/keel/frame_%05d.png \
+    -vf "eq=brightness=0.28:contrast=1.5" -c:v libx264 -pix_fmt yuv420p out.mp4
+```
+
+**明るさ補正は要る。** articara の MJCF エクスポータは光源を出さないので、
+MuJoCo の既定ヘッドライトだけになって暗い。
+
+**既定は 640×480。** MuJoCo のオフスクリーンバッファの既定がこれで、超えると
+描かれた領域だけが左上に寄って黒帯になる。大きくするにはモデルの
+`<visual><global offwidth/offheight>` が要るが、エクスポータはそれを出さない。
+
+カメラは `--cam-az`（方位、90 で真横・180 で真後ろ）/ `--cam-el` /
+`--cam-dist` / `--cam-z`。**機体の大きさで変える** — keel は 2.2 前後、
+namiashi は 1.1 前後。
+
+`--features render` は**ローカルの articara を見る**（`.cargo/config.toml` の
+`[patch]`）。キャッシュしている git revision には `render` feature も
+`MujocoSim::mj_model` / `mj_data_mut` も無いため。articara を更新すれば外せる。
+
+#### チキンヘッドを見る
+
+平地を歩くだけでは胴体がほとんど傾かず、ヘッドは 1° しか動かない。
+**胴体を傾けて撮る**と分かる（`gait.body_attitude_max_rad > 0` が要る）。
+
+```sh
+cargo run --release --features render -- sim --robot robots/namiashi.toml \
+    --gait trot --vx 0.08 --tilt-pitch 0.35 --chicken --secs 9 \
+    --cam-az 90 --cam-dist 1.1 --video /tmp/ch_on
+```
+
+`--chicken` の有無で `arm_pitch_joint` に 20° の差が出る（ON は頭が水平の
+まま、OFF は胴体と一緒に下を向く）。**シムでしか見られない** — 実機の
+namiashi は腕が受信機直結でアプリから駆動できないため。
+
 ## 記録と再生
 
 `--record PATH` を付けると、毎周期の **意図・観測・指令・安全判定** を 1 本の

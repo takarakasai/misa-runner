@@ -17,4 +17,12 @@ authors = ["Takara Kasai <takara.kasai@gmail.com>"]
 [dependencies]
 misa-core = { path = "../misa-core" }
 articara = { git = "https://github.com/takarakasai/articara.git", default-features = false, features = ["mujoco"] }
+mujoco = { package = "mujoco-rs", version = "4.0.1" }
+
 log = "0.4"
+
+[features]
+# オフスクリーン描画（EGL）。動画に落とすときだけ。GUI は要らない。
+# レンダラは mujoco-rs のもの。articara の render feature は使わない
+# （キャッシュしている revision にまだ無い）。
+render = ["mujoco/renderer"]

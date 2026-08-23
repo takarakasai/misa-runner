@@ -33,6 +33,8 @@ default = ["viz"]
 # MuJoCo で動力学込みに回す（`misa-run sim`）。MuJoCo 3.8 の共有ライブラリが
 # 要るので既定では外してある:  export MUJOCO_DYNAMIC_LINK_DIR=$HOME/.mujoco/mujoco-3.8.0/lib
 sim = ["dep:misa-plant-mujoco"]
+# MuJoCo の絵をオフスクリーンで PNG に落とす（`sim --video DIR`）。EGL が要る。
+render = ["sim", "misa-plant-mujoco/render"]
 # ROS 2 から操縦する（cmd_vel + サービス）。ビルド手順は ros/README.md。
 ros2 = ["dep:r2r", "dep:futures"]
 # ライブ可視化。`quadruped-gait/viz` が GaitVizFrame に serde を付ける。

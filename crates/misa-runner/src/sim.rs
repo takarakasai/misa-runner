@@ -58,6 +58,17 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             gait,
             aux_rad: vec![None],
             link_ok: true,
+            // 胴体の傾きを打ち消すようにヘッド軸を動かす。ヘッド軸を持た
+            // ない機体（keel は車輪 4 軸だけ）では立てても何も起きない。
+            stabilize_head: cli.flag("chicken"),
+            // 胴体を傾けたまま歩く。**足は接地したまま胴体だけ回る**ので、
+            // チキンヘッドが効いているかはここを振ると見える。
+            // `gait.body_attitude_max_rad` が 0 なら効かない（既定）。
+            body_attitude_rad: [
+                cli.f64("tilt-roll").unwrap_or(0.0),
+                cli.f64("tilt-pitch").unwrap_or(0.0),
+                cli.f64("tilt-yaw").unwrap_or(0.0),
+            ],
             ..Intent::default()
         })),
         "sbus" => {
@@ -117,7 +128,44 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     };
     let mut plant = MujocoPlant::new(layout.table.clone(), &opts)?;
 
-    let mut controller = Controller::new(robot, cfg.clone());
+    // **絵を PNG で落とす。** articara の GUI（--viz）は関節角だけで、
+    // 接地も地面も出ない。動画にするならこちら。
+    #[cfg(feature = "render")]
+    let mut video = match cli.str("video") {
+        Some(dir) => {
+            plant.start_recording(&misa_plant_mujoco::RenderOptions {
+                outdir: dir.to_string(),
+                // **既定は 640x480。** MuJoCo のオフスクリーンバッファの既定が
+                // これで、超えると描かれた領域だけが左上に寄って黒帯が出る。
+                // 大きくするならモデルの <visual><global offwidth/offheight>
+                // が要るが、articara のエクスポータはそれを出していない。
+                width: cli.usize("width").unwrap_or(640) as u32,
+                height: cli.usize("height").unwrap_or(480) as u32,
+                azimuth: cli.f64("cam-az").unwrap_or(120.0),
+                elevation: cli.f64("cam-el").unwrap_or(-12.0),
+                // **機体の大きさで変える。** keel は namiashi より大きい。
+                distance: cli.f64("cam-dist").unwrap_or(1.6),
+                look_z: cli.f64("cam-z").unwrap_or(0.22),
+            })?;
+            println!("MuJoCo の絵を {dir} へ {} fps で落とします", cli.f64("fps").unwrap_or(30.0));
+            Some(cli.f64("fps").unwrap_or(30.0))
+        }
+        None => None,
+    };
+    #[cfg(not(feature = "render"))]
+    let video: Option<f64> = match cli.str("video") {
+        Some(_) => return Err("このビルドには render が入っていません（--features render）".into()),
+        None => None,
+    };
+    let mut next_frame_at = 0.0_f64;
+
+    // **シムでは補助軸もこちらの指令で動く。** 実機の namiashi は腕が
+    // 受信機直結で駆動できないが、MuJoCo の中では動かせるので、
+    // チキンヘッドの検証はここでしかできない。
+    let head_driven = layout
+        .head
+        .is_some_and(|id| plant.capabilities().driven.get(id.index()) == Some(&true));
+    let mut controller = Controller::with_arm(robot, cfg.clone(), head_driven);
     let mut shadow_gate = misa_core::SafetyGate::new(crate::snapshot::safety_config(cfg, &layout, &model_limits, dt, 5.0));
     let recorder = match cli.str("record") {
         Some(path) => {
@@ -231,6 +279,15 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             }
         }
 
+        // フレームは時刻で刻む。制御周期と動画のフレームレートは別物。
+        if let Some(fps) = video {
+            if t >= next_frame_at {
+                #[cfg(feature = "render")]
+                plant.capture()?;
+                next_frame_at += 1.0 / fps.max(1.0);
+            }
+        }
+
         if i % every == 0 {
             let feet: String = obs
                 .contacts
@@ -258,6 +315,12 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             Err(e) => return Err(e),
         }
     }
+
+    #[cfg(feature = "render")]
+    if video.is_some() {
+        println!("{} フレーム書きました", plant.frames());
+    }
+    let _ = &mut video;
 
     let end = plant.base_position().unwrap_or([f64::NAN; 3]);
     println!(
