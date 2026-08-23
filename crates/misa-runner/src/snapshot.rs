@@ -27,9 +27,11 @@
 use std::time::Duration;
 
 use misa_core::{
-    Axis, AxisCommand, AxisId, AxisRole, AxisTable, Command, ControlMode, Imu, Intent,
-    Observation, PoseSlot, Time, Velocity,
+    Axis, AxisCommand, AxisId, AxisLimits, AxisRole, AxisTable, Command, ControlMode, Imu, Intent,
+    Observation, PoseSlot, SafetyConfig, Time, Velocity,
 };
+use misa_hal::config::HardwareConfig;
+use misa_hal::joint::LegSlot;
 use misa_hal::imu::ImuSample;
 use misa_hal::joint::{JointState, ARM_JOINT_NAME, JOINT_NAMES};
 use misa_hal::legs::JointStatus;
@@ -59,6 +61,43 @@ pub fn axis_table() -> AxisTable {
         role: AxisRole::Aux,
     });
     AxisTable::new(axes).expect("同梱の軸表に重複がある")
+}
+
+/// 実機設定から [`SafetyConfig`] を組む。
+///
+/// 可動域とスルーレート制限は、いまも HAL が持っている値そのもの。ここで
+/// **同じ値を上の層にも見せる**ことで、丸めた理由を [`misa_core::SafetyVerdict`]
+/// として説明できるようにする。HAL 側は最後の防波堤として残す。
+///
+/// `max_observation_age` は制御周期から決める。バスが遅れて読み戻しが
+/// 止まったことを、周期いくつぶんで「見えていない」と判断するか。
+pub fn safety_config(hw: &HardwareConfig, control_period_s: f64, stale_ticks: f64) -> SafetyConfig {
+    let rate = hw.legs.max_target_rate_rad_s;
+    let mut axes = Vec::with_capacity(13);
+    for leg in LegSlot::ALL {
+        // 脚の設定が無いのは設定検証が弾く。ここまで来たら在るはず。
+        let bus = hw.bus_for(leg).expect("脚の設定がある");
+        for m in &bus.motors {
+            axes.push(AxisLimits {
+                min_rad: m.min_rad,
+                max_rad: m.max_rad,
+                max_target_rate_rad_s: rate,
+                max_torque_nm: 0.0,
+            });
+        }
+    }
+    axes.push(AxisLimits {
+        min_rad: hw.arm.min_rad,
+        max_rad: hw.arm.max_rad,
+        max_target_rate_rad_s: rate,
+        max_torque_nm: 0.0,
+    });
+    SafetyConfig {
+        axes,
+        max_observation_age: std::time::Duration::from_secs_f64(
+            control_period_s * stale_ticks.max(1.0),
+        ),
+    }
 }
 
 /// 操縦指令を [`Intent`] へ。
@@ -247,6 +286,35 @@ mod tests {
         assert!(obs.get(AxisId::new(0)).unwrap().health.valid);
         assert!(!obs.get(AxisId::new(1)).unwrap().health.valid);
         assert!(obs.any_unread());
+    }
+
+    /// **同梱プロファイルから制限表が組めること。**
+    ///
+    /// 軸表と長さが揃い、可動域が設定の値そのものであること。ここがずれると
+    /// ゲートが別の軸の可動域で丸める。
+    #[test]
+    fn the_shipped_profile_yields_one_limit_per_axis() {
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../robots/namiashi.toml"
+        ))
+        .unwrap();
+        let cfg = crate::config::AppConfig::from_toml(&text).unwrap();
+        let sc = safety_config(&cfg.hardware, 1.0 / cfg.control.rate_hz, 5.0);
+
+        let t = axis_table();
+        assert_eq!(sc.axes.len(), t.len());
+
+        // FL の hip は設定の 1 本目のバスの 1 個目のモータ。
+        let m = &cfg.hardware.bus_for(LegSlot::Fl).unwrap().motors[0];
+        assert_eq!(sc.axes[0].min_rad, m.min_rad);
+        assert_eq!(sc.axes[0].max_rad, m.max_rad);
+        assert_eq!(
+            sc.axes[0].max_target_rate_rad_s,
+            cfg.hardware.legs.max_target_rate_rad_s
+        );
+        // 末尾は腕。
+        assert_eq!(sc.axes[12].min_rad, cfg.hardware.arm.min_rad);
     }
 
     #[test]

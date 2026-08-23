@@ -30,7 +30,7 @@
 //! | 段 | 状態 |
 //! |---|---|
 //! | 語彙: [`Time`] / [`Observation`] / [`Command`] / [`Intent`] | ここ |
-//! | `SafetyGate`（指令を書き換えてよい唯一の場所） | 未 |
+//! | [`SafetyGate`]（指令を書き換えてよい唯一の場所） | 部品はここ。配線は記録の後 |
 //! | 記録と再生 | 未 |
 //! | `Plant`（全軸・1 tick の `exchange`） | 未 |
 //!
@@ -42,10 +42,12 @@ pub mod axis;
 pub mod command;
 pub mod intent;
 pub mod observation;
+pub mod safety;
 pub mod time;
 
 pub use axis::{Axis, AxisId, AxisRole, AxisTable};
 pub use command::{AxisCommand, Command, ControlMode};
 pub use intent::{GaitSelect, Intent, ModeRequest, PoseSlot, Velocity};
 pub use observation::{AxisHealth, AxisState, Contact, Imu, Observation};
+pub use safety::{AxisLimits, SafetyConfig, SafetyGate, SafetyVerdict};
 pub use time::Time;
