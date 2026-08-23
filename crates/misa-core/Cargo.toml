@@ -1,0 +1,16 @@
+# misa-core — 制御ループの語彙。
+#
+# **この crate は I/O を持たない。** シリアルも CAN も UDP も時計もスレッドも
+# 触らない。依存は serde（記録と再生のため）だけに保つ。ここが薄いことが、
+# Policy を実機なしでテストできることと、将来 humanoid が同じ背骨を使える
+# ことの根拠になる。依存を足すときは、その 2 つを壊さないか確かめること。
+[package]
+name = "misa-core"
+description = "四脚／脚ロボット制御の共通語彙: Time / Observation / Command / Intent。I/O を持たない。"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde = { workspace = true }

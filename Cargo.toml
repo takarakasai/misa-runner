@@ -8,7 +8,7 @@
 # 併行開発したいときは `./scripts/dev-siblings.sh` を使う。
 [workspace]
 resolver = "2"
-members = ["crates/misa-hal", "crates/misa-runner"]
+members = ["crates/misa-core", "crates/misa-hal", "crates/misa-runner"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,6 +17,7 @@ license = "Apache-2.0"
 authors = ["Takara Kasai <takara.kasai@gmail.com>"]
 
 [workspace.dependencies]
+misa-core = { path = "crates/misa-core" }
 misa-hal = { path = "crates/misa-hal" }
 
 # ── 自前の crate（git 依存）──

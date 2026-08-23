@@ -1872,6 +1872,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "misa-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "misa-hal"
 version = "0.1.0"
 dependencies = [
@@ -1895,6 +1902,7 @@ dependencies = [
  "env_logger",
  "libc",
  "log",
+ "misa-core",
  "misa-hal",
  "misarta",
  "nalgebra",

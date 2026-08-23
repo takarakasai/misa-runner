@@ -266,61 +266,12 @@ impl TeleopConfig {
     }
 }
 
-/// 動作モードの要求。
+/// モードと歩容の選択は [`misa_core`] が定義する。
 ///
-/// 並び順が**活動度の低い順**になっていることに意味がある。受信が切れた
-/// ときのフェイルセーフは、この順序で**直前より上へ行かない**ことを保証する
-/// （[`Self::capped_for_failsafe`]）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ModeRequest {
-    /// 脱力。
-    Relax,
-    /// 初期姿勢で保持。
-    Stand,
-    /// 歩行。
-    Walk,
-}
-
-impl ModeRequest {
-    /// 受信が切れたときに落とし込む先。**活動度を上げない。**
-    ///
-    /// | 直前 | 受信断後 | 理由 |
-    /// |---|---|---|
-    /// | `Relax` | `Relax` | **脱力中に受信が切れて立ち上がるのは危ない** |
-    /// | `Stand` | `Stand` | 初期姿勢のまま保持 |
-    /// | `Walk` | `Walk` | **速度だけ 0 にして、その場で立ったまま**保持 |
-    ///
-    /// つまり**モードは変えない**。速度をゼロにするのは
-    /// [`OperatorCommand::failsafe`] の側。
-    ///
-    /// `Walk` を `Stand` へ丸めてはいけない。CH5 中段は「初期姿勢で保持」
-    /// なので、丸めると**歩行中に受信が切れた瞬間に初期姿勢へしゃがみ込む**。
-    /// 求めているのは「速度 0・その場起立」。丸めていた時期があるが、
-    /// それは `Stand` が歩容の立ち姿勢を意味していた頃の名残。
-    ///
-    /// **脱力へ落とすのも禁止。** 荷重がかかった四足を脱力させると崩れる。
-    pub fn capped_for_failsafe(self) -> Self {
-        self
-    }
-}
-
-/// 歩容の選択。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GaitSelect {
-    Crawl,
-    Walk,
-    Trot,
-}
-
-impl GaitSelect {
-    pub fn label(self) -> &'static str {
-        match self {
-            GaitSelect::Crawl => "Crawl",
-            GaitSelect::Walk => "Walk",
-            GaitSelect::Trot => "Trot",
-        }
-    }
-}
+/// 意味（受信断でモードを上げない、など）は制御則の一部なので、入力の
+/// マッピングを持つこの module ではなく語彙の側に置いてある。ここは
+/// 使う場所から名前が引けるように再輸出するだけ。
+pub use misa_core::{GaitSelect, ModeRequest};
 
 /// 1 周期ぶんの操縦指令。速度はすでに実単位へスケール済み。
 #[derive(Debug, Clone, Copy, PartialEq)]

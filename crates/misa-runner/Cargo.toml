@@ -11,6 +11,7 @@ name = "misa-run"
 path = "src/main.rs"
 
 [dependencies]
+misa-core.workspace = true
 misa-hal.workspace = true
 libc.workspace = true
 misarta.workspace = true

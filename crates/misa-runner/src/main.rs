@@ -23,6 +23,7 @@ mod jointvec;
 mod pose;
 mod robot;
 mod runner;
+mod snapshot;
 mod teleop;
 mod viz;
 
