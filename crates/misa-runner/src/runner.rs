@@ -38,7 +38,7 @@ impl Hardware {
     /// 失敗する（実機で踏んだ）。
     pub fn connect(cfg: &AppConfig) -> Result<Self, String> {
         let map = PortMap::discover().map_err(|e| e.to_string())?;
-        let legs = LegArray::connect_with(&cfg.hardware, &map).map_err(|e| e.to_string())?;
+        let legs = LegArray::connect_with(&cfg.hardware, &map, &cfg.name).map_err(|e| e.to_string())?;
         for bus in legs.buses() {
             log::info!("脚 {} → {}", bus.leg().prefix(), bus.port());
         }
@@ -115,19 +115,22 @@ pub const RETRYABLE: &str = "[retryable] ";
 /// 意図と危険は [`crate::config::ControlConfig::zero_multiturn_on_boot`] を見ること。
 /// ここでは「一度きり」をどう保証しているかだけ書く。
 fn zero_multiturn_once(cfg: &AppConfig, hw: &Hardware) -> Result<(), String> {
-    /// tmpfs で 1777。**再起動で必ず消える**のがこの仕組みの土台。
-    /// `/run` は root:root 755 でサービスユーザ（takara）が書けない。
-    /// `/tmp` はディスク上のこともあり、再起動で消える保証がない。
-    const MARKER: &str = "/dev/shm/misa-multiturn-zeroed-namiashi";
+    // tmpfs で 1777。**再起動で必ず消える**のがこの仕組みの土台。
+    // `/run` は root:root 755 でサービスユーザ（takara）が書けない。
+    // `/tmp` はディスク上のこともあり、再起動で消える保証がない。
+    // **ロボット名で分ける。** 脚バスの flock と同じ理由（同一ホストで
+    // 2 台動かしたとき、一方の目印がもう一方の張り直しを抑止しないように）。
+    let marker = format!("/dev/shm/misa-multiturn-zeroed-{}", cfg.name);
+    let marker = marker.as_str();
     const SETTLE: Duration = Duration::from_millis(300);
 
     if !cfg.control.zero_multiturn_on_boot {
         return Ok(());
     }
-    if std::path::Path::new(MARKER).exists() {
+    if std::path::Path::new(marker).exists() {
         log::info!(
             "マルチターン原点は今回の電源投入で既に張り直し済みです。\
-             いまの原点をそのまま使います（目印 {MARKER}）"
+             いまの原点をそのまま使います（目印 {marker}）"
         );
         return Ok(());
     }
@@ -135,8 +138,8 @@ fn zero_multiturn_once(cfg: &AppConfig, hw: &Hardware) -> Result<(), String> {
     // **目印を先に作る。** 後だと、張り直しに失敗した回や、この直後に
     // 落ちた回で目印が残らず、次の再起動で**立脚中に張り直してしまう**。
     // 作れなかったら「一度きり」を保証できないので、モータには触らずに諦める。
-    std::fs::File::create(MARKER)
-        .map_err(|e| format!("{MARKER} を作れません: {e}（一度きりを保証できないので中止します）"))?;
+    std::fs::File::create(marker)
+        .map_err(|e| format!("{marker} を作れません: {e}（一度きりを保証できないので中止します）"))?;
 
     log::warn!(
         "**いまの姿勢をマルチターン原点にします。**（電源投入後の初回起動）\

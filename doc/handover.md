@@ -221,7 +221,7 @@ git 依存に切り替えた副作用として、**ローカルの兄弟チェ�
 問題になるなら起動側で:
 
 ```sh
-sudo chrt -f 50 ./misa-run run --config config/namiashi.toml
+sudo chrt -f 50 ./misa-run run --robot robots/namiashi.toml
 # CPU ガバナも performance に
 ```
 

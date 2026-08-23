@@ -602,12 +602,21 @@ struct LegsLock {
 }
 
 impl LegsLock {
+    /// ロックファイルのパス。**ロボット名で分ける。**
+    ///
     /// `/run/lock` は FHS のロック置き場で、どのディストロでも 1777。
     /// `/tmp` を使わないのは、systemd の `PrivateTmp=` を後から付けた瞬間に
     /// 排他が黙って効かなくなるため。
-    const PATH: &'static str = "/run/lock/misa-legs-namiashi.lock";
+    ///
+    /// 名前を入れるのは、同一ホストから 2 台動かしたときに一方が他方を
+    /// 弾かないようにするため。**同じロボットに対しては同じ名前になる**ので、
+    /// 本来の目的（同じ脚バスの二重掴みを止める）はそのまま効く。
+    fn path(robot: &str) -> String {
+        format!("/run/lock/misa-legs-{robot}.lock")
+    }
 
-    fn acquire() -> Result<Self> {
+    fn acquire(robot: &str) -> Result<Self> {
+        let path = Self::path(robot);
         use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::io::AsRawFd;
         // 0666 で作る。root で 1 度動かすと takara 所有でなくなり、以後
@@ -618,14 +627,14 @@ impl LegsLock {
             .truncate(false)
             .write(true)
             .mode(0o666)
-            .open(Self::PATH)
-            .or_else(|_| std::fs::File::open(Self::PATH))
-            .map_err(|e| Error::Config(format!("{} を開けません: {e}", Self::PATH)))?;
+            .open(&path)
+            .or_else(|_| std::fs::File::open(&path))
+            .map_err(|e| Error::Config(format!("{path} を開けません: {e}")))?;
         // SAFETY: 開いたばかりの有効な fd を渡すだけ。
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if rc != 0 {
             return Err(Error::Config(format!(
-                "脚バスは既に別のプロセスが使っています。\
+                "{robot} の脚バスは既に別のプロセスが使っています（{path}）。\
                  **2 つ同時に動かすとモータの応答が取り違えられて角度が壊れます。**\
                  `systemctl status misa-run` と `pgrep -a misa-run` で確認し、\
                  先に止めてください"
@@ -659,15 +668,16 @@ impl LegArray {
     /// 設定に従って 4 本のポートを開き、バススレッドを起こす。
     ///
     /// 途中で失敗した場合、それまでに開いたバスは drop で畳まれる。
-    pub fn connect(cfg: &HardwareConfig) -> Result<Self> {
-        Self::connect_with(cfg, &PortMap::discover()?)
+    /// `robot` はロックを分けるためのロボット名（`AppConfig::name`）。
+    pub fn connect(cfg: &HardwareConfig, robot: &str) -> Result<Self> {
+        Self::connect_with(cfg, &PortMap::discover()?, robot)
     }
 
     /// 事前に取った探索結果を使って開く。
-    pub fn connect_with(cfg: &HardwareConfig, map: &PortMap) -> Result<Self> {
+    pub fn connect_with(cfg: &HardwareConfig, map: &PortMap, robot: &str) -> Result<Self> {
         // ポートを開く前に取る。開いてから弾くと、その一瞬だけ二重に
         // 喋る窓ができる。
-        let lock = LegsLock::acquire()?;
+        let lock = LegsLock::acquire(robot)?;
         let mut buses: Vec<LegBus> = Vec::with_capacity(4);
         for leg in LegSlot::ALL {
             let bus_cfg = cfg

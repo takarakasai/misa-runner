@@ -39,7 +39,7 @@
 初めてタイムアウトする**。症状は「モータが応答しない」に見え、配線を疑って時間を溶かす。
 
 ```toml
-# config/namiashi.toml
+# robots/namiashi.toml
 [hardware.legs]
 response_timeout_ms = 20    # 立ち上げ中は 5 → 20
 ```
@@ -53,7 +53,7 @@ response_timeout_ms = 20    # 立ち上げ中は 5 → 20
 
 ### 0-2. 設定を git に退避
 
-`calib --write` は `config/namiashi.toml` を**丸ごと再生成**する（手書きコメントは消える）。
+`calib --write` は `robots/namiashi.toml` を**丸ごと再生成**する（手書きコメントは消える）。
 
 ```sh
 cd ~/work/misa-runner
@@ -100,7 +100,7 @@ git add -A && git commit -m "wip: before calibration"
 ### 1-1. 設定とモデル
 
 ```sh
-./target/release/misa-run check --config config/namiashi.toml
+./target/release/misa-run check --robot robots/namiashi.toml
 ```
 
 **合格条件:**
@@ -112,7 +112,7 @@ git add -A && git commit -m "wip: before calibration"
 ### 1-2. ポートの役割付け
 
 ```sh
-./target/release/misa-run ports --config config/namiashi.toml
+./target/release/misa-run ports --robot robots/namiashi.toml
 ```
 
 **合格条件:**
@@ -136,10 +136,10 @@ git add -A && git commit -m "wip: before calibration"
 ### 2-2. id スキャン（脚ごと）★最初の関門★
 
 ```sh
-./target/release/misa-run calib scan --leg FL --max-id 8 --config config/namiashi.toml
-./target/release/misa-run calib scan --leg FR --max-id 8 --config config/namiashi.toml
-./target/release/misa-run calib scan --leg RL --max-id 8 --config config/namiashi.toml
-./target/release/misa-run calib scan --leg RR --max-id 8 --config config/namiashi.toml
+./target/release/misa-run calib scan --leg FL --max-id 8 --robot robots/namiashi.toml
+./target/release/misa-run calib scan --leg FR --max-id 8 --robot robots/namiashi.toml
+./target/release/misa-run calib scan --leg RL --max-id 8 --robot robots/namiashi.toml
+./target/release/misa-run calib scan --leg RR --max-id 8 --robot robots/namiashi.toml
 ```
 
 **指令は出さない**（State2 の読み出しのみ）。
@@ -164,7 +164,7 @@ git add -A && git commit -m "wip: before calibration"
 ### 2-3. 脚バスの実効周期
 
 ```sh
-./target/release/misa-run legs --secs 10 --config config/namiashi.toml
+./target/release/misa-run legs --secs 10 --robot robots/namiashi.toml
 ```
 
 **指令は送らない。**
@@ -203,7 +203,7 @@ PC の articara に実機の姿勢がそのまま出る。**指令は一切送�
 
 ```sh
 # SBC
-./target/release/misa-run legs --secs 0 --viz --config config/namiashi.toml
+./target/release/misa-run legs --secs 0 --viz --robot robots/namiashi.toml
 # PC（モデルは namiashi_description を clone するだけ。scp は要らない）
 cd articara && cargo run --release --features viz -- \
     --model ../namiashi_description/namiashi.misa
@@ -239,7 +239,7 @@ cd articara && cargo run --release --features viz -- \
 ### 3-1. IMU
 
 ```sh
-./target/release/misa-run imu --secs 10 --config config/namiashi.toml
+./target/release/misa-run imu --secs 10 --robot robots/namiashi.toml
 ```
 
 - [ ] 値が更新される
@@ -249,7 +249,7 @@ cd articara && cargo run --release --features viz -- \
 ### 3-2. S.BUS（プロポ）
 
 ```sh
-./target/release/misa-run sbus --secs 10 --config config/namiashi.toml
+./target/release/misa-run sbus --secs 10 --robot robots/namiashi.toml
 ```
 
 出力例（2026-08-21 実測）:
@@ -272,7 +272,7 @@ S.BUS2 Rx-Batt=4.9V Ext-Volt=26.0V
   モード=Relax   歩容=Crawl   ポーズ=-   チキンヘッド=on   腕=-2.300rad
 ```
 
-**役割名は設定から引いている**ので、`config/namiashi.toml` の
+**役割名は設定から引いている**ので、`robots/namiashi.toml` の
 `[teleop.*] channel` を変えれば表示も追従する。「期待どおりのチャンネルに出るか」は
 この欄を見れば分かる。
 
@@ -330,9 +330,9 @@ CN2 の結線（1=GND, 2=+5V, 3=RX）と受信機の S.BUS 出力設定。
 
 ```sh
 # 12 軸ぶん繰り返す。--write を付けたときだけ設定に書き戻る
-./target/release/misa-run calib range --leg FL --joint hip   --write config/namiashi.toml --config config/namiashi.toml
-./target/release/misa-run calib range --leg FL --joint thigh --write config/namiashi.toml --config config/namiashi.toml
-./target/release/misa-run calib range --leg FL --joint calf  --write config/namiashi.toml --config config/namiashi.toml
+./target/release/misa-run calib range --leg FL --joint hip   --write robots/namiashi.toml --robot robots/namiashi.toml
+./target/release/misa-run calib range --leg FL --joint thigh --write robots/namiashi.toml --robot robots/namiashi.toml
+./target/release/misa-run calib range --leg FL --joint calf  --write robots/namiashi.toml --robot robots/namiashi.toml
 # FR / RL / RR も同様
 ```
 
@@ -363,7 +363,7 @@ CN2 の結線（1=GND, 2=+5V, 3=RX）と受信機の S.BUS 出力設定。
 終わったら**必ず `DisableJoint`** で戻す。既定の振り幅 5°、速度 0.3 rad/s。
 
 ```sh
-./target/release/misa-run calib move --leg FL --joint hip --write config/namiashi.toml --config config/namiashi.toml
+./target/release/misa-run calib move --leg FL --joint hip --write robots/namiashi.toml --robot robots/namiashi.toml
 # 12 軸ぶん繰り返す
 ```
 
@@ -405,7 +405,7 @@ CN2 の結線（1=GND, 2=+5V, 3=RX）と受信機の S.BUS 出力設定。
 > 符号も狂うため。
 
 ```sh
-./target/release/misa-run calib zero --pose constrain --write config/namiashi.toml --config config/namiashi.toml
+./target/release/misa-run calib zero --pose constrain --write robots/namiashi.toml --robot robots/namiashi.toml
 ```
 
 **手順:**
@@ -455,7 +455,7 @@ hip で 10〜15°、thigh で 4〜16° 外していた。calf は突き当て基
 値が実機と整合しているか確認する。
 
 ```sh
-./target/release/misa-run legs --secs 5 --config config/namiashi.toml
+./target/release/misa-run legs --secs 5 --robot robots/namiashi.toml
 ```
 
 - [ ] 各軸を手で端まで動かしたときの読み値が、設定の `min_rad`/`max_rad` の内側に収まる
@@ -470,7 +470,7 @@ hip で 10〜15°、thigh で 4〜16° 外していた。calf は突き当て基
 ### 7-1. まずモデル上で確認（実機に触れない）
 
 ```sh
-./target/release/misa-run dump --gait crawl --vx 0.05 --secs 10 --config config/namiashi.toml
+./target/release/misa-run dump --gait crawl --vx 0.05 --secs 10 --robot robots/namiashi.toml
 ```
 
 - [x] 関節角が可動域内に収まる（クランプ警告が出ない）
@@ -492,7 +492,7 @@ hip で 10〜15°、thigh で 4〜16° 外していた。calf は突き当て基
 ### 7-2. 受信機なしで起動
 
 ```sh
-./target/release/misa-run run --allow-no-sbus --config config/namiashi.toml
+./target/release/misa-run run --allow-no-sbus --robot robots/namiashi.toml
 ```
 
 - [x] **脚が浮いている**
@@ -548,7 +548,7 @@ calf がメカ突き当てに座っており、設定の下限がその突き当
 ## 段階 8: プロポ操縦【🔴】
 
 ```sh
-./target/release/misa-run run --config config/namiashi.toml
+./target/release/misa-run run --robot robots/namiashi.toml
 ```
 
 - [x] **CH5 が「脱力」位置**で起動する

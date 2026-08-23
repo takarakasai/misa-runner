@@ -867,7 +867,7 @@ let thread = std::thread::Builder::new()
 
 したがって 530 µs は 4 本の合計ではなく 1 本あたり。**2 ms の周期に対して余裕がある。**
 
-さらに `config/namiashi.toml` は既に:
+さらに `robots/namiashi.toml` は既に:
 
 ```toml
 [hardware.legs]

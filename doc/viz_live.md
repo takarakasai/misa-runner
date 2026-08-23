@@ -101,7 +101,7 @@ cd articara && cargo build --release --features viz
 
 ```sh
 cd ~/work/misa-runner
-./target/release/misa-run legs --secs 0 --viz --config config/namiashi.toml
+./target/release/misa-run legs --secs 0 --viz --robot robots/namiashi.toml
 ```
 
 `--secs 0`（または `--forever`）で Ctrl-C まで回り続ける。
@@ -202,7 +202,7 @@ python3 doc/scout-check.py
 ```sh
 # SBC
 ./target/release/misa-run legs --secs 0 --viz --viz-endpoint tcp/0.0.0.0:7447 \
-    --config config/namiashi.toml
+    --robot robots/namiashi.toml
 # articara のエンドポイント欄: tcp/192.168.0.21:7447
 ```
 

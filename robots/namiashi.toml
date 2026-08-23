@@ -1,3 +1,5 @@
+name = "namiashi"
+
 [control]
 model = "models/namiashi.misa"
 rate_hz = 200.0

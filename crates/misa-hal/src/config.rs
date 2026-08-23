@@ -4,7 +4,7 @@
 //! 符号は組み立て直すたびに変わるもので、変わるたびに再ビルドが必要な形に
 //! しておくと、現場で必ず「とりあえずコードを直す」が起きるため。
 //!
-//! 既定値は `config/namiashi.toml` に書き出したものと同じで、設定ファイルを
+//! 既定値は `robots/namiashi.toml` に書き出したものと同じで、設定ファイルを
 //! 与えなくても [`HardwareConfig::default`] だけで起動できる。
 
 use serde::{Deserialize, Serialize};

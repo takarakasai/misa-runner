@@ -319,7 +319,7 @@ fn range(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let margin = cli.f64("margin").unwrap_or(0.05);
     let name = joint_label(cfg, leg, k);
 
-    let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
+    let array = LegArray::connect(&cfg.hardware, &cfg.name).map_err(|e| e.to_string())?;
     let bus = array.bus(leg);
     bus.request(BusRequest::Disable)
         .map_err(|e| e.to_string())?;
@@ -414,7 +414,7 @@ fn zero(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     println!("保持できたら Enter（Ctrl-C で中止）");
     let _ = read_line();
 
-    let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
+    let array = LegArray::connect(&cfg.hardware, &cfg.name).map_err(|e| e.to_string())?;
     array
         .wait_anchored(Duration::from_secs(3))
         .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;
@@ -518,7 +518,7 @@ fn clear_multiturn(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     println!("続けるなら Enter、やめるなら Ctrl-C");
     let _ = read_line();
 
-    let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
+    let array = LegArray::connect(&cfg.hardware, &cfg.name).map_err(|e| e.to_string())?;
     array
         .wait_anchored(Duration::from_secs(3))
         .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;
@@ -659,7 +659,7 @@ fn read_line() -> String {
 /// 3. もう一度実行して raw が一致するか見る
 fn single_turn(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let only = leg_filter(cli)?;
-    let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
+    let array = LegArray::connect(&cfg.hardware, &cfg.name).map_err(|e| e.to_string())?;
     array
         .wait_anchored(Duration::from_secs(3))
         .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;
@@ -759,7 +759,7 @@ fn clear_error(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // 投げてしまうと「時間で消えた」のか「コマンドで消えた」のかが
     // 分からなくなる。観測を汚さないための逃げ道。
     let dry_run = cli.flag("dry-run");
-    let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
+    let array = LegArray::connect(&cfg.hardware, &cfg.name).map_err(|e| e.to_string())?;
     array
         .wait_anchored(Duration::from_secs(3))
         .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;
@@ -921,7 +921,7 @@ fn restart(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     println!("続けるなら Enter、やめるなら Ctrl-C");
     let _ = read_line();
 
-    let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
+    let array = LegArray::connect(&cfg.hardware, &cfg.name).map_err(|e| e.to_string())?;
     array
         .wait_anchored(Duration::from_secs(3))
         .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;
@@ -1054,7 +1054,7 @@ fn pid(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         torque_limit: gain("set-torque-limit")?.map(|v| v as i16),
     };
     let writing = !set.is_empty();
-    let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
+    let array = LegArray::connect(&cfg.hardware, &cfg.name).map_err(|e| e.to_string())?;
     array
         .wait_anchored(Duration::from_secs(3))
         .map_err(|e| format!("{e}（モータ電源とボーレートを確認してください）"))?;

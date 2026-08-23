@@ -10,8 +10,20 @@ use serde::{Deserialize, Serialize};
 use crate::teleop::TeleopConfig;
 
 /// 設定全体。
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+///
+/// **`name` はファイルの先頭に置くこと。** TOML ではテーブル見出しより後ろに
+/// 書いた素のキーは、そのテーブルの中身として読まれる。フィールド順が
+/// そのまま `to_toml` の出力順になるので、ここの並びが仕様になる。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppConfig {
+    /// ロボット名。プロファイル 1 枚 = ロボット 1 台の識別子。
+    ///
+    /// ログの見出しに出るほか、**実行時の資源名に入る**（脚バスの flock、
+    /// マルチターン原点の目印）。同一ホストで 2 台動かしたときに、
+    /// 一方のロックがもう一方を弾かないようにするため。
+    /// パスに入るので [`AppConfig::validate`] で文字種を縛っている。
+    #[serde(default = "default_robot_name")]
+    pub name: String,
     #[serde(default)]
     pub control: ControlConfig,
     #[serde(default)]
@@ -22,6 +34,28 @@ pub struct AppConfig {
     pub poses: PoseConfig,
     #[serde(default)]
     pub hardware: HardwareConfig,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            name: default_robot_name(),
+            control: ControlConfig::default(),
+            gait: GaitTuning::default(),
+            teleop: TeleopConfig::default(),
+            poses: PoseConfig::default(),
+            hardware: HardwareConfig::default(),
+        }
+    }
+}
+
+/// プロファイルが名前を書いていないときの既定。
+///
+/// 実機を持つプロファイルは必ず自分の名前を書く前提だが、`--robot` を
+/// 付けずに既定値で立ち上げる経路があるので、そこでも資源名が決まるように
+/// しておく。
+fn default_robot_name() -> String {
+    "robot".into()
 }
 
 impl AppConfig {
@@ -66,6 +100,22 @@ impl AppConfig {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        // **名前はファイル名になる。** flock と目印のパスに入るので、
+        // `/` や `..` が混ざると別のディレクトリを触りに行く。
+        if self.name.is_empty() {
+            return Err("name が空です。ロボット名を書いてください".into());
+        }
+        if !self
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(format!(
+                "name {:?} に使えない文字があります。\
+                 英数字と - _ だけにしてください（実行時のパスに入るため）",
+                self.name
+            ));
+        }
         self.hardware.validate().map_err(|e| e.to_string())?;
         if self.control.rate_hz <= 0.0 {
             return Err("control.rate_hz は正の値が必要です".into());
@@ -402,10 +452,36 @@ FL_hip_joint = 0.0
         assert!(AppConfig::from_toml("").is_err());
     }
 
+    /// **名前は実行時のパスに入る。**
+    ///
+    /// 脚バスの flock (`/run/lock/misa-legs-<name>.lock`) と、マルチターン
+    /// 原点の目印 (`/dev/shm/misa-multiturn-zeroed-<name>`) に埋め込まれる。
+    /// `/` や `..` を通すと、プロファイル 1 枚で別のディレクトリのファイルを
+    /// 掴みに行けてしまう。
+    #[test]
+    fn a_robot_name_that_would_escape_its_path_is_rejected() {
+        for bad in ["../../etc/passwd", "a/b", "", "name with space", "名前"] {
+            let mut cfg = AppConfig::default();
+            cfg.name = bad.to_string();
+            assert!(
+                cfg.validate().is_err(),
+                "name {bad:?} が通ってしまった"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shipped_profile_names_the_robot() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../robots/namiashi.toml");
+        let text = std::fs::read_to_string(path).unwrap();
+        let cfg = AppConfig::from_toml(&text).unwrap();
+        assert_eq!(cfg.name, "namiashi");
+    }
+
     #[test]
     fn the_shipped_config_still_loads() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/namiashi.toml");
-        let text = std::fs::read_to_string(path).expect("config/namiashi.toml が読めません");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../robots/namiashi.toml");
+        let text = std::fs::read_to_string(path).expect("robots/namiashi.toml が読めません");
         AppConfig::from_toml(&text).expect("同梱の設定が読めなくなっている");
     }
     use super::*;

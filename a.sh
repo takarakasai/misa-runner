@@ -1,1 +1,1 @@
-calib clear-multiturn --config config/namiashi.toml
+calib clear-multiturn --robot robots/namiashi.toml

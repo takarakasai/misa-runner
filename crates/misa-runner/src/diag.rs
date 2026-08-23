@@ -464,7 +464,7 @@ pub fn imu(cfg: &AppConfig, seconds: Option<f64>) -> Result<(), String> {
 /// 立ち上げでやりたいのは後者。脚を手で動かして、画面のモデルが同じように
 /// 動くかを見れば、`(バス, id)` → 関節の対応と符号を目で確認できる。
 pub fn legs(cfg: &AppConfig, seconds: Option<f64>, viz_cfg: &VizConfig) -> Result<(), String> {
-    let array = LegArray::connect(&cfg.hardware).map_err(|e| e.to_string())?;
+    let array = LegArray::connect(&cfg.hardware, &cfg.name).map_err(|e| e.to_string())?;
     let deadline = Deadline::new(seconds);
     println!(
         "脚バスを開きました（指令は送りません。観測: {}）",

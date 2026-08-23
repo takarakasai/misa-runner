@@ -126,16 +126,21 @@ pub fn viz_config(cli: &Cli) -> viz::VizConfig {
     }
 }
 
-/// `--config` があればそれを読み、無ければ既定を使う。
+/// ロボットのプロファイルを読む。
+///
+/// 正しい綴りは `--robot`。`--config` は改名前からの綴りで、systemd の
+/// unit や手元のスクリプトが使っているので当面は受け付ける。両方あれば
+/// `--robot` を採る。
 fn load_config(cli: &Cli) -> Result<AppConfig, String> {
-    match cli.str("config") {
+    let path = cli.str("robot").or_else(|| cli.str("config"));
+    match path {
         Some(path) => {
             let cfg = AppConfig::load(path)?;
-            log::info!("設定 {path} を読みました");
+            log::info!("ロボット {} のプロファイル {path} を読みました", cfg.name);
             Ok(cfg)
         }
         None => {
-            log::info!("設定ファイルの指定がないので既定値を使います（--config で指定）");
+            log::info!("--robot の指定がないので組み込みの既定値を使います");
             let cfg = AppConfig::default();
             cfg.validate()?;
             Ok(cfg)
@@ -179,7 +184,8 @@ fn print_help() {
   run                       制御ループ（プロポ操縦）
 
 共通オプション:
-  --config PATH             設定 TOML（省略時は組み込みの既定値）
+  --robot PATH              ロボットのプロファイル TOML
+                            （省略時は組み込みの既定値。--config は旧綴り）
 
 dump のオプション:
   --gait crawl|walk|trot    歩容（既定 crawl）
@@ -295,6 +301,7 @@ pub struct Cli {
 /// まま実機が動く**。`--sec 5`（`--secs` の綴り違い）を受け取って既定値で
 /// 走り続ける、といった事故になるので、知らないフラグは起動時に弾く。
 const VALUE_FLAGS: &[&str] = &[
+    "robot",
     "config",
     "secs",
     "gait",

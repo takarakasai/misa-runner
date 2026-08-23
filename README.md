@@ -97,11 +97,11 @@ misa-run imu  --secs 10        # IMU 受信の確認
 misa-run sbus --secs 10        # プロポ入力と解釈結果の確認
 misa-run legs --secs 10        # 脚バスの状態と実効周期（**指令は送らない**）
 misa-run calib scan            # 応答するモータ id を数える（指令は送らない）
-misa-run run  --config config/namiashi.toml
+misa-run run  --robot robots/namiashi.toml
 ```
 
-設定は 1 枚の TOML（`config/namiashi.toml`）。雛形は
-`misa-run config --out config/namiashi.toml` で生成できる。
+設定は 1 枚の TOML（`robots/namiashi.toml`）。雛形は
+`misa-run config --out robots/namiashi.toml` で生成できる。
 
 ### プロポ割り当て（既定）
 
@@ -131,15 +131,15 @@ misa-run run  --config config/namiashi.toml
 misa-run calib scan --max-id 8
 
 # 2) 可動域を実測（脱力させ、手で端から端まで動かす）
-misa-run calib range --leg FL --joint thigh --write config/namiashi.toml
+misa-run calib range --leg FL --joint thigh --write robots/namiashi.toml
 
 # 3) 符号を確定（1 軸だけ 5° 動かし、モデルの + 方向か答える）
-misa-run calib move  --leg FL --joint thigh --write config/namiashi.toml
+misa-run calib move  --leg FL --joint thigh --write robots/namiashi.toml
 
 #    2) と 3) を 12 軸ぶん繰り返す
 
 # 4) ゼロ点（指定した姿勢で保持してからゼロ出し、その姿勢角を記録）
-misa-run calib zero --pose constrain --write config/namiashi.toml
+misa-run calib zero --pose constrain --write robots/namiashi.toml
 ```
 
 安全のための約束:

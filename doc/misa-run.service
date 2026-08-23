@@ -68,7 +68,7 @@ Type=simple
 User=takara
 SupplementaryGroups=dialout
 WorkingDirectory=/home/takara/work/misa-runner
-ExecStart=/home/takara/work/misa-runner/target/release/misa-run run --config config/namiashi.toml
+ExecStart=/home/takara/work/misa-runner/target/release/misa-run run --robot robots/namiashi.toml
 
 # --- リアルタイム優先度 ---
 # systemd が付与するので、アプリ側に CAP_SYS_NICE も rtprio 制限も不要。
