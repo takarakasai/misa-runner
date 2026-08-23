@@ -24,6 +24,8 @@ pub struct SerialPlant {
     hw: Hardware,
     axes: AxisTable,
     caps: PlantCaps,
+    /// チキンヘッドが動かす軸。無い機体では `None`。
+    head: Option<AxisId>,
     /// 位置指令に添える軸の速度上限 [rad/s]。
     max_speed_rad_s: f64,
     /// 単調時刻の基準。**時刻は Plant が供給する**（`misa_core::Time`）。
@@ -33,13 +35,15 @@ pub struct SerialPlant {
 impl SerialPlant {
     pub fn connect_with(cfg: &AppConfig, map: &misa_hal::ch348::PortMap) -> Result<Self, String> {
         let hw = Hardware::connect_with(cfg, map)?;
-        let axes = snapshot::axis_table();
+        let layout = snapshot::axis_layout(cfg)?;
+        let axes = layout.table.clone();
 
-        // **腕は「繋がっている」と「こちらの指令で動く」が別。**
+        // **「繋がっている」と「こちらの指令で動く」は別。**
         // 受信機直結の腕は動いてはいるが、アプリの指令では動かない。
+        // head 以外の補助軸（keel の車輪など）は、まだ駆動する主体が無い。
         let mut driven = vec![true; axes.len()];
-        if let Some(last) = driven.last_mut() {
-            *last = hw.arm.is_app_driven();
+        for id in layout.aux() {
+            driven[id.index()] = layout.head == Some(id) && hw.arm.is_app_driven();
         }
         let caps = PlantCaps {
             // トルクの口は HAL に空いているが、実機で使ったことがない。
@@ -55,6 +59,7 @@ impl SerialPlant {
             hw,
             axes,
             caps,
+            head: layout.head,
             max_speed_rad_s: cfg.hardware.legs.default_max_speed_rad_s,
             started: std::time::Instant::now(),
         })
@@ -115,7 +120,7 @@ impl Plant for SerialPlant {
         self.hw.legs.set_all(&cmds);
 
         if self.hw.arm.is_app_driven() {
-            if let Some(a) = cmd.get(AxisId::new(12)) {
+            if let Some(a) = self.head.and_then(|id| cmd.get(id)) {
                 if a.mode != ControlMode::Idle {
                     if let Err(e) = self.hw.arm.set_position(a.position_rad) {
                         log::warn!("腕サーボへの指令に失敗: {e}");
@@ -148,7 +153,7 @@ impl Plant for SerialPlant {
                 a.health.voltage_v = st.valid.then_some(st.voltage_v);
             }
         }
-        if let Some(a) = obs.get_mut(AxisId::new(12)) {
+        if let Some(a) = self.head.and_then(|id| obs.get_mut(id)) {
             a.position_rad = self.hw.arm.position();
             a.health.valid = true;
         }

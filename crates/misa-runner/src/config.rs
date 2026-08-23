@@ -34,6 +34,44 @@ pub struct AppConfig {
     pub poses: PoseConfig,
     #[serde(default)]
     pub hardware: HardwareConfig,
+    /// 脚以外の軸。**機体ごとに数も役割も違う。**
+    ///
+    /// namiashi は腕 1 軸、keel は車輪 4 軸。歩容は触らないので、ここに
+    /// 書いてあるかどうかで軸表の長さと `Command` / `Observation` の長さが
+    /// 決まる。書かなければ補助軸なしの機体になる。
+    #[serde(default = "default_aux_axes")]
+    pub aux: Vec<AuxAxis>,
+}
+
+/// 脚以外の軸 1 本。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuxAxis {
+    /// モデル（`.misa`）の関節名。軸表の照合キー。
+    pub joint: String,
+    #[serde(default)]
+    pub role: AuxRole,
+}
+
+/// 補助軸の役割。**何に使う軸かは制御則の側の関心事**なので、
+/// ここで名指しする（機体固有の名前は持ち込まない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuxRole {
+    /// 胴体の傾きを打ち消す軸（チキンヘッド）。**1 台に 1 本まで。**
+    Head,
+    /// 車輪。歩容もチキンヘッドも触らない。
+    Wheel,
+    /// それ以外。観測だけする。
+    #[default]
+    Other,
+}
+
+/// namiashi の腕。プロファイルが `[[aux]]` を書かなかったときの既定。
+fn default_aux_axes() -> Vec<AuxAxis> {
+    vec![AuxAxis {
+        joint: misa_hal::joint::ARM_JOINT_NAME.into(),
+        role: AuxRole::Head,
+    }]
 }
 
 impl Default for AppConfig {
@@ -45,6 +83,7 @@ impl Default for AppConfig {
             teleop: TeleopConfig::default(),
             poses: PoseConfig::default(),
             hardware: HardwareConfig::default(),
+            aux: default_aux_axes(),
         }
     }
 }
@@ -127,6 +166,12 @@ impl AppConfig {
                  バスが追いつかないので制御周期を落とすか、バス周期を上げてください",
                 self.control.rate_hz, self.hardware.legs.bus_rate_hz
             ));
+        }
+        // **チキンヘッドの相手は 1 本まで。** 2 本あるとどちらを動かすか
+        // 決まらず、片方が黙って無視される。
+        let heads = self.aux.iter().filter(|a| a.role == AuxRole::Head).count();
+        if heads > 1 {
+            return Err(format!("role = \"head\" の補助軸が {heads} 本あります。1 本までです"));
         }
         self.teleop.validate()?;
         if self.gait.max_vx_m_s <= 0.0

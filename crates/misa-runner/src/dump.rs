@@ -98,15 +98,15 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // **実機なしで記録が採れる。** ここが CI に載る回帰試験の土台で、
     // 制御ループを触る改修は「dump を録って差分する」で検証できる。
     // ゲートは `run` と同じく影で回すだけ（出力は捨てる）。
-    let axis_table = crate::snapshot::axis_table();
+    let layout = crate::snapshot::axis_layout(cfg)?;
     let mut shadow_gate =
-        misa_core::SafetyGate::new(crate::snapshot::safety_config(&cfg.hardware, dt, 5.0));
+        misa_core::SafetyGate::new(crate::snapshot::safety_config(cfg, &layout, dt, 5.0));
     let recorder = match cli.str("record") {
         Some(path) => {
             let header = misa_core::record::Header {
                 format_version: misa_core::record::FORMAT_VERSION,
                 robot: cfg.name.clone(),
-                axes: axis_table.axes().iter().map(|a| a.name.clone()).collect(),
+                axes: layout.table.axes().iter().map(|a| a.name.clone()).collect(),
                 rate_hz: 1.0 / dt,
             };
             let rec = crate::record::Recorder::create(path, &header)?;
@@ -141,7 +141,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             // 実機を持たないので観測は「指令がそのまま実現した」ことにする。
             // 動力学は入っていない。ここが埋まるのは MuJoCo の Plant が
             // 入ってから。
-            let mut obs = misa_core::Observation::empty(axis_table.len(), 4);
+            let mut obs = misa_core::Observation::empty(layout.table.len(), 4);
             obs.time = time;
             for (i, a) in obs_axes(&measured).into_iter().enumerate() {
                 let slot = obs.get_mut(misa_core::AxisId::new(i as u16)).unwrap();
@@ -149,6 +149,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                 slot.health.valid = true;
             }
             let mut shadow = crate::snapshot::command(
+                &layout,
                 &out.targets,
                 cfg.hardware.legs.default_max_speed_rad_s,
                 out.leg_mode == misa_hal::joint::JointMode::Idle,

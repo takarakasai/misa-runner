@@ -470,18 +470,15 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
     // **ゲートは影で回すだけで、出力は捨てる。** 実機に流れる指令はこれまでと
     // 同じで、記録に載る SafetyVerdict だけがゲートの判断。配線する前に、
     // 生きたデータでゲートが何を丸めるつもりだったかを見ておくためにある。
-    let axis_table = crate::snapshot::axis_table();
-    let mut shadow_gate = misa_core::SafetyGate::new(crate::snapshot::safety_config(
-        &cfg.hardware,
-        period.as_secs_f64(),
-        STALE_TICKS,
-    ));
+    let layout = crate::snapshot::axis_layout(&cfg)?;
+    let mut shadow_gate = misa_core::SafetyGate::new(crate::snapshot::safety_config(&cfg, &layout, period.as_secs_f64(), STALE_TICKS));
     let recorder = match opts.record.as_deref() {
         Some(path) => {
             let header = misa_core::record::Header {
                 format_version: misa_core::record::FORMAT_VERSION,
                 robot: cfg.name.clone(),
-                axes: axis_table
+                axes: layout
+                    .table
                     .axes()
                     .iter()
                     .map(|a| a.name.clone())
@@ -514,9 +511,9 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
     // `tick` の直後に出るので遅れない。要求応答の配備先（keel の中間層、
     // Unitree の lowcmd/lowstate）では消せない性質なので、実機が只で読める
     // namiashi でも同じ形に揃えてある。
-    let mut obs = misa_core::Observation::empty(axis_table.len(), 4);
+    let mut obs = misa_core::Observation::empty(layout.table.len(), 4);
     plant
-        .exchange(&misa_core::Command::idle(axis_table.len()), &mut obs)
+        .exchange(&misa_core::Command::idle(layout.table.len()), &mut obs)
         .map_err(|e| format!("実機の初回読み出しに失敗: {e}"))?;
 
     while !stop.load(Ordering::Relaxed) {
@@ -555,6 +552,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
             watch.tick(&out.targets, &measured);
         }
         let outgoing = crate::snapshot::command(
+            &layout,
             &out.targets,
             cfg.hardware.legs.default_max_speed_rad_s,
             out.leg_mode == JointMode::Idle,

@@ -30,20 +30,39 @@ use misa_core::{
     Axis, AxisCommand, AxisId, AxisLimits, AxisRole, AxisTable, Command, ControlMode, Imu,
     Observation, SafetyConfig, Time,
 };
-use misa_hal::config::HardwareConfig;
 use misa_hal::joint::LegSlot;
 use misa_hal::imu::ImuSample;
-use misa_hal::joint::{JointState, ARM_JOINT_NAME, JOINT_NAMES};
+use misa_hal::joint::{JointState, JOINT_NAMES};
 use misa_hal::legs::JointStatus;
 
+use crate::config::{AppConfig, AuxRole};
 use crate::jointvec::JointVec;
 
-/// 脚 12 軸 + 腕 1 軸の並び。[`JointVec`] と同じ順序。
+/// 軸の並びと、そこでの役割の引き当て。
 ///
-/// この関数がロボットごとに変わる部分で、いずれプロファイルとモデルから
-/// 組み立てる。いまは namiashi の構成をそのまま写している。
-pub fn axis_table() -> AxisTable {
-    let mut axes = Vec::with_capacity(13);
+/// **並びは「脚 12 軸のあとに補助軸」で固定。** 脚が 4×3 なのは歩容
+/// （`quadruped-gait`）がそう作られているからで、そこは動かせない。動くのは
+/// 補助軸の本数と役割で、それはプロファイルの `[[aux]]` が決める。
+#[derive(Debug, Clone)]
+pub struct AxisLayout {
+    pub table: AxisTable,
+    /// チキンヘッドが動かす軸。無い機体では `None`。
+    pub head: Option<AxisId>,
+}
+
+impl AxisLayout {
+    /// 補助軸の並び（軸表での添字）。プロファイルの `[[aux]]` と同じ順。
+    pub fn aux(&self) -> Vec<AxisId> {
+        self.table.aux()
+    }
+
+    /// 脚の軸数。**歩容が触る範囲**で、ここまでは常に先頭に並ぶ。
+    pub const LEG_AXES: usize = 12;
+}
+
+/// プロファイルから軸の並びを組む。
+pub fn axis_layout(cfg: &AppConfig) -> Result<AxisLayout, String> {
+    let mut axes = Vec::with_capacity(AxisLayout::LEG_AXES + cfg.aux.len());
     for (leg, names) in JOINT_NAMES.iter().enumerate() {
         for (joint, name) in names.iter().enumerate() {
             axes.push(Axis {
@@ -55,11 +74,18 @@ pub fn axis_table() -> AxisTable {
             });
         }
     }
-    axes.push(Axis {
-        name: ARM_JOINT_NAME.into(),
-        role: AxisRole::Aux,
-    });
-    AxisTable::new(axes).expect("同梱の軸表に重複がある")
+    let mut head = None;
+    for (i, a) in cfg.aux.iter().enumerate() {
+        if a.role == AuxRole::Head {
+            head = Some(AxisId::new((AxisLayout::LEG_AXES + i) as u16));
+        }
+        axes.push(Axis {
+            name: a.joint.clone(),
+            role: AxisRole::Aux,
+        });
+    }
+    let table = AxisTable::new(axes)?;
+    Ok(AxisLayout { table, head })
 }
 
 /// 実機設定から [`SafetyConfig`] を組む。
@@ -70,9 +96,15 @@ pub fn axis_table() -> AxisTable {
 ///
 /// `max_observation_age` は制御周期から決める。バスが遅れて読み戻しが
 /// 止まったことを、周期いくつぶんで「見えていない」と判断するか。
-pub fn safety_config(hw: &HardwareConfig, control_period_s: f64, stale_ticks: f64) -> SafetyConfig {
+pub fn safety_config(
+    cfg: &AppConfig,
+    layout: &AxisLayout,
+    control_period_s: f64,
+    stale_ticks: f64,
+) -> SafetyConfig {
+    let hw = &cfg.hardware;
     let rate = hw.legs.max_target_rate_rad_s;
-    let mut axes = Vec::with_capacity(13);
+    let mut axes = Vec::with_capacity(layout.table.len());
     for leg in LegSlot::ALL {
         // 脚の設定が無いのは設定検証が弾く。ここまで来たら在るはず。
         let bus = hw.bus_for(leg).expect("脚の設定がある");
@@ -85,12 +117,18 @@ pub fn safety_config(hw: &HardwareConfig, control_period_s: f64, stale_ticks: f6
             });
         }
     }
-    axes.push(AxisLimits {
-        min_rad: hw.arm.min_rad,
-        max_rad: hw.arm.max_rad,
-        max_target_rate_rad_s: rate,
-        max_torque_nm: 0.0,
-    });
+    // 補助軸の可動域。いまは腕の設定しか持っていないので、**head だけ**
+    // その値を使い、ほかはモデルの可動域が入るまで無制限にしておく。
+    // 無制限が危ないのは駆動する軸だけで、駆動しない軸は指令が出ない。
+    for id in layout.aux() {
+        let is_head = layout.head == Some(id);
+        axes.push(AxisLimits {
+            min_rad: if is_head { hw.arm.min_rad } else { f64::NEG_INFINITY },
+            max_rad: if is_head { hw.arm.max_rad } else { f64::INFINITY },
+            max_target_rate_rad_s: rate,
+            max_torque_nm: 0.0,
+        });
+    }
     SafetyConfig {
         axes,
         max_observation_age: std::time::Duration::from_secs_f64(
@@ -104,14 +142,15 @@ pub fn safety_config(hw: &HardwareConfig, control_period_s: f64, stale_ticks: f6
 /// `arm_rad` は腕の角度。受信機直結の構成では**観測値**が入る。
 /// `imu_age` は IMU サンプルを受け取ってからの経過。
 pub fn observation(
+    layout: &AxisLayout,
     time: Time,
     states: &[[JointState; 3]; 4],
     status: &[[JointStatus; 3]; 4],
-    arm_rad: f64,
+    head_rad: f64,
     imu: &ImuSample,
     imu_age: Duration,
 ) -> Observation {
-    let mut obs = Observation::empty(13, 4);
+    let mut obs = Observation::empty(layout.table.len(), 4);
     obs.time = time;
     for leg in 0..4 {
         for k in 0..3 {
@@ -128,10 +167,14 @@ pub fn observation(
             a.health.voltage_v = st.valid.then_some(st.voltage_v);
         }
     }
-    // 腕は駆動していてもいなくても角度は分かる。読めた扱いにする。
-    let arm = obs.get_mut(AxisId::new(12)).expect("腕の軸がある");
-    arm.position_rad = arm_rad;
-    arm.health.valid = true;
+    // head は駆動していてもいなくても角度は分かる（受信機直結でも観測できる）。
+    // ほかの補助軸はまだ読む口が無いので、未取得のまま残す。
+    if let Some(id) = layout.head {
+        if let Some(a) = obs.get_mut(id) {
+            a.position_rad = head_rad;
+            a.health.valid = true;
+        }
+    }
 
     obs.imu = Some(Imu {
         rpy_rad: imu.rpy_rad,
@@ -146,8 +189,13 @@ pub fn observation(
 ///
 /// `relaxed` が true なら**モードだけ脱力に落とし、目標角は残す**。
 /// 目標を 0 に潰すと復帰した瞬間に全軸が 0 rad へ飛ぶ。
-pub fn command(targets: &JointVec, max_speed_rad_s: f64, relaxed: bool) -> Command {
-    let mut cmd = Command::idle(13);
+pub fn command(
+    layout: &AxisLayout,
+    targets: &JointVec,
+    max_speed_rad_s: f64,
+    relaxed: bool,
+) -> Command {
+    let mut cmd = Command::idle(layout.table.len());
     let mode = if relaxed {
         ControlMode::Idle
     } else {
@@ -162,16 +210,27 @@ pub fn command(targets: &JointVec, max_speed_rad_s: f64, relaxed: bool) -> Comma
             };
         }
     }
-    *cmd.get_mut(AxisId::new(12)).expect("腕の軸がある") = AxisCommand {
-        mode,
-        ..AxisCommand::position(targets.arm, max_speed_rad_s)
-    };
+    // **head 以外の補助軸には指令を出さない。** 車輪を動かすのは歩容の
+    // 仕事ではないので、脱力のまま残す（駆動する主体ができたらそこが書く）。
+    if let Some(id) = layout.head {
+        if let Some(a) = cmd.get_mut(id) {
+            *a = AxisCommand {
+                mode,
+                ..AxisCommand::position(targets.arm, max_speed_rad_s)
+            };
+        }
+    }
     cmd
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use misa_hal::joint::ARM_JOINT_NAME;
+
+    fn layout() -> AxisLayout {
+        axis_layout(&AppConfig::default()).unwrap()
+    }
 
     /// 試験用の IMU サンプル。`ImuSample` は受信時刻を持つので `Default` が無い。
     fn imu_sample() -> ImuSample {
@@ -185,13 +244,100 @@ mod tests {
     }
 
 
+    /// keel を想定した並び。脚 12 + 車輪 4、head 無し。
+    fn wheeled_layout() -> AxisLayout {
+        let mut cfg = AppConfig::default();
+        cfg.aux = ["FL_wheel_joint", "FR_wheel_joint", "RL_wheel_joint", "RR_wheel_joint"]
+            .iter()
+            .map(|n| crate::config::AuxAxis {
+                joint: (*n).into(),
+                role: AuxRole::Wheel,
+            })
+            .collect();
+        axis_layout(&cfg).unwrap()
+    }
+
+    /// **補助軸の本数が違う機体が入ること。**
+    ///
+    /// namiashi は腕 1 軸、keel は車輪 4 軸。ここが固定だと 2 台目が載らない。
+    #[test]
+    fn a_robot_with_four_wheels_instead_of_an_arm_fits() {
+        let lay = wheeled_layout();
+        assert_eq!(lay.table.len(), 16);
+        assert_eq!(lay.aux().len(), 4);
+        assert_eq!(lay.head, None);
+        assert_eq!(lay.table.name(AxisId::new(15)), Some("RR_wheel_joint"));
+        // 脚の 12 軸は先頭のまま。歩容が触る範囲は動かない。
+        assert_eq!(lay.table.legs().len(), 4);
+        assert_eq!(lay.table.name(AxisId::new(0)), Some("FL_hip_joint"));
+    }
+
+    /// **歩容は車輪に指令を出さない。**
+    ///
+    /// 車輪を回すのは歩容の仕事ではないので、駆動する主体ができるまで
+    /// 脱力のまま残す。ここが Position で埋まると、立った瞬間に車輪が
+    /// 0 rad へ動く。
+    #[test]
+    fn the_gait_leaves_wheels_relaxed() {
+        let lay = wheeled_layout();
+        let mut q = JointVec::zeros();
+        q.legs[0][1] = 0.9;
+        let cmd = command(&lay, &q, 8.0, false);
+
+        assert_eq!(cmd.len(), 16);
+        assert_eq!(cmd.get(AxisId::new(1)).unwrap().mode, ControlMode::Position);
+        for id in lay.aux() {
+            assert_eq!(
+                cmd.get(id).unwrap().mode,
+                ControlMode::Idle,
+                "{:?} に指令が出ている",
+                lay.table.name(id)
+            );
+        }
+    }
+
+    /// **head が無い機体でも観測は組める。**
+    #[test]
+    fn an_observation_for_a_robot_without_a_head_is_still_full_length() {
+        let lay = wheeled_layout();
+        let obs = observation(
+            &lay,
+            Time::ZERO,
+            &[[JointState::default(); 3]; 4],
+            &[[JointStatus::default(); 3]; 4],
+            0.0,
+            &imu_sample(),
+            Duration::ZERO,
+        );
+        assert_eq!(obs.len(), 16);
+        // 車輪はまだ読む口が無いので未取得のまま。0 rad を実測と取り違えない。
+        for id in lay.aux() {
+            assert!(!obs.get(id).unwrap().health.valid);
+        }
+    }
+
+    /// **チキンヘッドの相手が 2 本ある設定は弾く。**
+    #[test]
+    fn two_head_axes_are_rejected() {
+        let mut cfg = AppConfig::default();
+        cfg.aux = ["a_joint", "b_joint"]
+            .iter()
+            .map(|n| crate::config::AuxAxis {
+                joint: (*n).into(),
+                role: AuxRole::Head,
+            })
+            .collect();
+        let e = cfg.validate().unwrap_err();
+        assert!(e.contains("head"), "{e}");
+    }
+
     /// **軸表と、Observation / Command の長さが揃っていること。**
     ///
     /// ここがずれると、名前で引いた添字が別の軸を指す。症状は
     /// 「片脚だけ挙動がおかしい」になり、原因に辿り着きにくい。
     #[test]
     fn the_axis_table_matches_the_vectors_it_indexes() {
-        let t = axis_table();
+        let t = layout().table;
         assert_eq!(t.len(), 13);
         assert_eq!(Command::idle(t.len()).len(), t.len());
         assert_eq!(Observation::empty(t.len(), 4).len(), t.len());
@@ -200,7 +346,7 @@ mod tests {
     /// 軸表の並びが [`JointVec`] の並びと一致していること。
     #[test]
     fn the_axis_order_follows_the_joint_vector() {
-        let t = axis_table();
+        let t = layout().table;
         assert_eq!(t.name(AxisId::new(0)), Some("FL_hip_joint"));
         assert_eq!(t.name(AxisId::new(5)), Some("FR_calf_joint"));
         assert_eq!(t.name(AxisId::new(11)), Some("RR_calf_joint"));
@@ -215,9 +361,9 @@ mod tests {
         let mut q = JointVec::zeros();
         q.legs[2][1] = 0.75; // RL_thigh
         q.arm = -0.25;
-        let cmd = command(&q, 8.0, false);
+        let cmd = command(&layout(), &q, 8.0, false);
 
-        let t = axis_table();
+        let t = layout().table;
         let id = t.id_of("RL_thigh_joint").unwrap();
         assert_eq!(cmd.get(id).unwrap().position_rad, 0.75);
         assert_eq!(cmd.get(id).unwrap().mode, ControlMode::Position);
@@ -229,7 +375,7 @@ mod tests {
     fn relaxing_keeps_the_targets_it_was_holding() {
         let mut q = JointVec::zeros();
         q.legs[0][1] = 1.0;
-        let cmd = command(&q, 8.0, true);
+        let cmd = command(&layout(), &q, 8.0, true);
         let a = cmd.get(AxisId::new(1)).unwrap();
         assert_eq!(a.mode, ControlMode::Idle);
         assert_eq!(a.position_rad, 1.0);
@@ -247,6 +393,7 @@ mod tests {
         states[0][0].position_rad = 0.5;
 
         let obs = observation(
+            &layout(),
             Time::ZERO,
             &states,
             &status,
@@ -271,10 +418,9 @@ mod tests {
         ))
         .unwrap();
         let cfg = crate::config::AppConfig::from_toml(&text).unwrap();
-        let sc = safety_config(&cfg.hardware, 1.0 / cfg.control.rate_hz, 5.0);
-
-        let t = axis_table();
-        assert_eq!(sc.axes.len(), t.len());
+        let lay = axis_layout(&cfg).unwrap();
+        let sc = safety_config(&cfg, &lay, 1.0 / cfg.control.rate_hz, 5.0);
+        assert_eq!(sc.axes.len(), lay.table.len());
 
         // FL の hip は設定の 1 本目のバスの 1 個目のモータ。
         let m = &cfg.hardware.bus_for(LegSlot::Fl).unwrap().motors[0];
@@ -284,8 +430,9 @@ mod tests {
             sc.axes[0].max_target_rate_rad_s,
             cfg.hardware.legs.max_target_rate_rad_s
         );
-        // 末尾は腕。
-        assert_eq!(sc.axes[12].min_rad, cfg.hardware.arm.min_rad);
+        // head の可動域は腕の設定から来る。
+        let head = lay.head.expect("同梱プロファイルは head を持つ");
+        assert_eq!(sc.axes[head.index()].min_rad, cfg.hardware.arm.min_rad);
     }
 
 

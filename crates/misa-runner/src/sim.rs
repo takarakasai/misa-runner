@@ -41,20 +41,22 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let every = cli.usize("every").unwrap_or(200).max(1);
 
     let robot = crate::robot::load_from_config(cfg)?;
-    let axis_table = crate::snapshot::axis_table();
+    let layout = crate::snapshot::axis_layout(cfg)?;
     let dt = 1.0 / cfg.control.rate_hz;
 
     // **物理の初期姿勢は伏せ姿勢。** 実機は電源投入時にそこにいるので、
     // 立ち上がりの軌道を同じ始点から見るため。
     let crouch = crouch_pose(cfg);
-    let home: Vec<(String, f64)> = axis_table
+    let home: Vec<(String, f64)> = layout
+        .table
         .axes()
         .iter()
         .enumerate()
         .filter_map(|(i, a)| {
             let leg = i / 3;
             let k = i % 3;
-            (i < 12).then(|| (a.name.clone(), crouch[leg][k]))
+            // 脚だけ。補助軸（腕・車輪）の初期姿勢はモデルの既定に任せる。
+            (i < crate::snapshot::AxisLayout::LEG_AXES).then(|| (a.name.clone(), crouch[leg][k]))
         })
         .collect();
 
@@ -67,20 +69,16 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         home,
         ..SimOptions::default()
     };
-    let mut plant = MujocoPlant::new(axis_table.clone(), &opts)?;
+    let mut plant = MujocoPlant::new(layout.table.clone(), &opts)?;
 
     let mut controller = Controller::new(robot, cfg.clone());
-    let mut shadow_gate = misa_core::SafetyGate::new(crate::snapshot::safety_config(
-        &cfg.hardware,
-        dt,
-        5.0,
-    ));
+    let mut shadow_gate = misa_core::SafetyGate::new(crate::snapshot::safety_config(cfg, &layout, dt, 5.0));
     let recorder = match cli.str("record") {
         Some(path) => {
             let header = misa_core::record::Header {
                 format_version: misa_core::record::FORMAT_VERSION,
                 robot: cfg.name.clone(),
-                axes: axis_table.axes().iter().map(|a| a.name.clone()).collect(),
+                axes: layout.table.axes().iter().map(|a| a.name.clone()).collect(),
                 rate_hz: cfg.control.rate_hz,
             };
             println!("毎周期を {path} に記録します");
@@ -99,8 +97,8 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         ..Intent::default()
     });
 
-    let mut obs = misa_core::Observation::empty(axis_table.len(), 4);
-    plant.exchange(&misa_core::Command::idle(axis_table.len()), &mut obs)?;
+    let mut obs = misa_core::Observation::empty(layout.table.len(), 4);
+    plant.exchange(&misa_core::Command::idle(layout.table.len()), &mut obs)?;
 
     println!(
         "MuJoCo で歩容 {} / v=({vx:+.3}, {vy:+.3}, {wz:+.3}) / {:.0} Hz / {seconds:.1} s",
@@ -129,6 +127,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         let out = controller.tick(&cmd, &measured, attitude, dt);
 
         let outgoing = crate::snapshot::command(
+            &layout,
             &out.targets,
             cfg.hardware.legs.default_max_speed_rad_s,
             out.leg_mode == misa_hal::joint::JointMode::Idle,
