@@ -122,6 +122,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         actuator_kp: cli.f64("kp").unwrap_or(60.0),
         actuator_kv: cli.f64("kv").unwrap_or(1.0),
         base_height_m: cli.f64("base-height").unwrap_or(0.20),
+        timestep_s: cli.f64("timestep"),
         home,
         root_link: robot.root_link.clone(),
         ..SimOptions::default()
@@ -194,6 +195,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let mut obs = misa_core::Observation::empty(layout.table.len(), 4);
     plant.exchange(&misa_core::Command::idle(layout.table.len()), &mut obs)?;
 
+    let mut ground_contacts: std::collections::BTreeMap<String, usize> = Default::default();
     let start = plant.base_position().unwrap_or([0.0; 3]);
     let start_yaw = obs.imu.map(|m| m.rpy_rad[2]).unwrap_or(0.0);
 
@@ -261,6 +263,11 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
 
         let z = plant.base_position().map(|p| p[2]).unwrap_or(f64::NAN);
         min_z = min_z.min(z);
+        // **足以外が地面に触れていたら、それは歩行ではない。** 数えておいて
+        // 最後に出す。毎周期出すと流れてしまう。
+        for body in plant.non_foot_ground_contacts() {
+            *ground_contacts.entry(body).or_insert(0usize) += 1;
+        }
         let att = obs.imu.map(|m| m.rpy_rad).unwrap_or([0.0; 3]);
         // **転倒は姿勢で見る。** 高さだけだとしゃがんだ姿勢と区別が付かない。
         if fell.is_none() && (att[0].abs() > 1.0 || att[1].abs() > 1.0) {
@@ -355,6 +362,15 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         yaw_end.to_degrees(),
         yaw0.to_degrees()
     );
+    if !ground_contacts.is_empty() {
+        let total = steps.min(1 + (seconds / dt) as usize);
+        println!("\n**足以外が接地しています**（歩行ではなく、これに乗っているかもしれません）:");
+        let mut rows: Vec<_> = ground_contacts.iter().collect();
+        rows.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+        for (body, n) in rows.iter().take(8) {
+            println!("  {body}  {:.0}% の周期", 100.0 * **n as f64 / total as f64);
+        }
+    }
     if !violations.is_empty() {
         println!("\n可動域を超えた指令が {} 件あります:", violations.len());
         for v in violations.iter().take(20) {

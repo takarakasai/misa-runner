@@ -54,6 +54,14 @@ pub struct SimOptions {
     pub base_height_m: f64,
     /// 初期姿勢（関節名 → 角度 [rad]）。ここから物理が始まる。
     pub home: Vec<(String, f64)>,
+    /// 物理の刻み [s]。`None` で MuJoCo の既定（2 ms）。
+    ///
+    /// **重い機体では下げないと立てない。** ここの PD は articara が Rust 側で
+    /// 計算して `motor` に流す**明示的**な速度フィードバックなので、
+    /// `actuator_kv < 2·I/dt` でしか安定しない（`I` は関節自身の慣性）。
+    /// 既定の 2 ms だと使える `kv` が位置保持に要る値を下回り、支えきれずに
+    /// 沈むか、`kv` を上げると発散する。刻みを半分にすると使える `kv` が倍になる。
+    pub timestep_s: Option<f64>,
     /// 接地を見る足リンク。並びは脚の順。
     pub feet: Vec<String>,
     /// 胴体リンク。姿勢と角速度をここから読む。
@@ -69,6 +77,7 @@ impl Default for SimOptions {
             actuator_kv: 1.0,
             base_height_m: 0.30,
             home: Vec::new(),
+            timestep_s: None,
             feet: ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
                 .iter()
                 .map(|s| s.to_string())
@@ -157,6 +166,7 @@ impl MujocoPlant {
                 pitch: 0.0,
             }),
             add_actuators: true,
+            timestep: opts.timestep_s,
             ..MjcfExportOptions::default()
         };
         let mut sim = MujocoSim::new(&model, mjcf).map_err(|e| format!("MuJoCo: {e}"))?;
@@ -268,6 +278,32 @@ impl MujocoPlant {
 
     pub fn sim(&self) -> &MujocoSim {
         &self.sim
+    }
+
+    /// **いま地面に触れている、足ではないリンクの名前。**
+    ///
+    /// 四脚が足以外で体重を支えていると、歩容が空振りしていても
+    /// 「歩いている」ように見える。keel は車輪付きなので実際に起きた:
+    /// 立ち高さを指定しても胴体が 0.211 m から下がらず、足は 1 度も
+    /// 接地しないまま車輪で転がっていた (2026-09-01)。**足の接地率だけ
+    /// 見ていると、これは「遊脚率 100%」という良さそうな数字に化ける。**
+    pub fn non_foot_ground_contacts(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for c in self.sim.contacts() {
+            if c.is_self_collision() {
+                continue;
+            }
+            // 世界との接触は片側の名前が空。触れているほうを取る。
+            let body = if c.body1.is_empty() { &c.body2 } else { &c.body1 };
+            if body.is_empty() || self.feet.iter().any(|f| f.eq_ignore_ascii_case(body)) {
+                continue;
+            }
+            if !out.iter().any(|b| b == body) {
+                out.push(body.clone());
+            }
+        }
+        out.sort();
+        out
     }
 }
 

@@ -275,6 +275,9 @@ fn print_help() {
                             --record で毎周期を記録する（別スレッドで書く）
   sim    [--gait G] [--vx V] MuJoCo で動力学込みに回す（--features sim のビルド）
          [--secs S] [--kp K] [--kv K] [--base-height M] [--record PATH]
+         [--timestep S]            物理の刻み [s]（既定 MuJoCo の 2 ms）
+                                   **重い機体では下げないと立てない。** PD が
+                                   明示的なので kv < 2·I/dt でしか安定しない
   bridge [--secs S]         ROS 2 ブリッジとの往復を確認（**指令は脱力のまま**）
   replay LOG [LOG2]         記録の要約。2 つ渡すと指令を差分する
                             [--limit N] 差分の表示件数（既定 20）
@@ -403,6 +406,7 @@ const VALUE_FLAGS: &[&str] = &[
     "kp",
     "kv",
     "base-height",
+    "timestep",
     "pilot",
     "video",
     "fps",
