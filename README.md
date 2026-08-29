@@ -134,6 +134,15 @@ misa-run run  --robot robots/namiashi.toml --record run.rec   # 毎周期を記�
 チャンネル・エンドポイント・不感帯・エクスポは全部 `[teleop]` で変更できる。
 `misa-run sbus` を見ながら合わせるのが早い。
 
+## 実機の立ち上げ
+
+機体ごとに手順書がある。**上から 1 段階ずつ、合格条件を満たしてから進む。**
+
+| 機体 | 手順書 | 特徴 |
+|---|---|---|
+| namiashi | [`doc/bringup_checklist.md`](doc/bringup_checklist.md) | シリアル直結。校正（可動域・符号・ゼロ点）をこちらで採る |
+| keel | [`doc/bringup_checklist_keel.md`](doc/bringup_checklist_keel.md) | STM ブリッジ越し。校正は向こうが持つので、**1 軸だけ動かす段階が作れない** |
+
 ## 校正（実機に通電したら最初にやること）
 
 起動直後の設定は `sign = +1` / `zero_pose_rad = 0` / 可動域は URDF 値、という
