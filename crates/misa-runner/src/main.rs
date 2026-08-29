@@ -275,6 +275,8 @@ fn print_help() {
                             --record で毎周期を記録する（別スレッドで書く）
   sim    [--gait G] [--vx V] MuJoCo で動力学込みに回す（--features sim のビルド）
          [--secs S] [--kp K] [--kv K] [--base-height M] [--record PATH]
+         [--friction MU]           接地摩擦（既定 0.7）。**足が滑ると歩容は
+                                   成立しない。**「接地中の足の滑り」を見る
          [--timestep S]            物理の刻み [s]（既定 MuJoCo の 2 ms）
                                    **重い機体では下げないと立てない。** PD が
                                    明示的なので kv < 2·I/dt でしか安定しない
@@ -407,6 +409,7 @@ const VALUE_FLAGS: &[&str] = &[
     "kv",
     "base-height",
     "timestep",
+    "friction",
     "pilot",
     "video",
     "fps",

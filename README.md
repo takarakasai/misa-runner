@@ -238,7 +238,7 @@ export LD_LIBRARY_PATH=$MUJOCO_DYNAMIC_LINK_DIR:$LD_LIBRARY_PATH
 # 1) runner（MuJoCo + 配信 + ROS 操縦）。--secs 0 で Ctrl-C まで
 cargo run --release --features sim,ros2 -- \
     sim --robot robots/keel.toml --pilot ros2 --gait trot --secs 0 \
-        --kp 200 --kv 2.0 --base-height 0.35 \
+        --kp 1200 --kv 30 --timestep 0.0005 --base-height 0.42 \
         --viz --viz-endpoint tcp/127.0.0.1:7447
 
 # 2) 別端末で articara。Live gait feed に tcp/127.0.0.1:7447 を入れて Start
@@ -266,12 +266,19 @@ ros2 service call /keel/misa_run/set_body_attitude \
 `ok: false` で返す — **「受け付けた」と言っておいて何も起きないのが
 いちばん困る**ので。
 
-> **keel は MuJoCo でまだ立てない。** 腿の凸包が胴体の凸包に食い込んで
-> 85,000 N 超で押し返され、腿が指令の 1/30 しか動かない。ゲイン・刻み・
-> 膝の向きのどれでも直らない。原因と回復策は `robots/keel.toml` の冒頭に
-> 書いてある（要点: モデルに `[[collision_pair]]` が無く、articara の MJCF
-> 出力もそれを見ていない）。**ここが片付くまで、シムで歩容の値を振っても
-> 意味が無い。** `dump`（運動学だけ）は正しく動くので、可動域の確認には使える。
+**`--kp 1200 --kv 30 --timestep 0.0005` が要る。** 既定の 2 ms では減衰を
+上げられず（articara の PD は明示的なので `kv < 2·I/dt`）、kp だけ上げると
+進む量が 64% → 135% → 166% → 45% と暴れる。刻みを 0.5 ms にして初めて収束し、
+指令の 94〜97% が出る。**実機のゲインとは別物**で、あちらは STM ブリッジが
+MIT モードで持つ。
+
+うまくいっているかは終了時の 3 行で見る:
+
+| 見るもの | 良い状態 |
+|---|---|
+| 追従誤差 | 膝で 0.07 rad 以下。**歩幅（0.05 m 前後）と比べて意味を持つ** |
+| 接地中の足の滑り | 0.03 m/s 前後。指令速度と同じ桁なら歩容は成立していない |
+| 遊脚で上がった高さ | `swing_height_m` に届いていること |
 
 **車輪 4 軸は articara に出ない。** `GaitVizFrame` が脚 12 関節しか運ばない
 ため。MuJoCo の中では存在していて、指令は出していない（歩容の仕事ではない

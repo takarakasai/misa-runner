@@ -134,6 +134,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         actuator_kv: cli.f64("kv").unwrap_or(1.0),
         base_height_m: cli.f64("base-height").unwrap_or(0.20),
         timestep_s: cli.f64("timestep"),
+        friction: cli.f64("friction").map(|f| [f, 0.005, 0.0001]),
         home,
         root_link: robot.root_link.clone(),
         ..SimOptions::default()
@@ -206,6 +207,11 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let mut obs = misa_core::Observation::empty(layout.table.len(), 4);
     plant.exchange(&misa_core::Command::idle(layout.table.len()), &mut obs)?;
 
+    let mut clear_max = [f64::NEG_INFINITY; 4];
+    let mut clear_min = [f64::INFINITY; 4];
+    let mut foot_prev: [Option<[f64; 3]>; 4] = [None; 4];
+    let mut slip_sum = [0.0f64; 4];
+    let mut slip_n = [0usize; 4];
     let mut yaw_prev = 0.0f64;
     let mut yaw_total = 0.0f64;
     let mut track_sum = vec![0.0f64; layout.table.len()];
@@ -293,6 +299,46 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                 }
             }
             track_n += 1;
+        }
+
+        // **遊脚が地面から離れているか。**
+        //
+        // 指令の `swing_height_m` だけ上がっていなければ、足は遊脚のあいだ
+        // 地面を前へ引きずり、胴体を後ろへ押す。**接地率だけ見ていても
+        // 「浮いていない」とは分かるが、どれだけ足りないかは分からない。**
+        if out.state == State::Active {
+            for (i, p) in plant.foot_positions().iter().enumerate() {
+                let Some(p) = p else { continue };
+                if obs.contacts.get(i).copied().flatten() == Some(false) && p[2] > clear_max[i] {
+                    clear_max[i] = p[2];
+                }
+                if p[2] < clear_min[i] {
+                    clear_min[i] = p[2];
+                }
+            }
+        }
+
+        // **接地している足が地面の上を滑っていないか。**
+        //
+        // 歩容は「接地中の足を胴体に対して -v で引く」ことで前へ進む。足が
+        // 地面に対して静止していれば胴体はぴったり v で進む。**滑っていれば、
+        // 指令より速くも遅くもなる**ので、進んだ距離が指令と合わないときに
+        // 追従誤差と並べて見る値。
+        {
+            let fp = plant.foot_positions();
+            for (i, p) in fp.iter().enumerate() {
+                let (Some(p), Some(prev)) = (p, foot_prev[i]) else {
+                    foot_prev[i] = *p;
+                    continue;
+                };
+                if out.state == State::Active && obs.contacts.get(i).copied().flatten() == Some(true)
+                {
+                    let d = ((p[0] - prev[0]).powi(2) + (p[1] - prev[1]).powi(2)).sqrt();
+                    slip_sum[i] += d;
+                    slip_n[i] += 1;
+                }
+                foot_prev[i] = Some(*p);
+            }
         }
 
         // **ヨーは ±π で折り返す。** そのままだと旋回の総量も向きも読めない
@@ -411,6 +457,30 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         yaw_total.to_degrees(),
         yaw_end.to_degrees()
     );
+    if clear_max.iter().any(|v| v.is_finite()) {
+        let s: String = (0..4)
+            .map(|i| {
+                format!(
+                    "{} {:.3}  ",
+                    ["FL", "FR", "RL", "RR"][i],
+                    clear_max[i] - clear_min[i]
+                )
+            })
+            .collect();
+        println!("遊脚で上がった高さ [m]（gait.swing_height_m に届いているか）  {s}");
+    }
+    if slip_n.iter().any(|&n| n > 0) {
+        let s: String = (0..4)
+            .map(|i| {
+                format!(
+                    "{} {:.3}  ",
+                    ["FL", "FR", "RL", "RR"][i],
+                    slip_sum[i] / (slip_n[i].max(1) as f64) / dt
+                )
+            })
+            .collect();
+        println!("\n接地中の足の滑り [m/s]（0 に近いほど良い）  {s}");
+    }
     if track_n > 0 {
         println!("\n追従誤差（歩容中 {track_n} 周期の平均 / 最大） [rad]");
         for (leg, names) in misa_hal::joint::JOINT_NAMES.iter().enumerate() {

@@ -54,6 +54,12 @@ pub struct SimOptions {
     pub base_height_m: f64,
     /// 初期姿勢（関節名 → 角度 [rad]）。ここから物理が始まる。
     pub home: Vec<(String, f64)>,
+    /// 接地摩擦 `[滑り, ねじれ, 転がり]`。`None` で articara の既定
+    /// `[0.7, 0.005, 0.0001]`（ゴム対床の実測 0.4〜1.0 の真ん中）。
+    ///
+    /// **足が滑ると歩容は成立しない。** 接地中の足の滑りが指令速度と同じ
+    /// 桁なら、歩容をどう振っても進む量は合わない。
+    pub friction: Option<[f64; 3]>,
     /// 物理の刻み [s]。`None` で MuJoCo の既定（2 ms）。
     ///
     /// **重い機体では下げないと立てない。** ここの PD は articara が Rust 側で
@@ -77,6 +83,7 @@ impl Default for SimOptions {
             actuator_kv: 1.0,
             base_height_m: 0.30,
             home: Vec::new(),
+            friction: None,
             timestep_s: None,
             feet: ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
                 .iter()
@@ -167,6 +174,7 @@ impl MujocoPlant {
             }),
             add_actuators: true,
             timestep: opts.timestep_s,
+            default_friction: opts.friction.unwrap_or([0.7, 0.005, 0.0001]),
             ..MjcfExportOptions::default()
         };
         let mut sim = MujocoSim::new(&model, mjcf).map_err(|e| format!("MuJoCo: {e}"))?;
@@ -278,6 +286,14 @@ impl MujocoPlant {
 
     pub fn sim(&self) -> &MujocoSim {
         &self.sim
+    }
+
+    /// 足のワールド位置。並びは [`SimOptions::feet`]。
+    pub fn foot_positions(&self) -> Vec<Option<[f64; 3]>> {
+        self.feet
+            .iter()
+            .map(|f| self.sim.body_world_position(f))
+            .collect()
     }
 
     /// **いま地面に触れている、足ではないリンクの名前。**
