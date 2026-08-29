@@ -26,6 +26,21 @@
 | 🟡 | 脱力させて手で動かす |
 | 🔴 | 複数軸が同時に動きうる |
 
+### `set_mode` の 3 つ
+
+**`mode: 1` では立たない。** 伏せ姿勢（`start_pose` = `crouch`）へ行って
+そこで保持する。立ち姿勢（`stance_height_m` = 0.30 m）まで行くのは
+`mode: 2` で、`cmd_vel` を出さなければ**全脚接地・位相凍結でその場に立つ**。
+
+| mode | 名前 | 何が起きるか |
+|---|---|---|
+| 0 | Relax | 脱力（`kp = kd = τ = 0`） |
+| 1 | Stand | **伏せ姿勢へ行って保持**。立ち姿勢ではない |
+| 2 | Walk | 立ち姿勢へ上がる。`cmd_vel` が来たら歩く |
+
+胴体姿勢（`set_body_attitude`）と高さ（`set_height`）が効くのも
+**`mode: 2` のときだけ**（歩容が回っている状態でしか適用されない）。
+
 **上から 1 段階ずつ、合格条件を満たしてから次へ進む。** 飛ばさない。
 
 ### namiashi 版との違い
@@ -150,6 +165,7 @@ pitch は −0.11〜−0.53°。動画は `videos/`。
 ### 1-2. 初期姿勢へ（低いゲインで）
 
 **まず `mit_gains` を柔らかい既定（kp 120 / kd 2.0）のままで。**
+行き先は**伏せ姿勢**（`start_pose` = `crouch`）。立ち姿勢ではない。
 
 ```sh
 ros2 service call /keel/misa_run/set_mode misa_msgs/srv/SetMode '{mode: 1}'
@@ -161,6 +177,8 @@ ros2 service call /keel/misa_run/set_mode misa_msgs/srv/SetMode '{mode: 1}'
 
 **止める条件:** 発振する / 異音 / どれか 1 軸でも想定と違う向きへ動く
 → 即 `{mode: 0}`（脱力）か電源断。段階 0-2 へ戻る。
+
+**2026-09-04 実施、合格。** kp 120 / kd 2.0 のまま伏せ姿勢へ遷移した。
 
 ### 1-3. ゲインを上げる
 
@@ -196,8 +214,12 @@ ros2 service call /keel/misa_run/set_mode misa_msgs/srv/SetMode '{mode: 1}'
 
 ```sh
 ./target/release/misa-run run --robot robots/keel.toml
-ros2 service call /keel/misa_run/set_mode misa_msgs/srv/SetMode '{mode: 1}'
+ros2 service call /keel/misa_run/set_mode misa_msgs/srv/SetMode '{mode: 1}'   # まず伏せ
+ros2 service call /keel/misa_run/set_mode misa_msgs/srv/SetMode '{mode: 2}'   # 立ち姿勢へ
 ```
+
+**`mode: 2` にするまで立たない。** `mode: 1` は伏せ姿勢で止まる。
+`cmd_vel` を出さなければ速度 0 のまま、全脚接地・位相凍結でその場に立つ。
 
 **合格条件:**
 - [ ] 4 脚で立つ（腿・車輪が接地していない）
@@ -218,6 +240,8 @@ ros2 service call /keel/misa_run/set_mode misa_msgs/srv/SetMode '{mode: 1}'
 ---
 
 ## 段階 3: その場で動かす【🔴】
+
+> **`mode: 2` のまま**（立ち姿勢）で行う。`mode: 1` では効かない。
 
 ### 3-1. 胴体姿勢
 
@@ -248,12 +272,12 @@ ros2 service call /keel/misa_run/set_height misa_msgs/srv/SetHeight '{offset_m: 
 ### 4-1. crawl でその場足踏み
 
 ```sh
+# 歩容の切り替えは立ち止まっているあいだに。遊脚中は受け付けない
 ros2 service call /keel/misa_run/set_gait misa_msgs/srv/SetGait '{gait: 0}'
-ros2 service call /keel/misa_run/set_mode misa_msgs/srv/SetMode '{mode: 2}'
-# 速度は入れない（cmd_vel を出さなければ 0）
+# すでに mode: 2 なら呼び直さなくてよい。cmd_vel を出さなければ速度 0
 ```
 
-- [ ] 歩容に入っても足が上がらない（速度 0 なら全脚接地で位相凍結）
+- [ ] 足が上がらない（速度 0 なら全脚接地で位相凍結）
 - [ ] 胴体が水平のまま
 
 ### 4-2. crawl で前進
@@ -304,4 +328,8 @@ ros2 topic pub -r 20 /keel/cmd_vel geometry_msgs/msg/Twist '{linear: {x: 0.05}}'
 
 | 日付 | 段階 | 結果 | 備考 |
 |---|---|---|---|
-| | | | |
+| 2026-09-04 | 0-1 | ✅ | ブリッジと初通信。`low_state` 0.1〜1.0 ms 前、200 Hz、遅延最大 0.0 ms。車輪 4 軸は `/low_state` に載らない（観測だけなので実害なし） |
+| 2026-09-04 | 0-2 | ✅ | 関節の対応と符号を確認 |
+| 2026-09-04 | 1-1 | ✅ | 脱力のまま起動、`状態を受け取りました` |
+| 2026-09-04 | 1-2 | ✅ | kp 120 / kd 2.0 で伏せ姿勢へ遷移 |
+| | 1-3 | | ゲインを上げる（次はここ） |
