@@ -141,6 +141,11 @@ q_model = sign *  q_motor + zero_pose_rad        (sign = ±1)
 
 ## 5. SBC への移行
 
+**この節は namiashi（radxa-cubie-a7z + CH348 の RS485）の話。** keel は機体の
+PC に ROS 2 で繋ぐ構成で前提が違うので、そちらは
+[`realbot_build.md`](realbot_build.md) を見ること（ch9344 も `dialout` も
+要らない代わりに、ROS 2 と独自 msg が要る）。
+
 ### 5.1 リポジトリはすべて push 済み（2026-08-19 完了）
 
 移行のブロッカーだった 2 件は解消した。
@@ -211,7 +216,7 @@ git 依存に切り替えた副作用として、**ローカルの兄弟チェ�
 |---|---|
 | **ch9344 ドライバ** | CH348 は標準カーネルに入っていない。SBC のカーネル向けに `nm_board/ch348/ch9344ser_linux` をビルド（DKMS 推奨）。**これが無いと `/dev/ttyCH9344USB*` が生えず、UART 番号の ioctl も使えない** |
 | **シリアルの権限** | 実行ユーザを `dialout` に入れるか udev ルールを置く。入っていないと全ポートが `Permission denied` |
-| **Rust** | edition 2024 を使うので **1.85 以上** |
+| **Rust** | **1.88 以上**（`Cargo.lock` の `time` / `darling` / `serde_with` が `rust-version = 1.88`。2026-09-03 に総なめして確認。以前ここに書いていた 1.85 では足りない） |
 | **ビルド時間** | PC（32 コア）で release 44 秒 / CPU 時間 10 分。4 コアの SBC なら 10〜20 分を見込む。`clarabel` と `zenoh` が重い（`--no-default-features` なら zenoh が丸ごと消える） |
 | **バイナリサイズ** | release 283 MB（`debug = true` のため）。`--no-default-features`（viz 無し）で 62 MB、`strip` すると 20 MB。SBC のストレージが厳しければ strip して配る |
 

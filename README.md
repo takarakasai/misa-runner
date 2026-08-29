@@ -67,6 +67,11 @@ Zenoh（`--viz`）が要らない環境ではこちらのほうが軽い（20 MB
 cargo build --release --no-default-features
 ```
 
+**keel を実機（機体の PC / ROS 2 humble / aarch64）でビルドするなら
+[`doc/realbot_build.md`](doc/realbot_build.md)。** あちらは ROS 2 と独自 msg が
+前提なので手順がひとつ増える（`--features ros2` と `AMENT_PREFIX_PATH`、
+それにモデルの置き場所）。前提の確認は `./scripts/setup-realbot.sh`。
+
 ### 兄弟クレートも一緒に直したいとき
 
 `misa-actuator` や `sbus` を misa-runner と併行して直す場合だけ、
