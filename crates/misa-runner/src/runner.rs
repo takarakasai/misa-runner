@@ -451,6 +451,24 @@ fn start_serial(
     Ok(plant)
 }
 
+/// **読めていない軸があるうちは脱力のまま。**
+///
+/// 読めていない軸の観測は 0 のままで、`measured` はそれをそのまま実測として
+/// 渡す。脱力からの遷移はこの実測を始点に張るので、実際には畳まれている脚を
+/// 「伸び切っている」と思って軌道を作る（keel は関節角 0 が脚を伸ばし切った
+/// 姿勢）。**脱力姿勢は一意に決まらないから、名前で持つのではなく実測を待つ。**
+///
+/// 途中で来なくなるのは別の話。そちらは安全ゲートが `max_observation_age` で
+/// 見て、目標を進めずその場で保持する（脱力へは落とさない — 荷重のかかった
+/// 四足を脱力させると崩れる）。
+fn mode_until_read(want: misa_core::ModeRequest, unread: bool) -> misa_core::ModeRequest {
+    if unread {
+        misa_core::ModeRequest::Relax
+    } else {
+        want
+    }
+}
+
 pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String> {
     // **繋ぎ方はプロファイルの `kind` が決める。** ここから下は Plant と
     // Pilot のトレイト越しにしか触らないので、実機でもブリッジ越しでも
@@ -498,6 +516,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
     let model_rates = robot.rate_limits.clone();
     let mut controller = Controller::with_arm(robot, cfg.clone(), arm_app_driven);
 
+    let mut warned_unread = false;
     let mut last_verdict_clean = true;
     // 傾きの報告は**立ち上がりだけ**。毎周期出すと、倒れたあと床で
     // 転がっている間ずっと埋まる。
@@ -576,7 +595,33 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         // **受信が無いときの扱いは 2 通りあり、混ぜてはいけない。**
         // その判断は `SbusPilot` が持つ（受信断は活動度を上げない、
         // `--allow-no-sbus` のベンチは起立させたい）。
-        let cmd = pilot.poll(obs.time);
+        let mut cmd = pilot.poll(obs.time);
+        // **まだ 1 軸でも読めていないうちは立ち上がらせない。**
+        //
+        // 読めていない軸の観測は 0 のままで、`measured` はそれをそのまま
+        // 実測として渡す。**脱力からの遷移はこの実測を始点に張る**ので、
+        // 実際には畳まれている脚を「伸び切っている」と思って軌道を作る。
+        // keel なら関節角 0 は脚を伸ばし切った姿勢で、そこから立ち姿勢へ
+        // 向かう軌道は実機の姿勢とまるで違う。
+        //
+        // 一度読めたら以降は見ない。途中で来なくなるのは別の話で、
+        // そちらは安全ゲートが `max_observation_age` で見る（目標を進めず
+        // その場で保持する。脱力へは落とさない — 荷重のかかった四足を
+        // 脱力させると崩れる）。
+        if !measured_seen {
+            measured_seen = !obs.any_unread();
+            if !measured_seen && !warned_unread {
+                warned_unread = true;
+                log::warn!(
+                    "まだ状態を受け取れていないので脱力のまま待ちます\
+                     （読めていない軸の観測は 0 で、そこから立つと危ない）"
+                );
+            }
+            if measured_seen {
+                log::info!("状態を受け取りました。操縦を受け付けます");
+            }
+        }
+        cmd.mode = mode_until_read(cmd.mode, !measured_seen);
         // 受信機直結の腕は、プロポのチャンネルから読んだ角度が唯一の手がかり。
         if let Some(observed) = cmd.aux(0) {
             if let Some(id) = layout.head {
@@ -694,9 +739,6 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
             // 受け側で「崩れ落ちたロボット」として描かれる。
             // 一度立ったら見に行かない（`all_ok` は 12 軸ぶんロックを取る）。
             // 最初の読み戻しが済んだかは観測そのものが知っている。
-            if !measured_seen {
-                measured_seen = !obs.any_unread();
-            }
             let body = controller.body_view();
             let t = started.elapsed().as_secs_f64();
             let att = attitude;
@@ -879,4 +921,30 @@ pub(crate) fn install_signal_handler() -> &'static AtomicBool {
 
 extern "C" fn handle_signal(_sig: libc::c_int) {
     STOP_FLAG.store(true, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::mode_until_read;
+    use misa_core::ModeRequest;
+
+    /// **1 軸でも読めていないうちは立ち上がらせない。**
+    ///
+    /// 読めていない軸の観測は 0 で、脱力からの遷移はその実測を始点に張る。
+    /// keel なら関節角 0 は脚を伸ばし切った姿勢なので、実際には畳まれている
+    /// 脚を伸び切っていると思って軌道を作ることになる。
+    #[test]
+    fn nothing_stands_before_the_first_state_arrives() {
+        for want in [ModeRequest::Relax, ModeRequest::Stand, ModeRequest::Walk] {
+            assert_eq!(mode_until_read(want, true), ModeRequest::Relax, "{want:?}");
+        }
+    }
+
+    /// 読めたら操縦をそのまま通す。**握り潰さない。**
+    #[test]
+    fn once_read_the_pilot_gets_through() {
+        for want in [ModeRequest::Relax, ModeRequest::Stand, ModeRequest::Walk] {
+            assert_eq!(mode_until_read(want, false), want);
+        }
+    }
 }
