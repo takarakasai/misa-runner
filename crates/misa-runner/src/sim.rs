@@ -18,7 +18,7 @@
 
 use std::time::{Duration, Instant};
 
-use misa_core::{Pilot as _, Plant as _};
+use misa_core::Plant as _;
 use misa_plant_mujoco::{MujocoPlant, SimOptions};
 
 use crate::config::AppConfig;
@@ -96,6 +96,17 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let interactive = !scripted;
 
     let robot = crate::robot::load_from_config(cfg)?;
+    // **当たり判定のメッシュが欠けたまま動力学を回さない。** 落ちたメッシュ
+    // のリンクは何にも当たらなくなるので、結果は「うまく動いている」ように
+    // 見えてしまう。keel でこれに引っかかった (2026-09-02)。
+    if !robot.bad_meshes.is_empty() {
+        return Err(format!(
+            "当たり判定のメッシュを {} 件読めません。**このまま回すと当たり判定の\
+             無いリンクができて、衝突しないぶん動いて見えてしまいます。**\n  {}",
+            robot.bad_meshes.len(),
+            robot.bad_meshes.join("\n  ")
+        ));
+    }
     let model_limits = robot.limits.clone();
     let layout = crate::snapshot::axis_layout(cfg)?;
     let dt = 1.0 / cfg.control.rate_hz;
@@ -195,6 +206,11 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let mut obs = misa_core::Observation::empty(layout.table.len(), 4);
     plant.exchange(&misa_core::Command::idle(layout.table.len()), &mut obs)?;
 
+    let mut yaw_prev = 0.0f64;
+    let mut yaw_total = 0.0f64;
+    let mut track_sum = vec![0.0f64; layout.table.len()];
+    let mut track_max = vec![0.0f64; layout.table.len()];
+    let mut track_n = 0usize;
     let mut ground_contacts: std::collections::BTreeMap<String, usize> = Default::default();
     let start = plant.base_position().unwrap_or([0.0; 3]);
     let start_yaw = obs.imu.map(|m| m.rpy_rad[2]).unwrap_or(0.0);
@@ -260,6 +276,40 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             });
         }
         plant.exchange(&outgoing, &mut obs)?;
+
+        // **追従誤差は歩幅と比べて意味を持つ。** 誤差が歩幅を超えていれば、
+        // 歩容をどう振っても結果は動力学の都合で決まる。立ち上がりは
+        // 大きく外れて当たり前なので、歩容に入ってからだけ数える。
+        if out.state == State::Active {
+            for (i, e) in track_sum.iter_mut().enumerate() {
+                let id = misa_core::AxisId::new(i as u16);
+                let (Some(c), Some(o)) = (outgoing.get(id), obs.get(id)) else {
+                    continue;
+                };
+                let d = (c.position_rad - o.position_rad).abs();
+                *e += d;
+                if d > track_max[i] {
+                    track_max[i] = d;
+                }
+            }
+            track_n += 1;
+        }
+
+        // **ヨーは ±π で折り返す。** そのままだと旋回の総量も向きも読めない
+        // （+0.5 rad/s を 14 秒で +7 rad 回るのに、表示は -171° になる）。
+        // 差分を畳んで足し込む。
+        {
+            let y = obs.imu.map(|m| m.rpy_rad[2]).unwrap_or(0.0);
+            let mut d = y - yaw_prev;
+            while d > std::f64::consts::PI {
+                d -= std::f64::consts::TAU;
+            }
+            while d < -std::f64::consts::PI {
+                d += std::f64::consts::TAU;
+            }
+            yaw_total += d;
+            yaw_prev = y;
+        }
 
         let z = plant.base_position().map(|p| p[2]).unwrap_or(f64::NAN);
         min_z = min_z.min(z);
@@ -348,9 +398,8 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // **世界座標の移動量だけでは「前へ歩いたか」は分からない。** 機体が
     // ヨーしていれば前進が世界の −x に出る。歩容の指令は機体座標なので、
     // 出発時の向きへ射影した前後・左右も添える。
-    let yaw0 = start_yaw;
     let (dx, dy) = (end[0] - start[0], end[1] - start[1]);
-    let (s0, c0) = yaw0.sin_cos();
+    let (s0, c0) = start_yaw.sin_cos();
     let (fwd, lat) = (dx * c0 + dy * s0, -dx * s0 + dy * c0);
     let yaw_end = obs.imu.map(|m| m.rpy_rad[2]).unwrap_or(f64::NAN);
     println!(
@@ -358,10 +407,26 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         end[0], end[1], end[2]
     );
     println!(
-        "機体座標の移動 前後 {fwd:+.3} m / 左右 {lat:+.3} m  ヨー {:+.1}°（出発 {:+.1}°）",
-        yaw_end.to_degrees(),
-        yaw0.to_degrees()
+        "機体座標の移動 前後 {fwd:+.3} m / 左右 {lat:+.3} m  回った量 {:+.1}°（いまの向き {:+.1}°）",
+        yaw_total.to_degrees(),
+        yaw_end.to_degrees()
     );
+    if track_n > 0 {
+        println!("\n追従誤差（歩容中 {track_n} 周期の平均 / 最大） [rad]");
+        for (leg, names) in misa_hal::joint::JOINT_NAMES.iter().enumerate() {
+            let mut line = String::new();
+            for (k, jn) in names.iter().enumerate() {
+                let i = leg * 3 + k;
+                line.push_str(&format!(
+                    "{:<6}{:.3}/{:.3}  ",
+                    jn.get(3..jn.len() - 6).unwrap_or(jn),
+                    track_sum[i] / track_n as f64,
+                    track_max[i]
+                ));
+            }
+            println!("  {}  {line}", ["FL", "FR", "RL", "RR"][leg]);
+        }
+    }
     if !ground_contacts.is_empty() {
         let total = steps.min(1 + (seconds / dt) as usize);
         println!("\n**足以外が接地しています**（歩行ではなく、これに乗っているかもしれません）:");

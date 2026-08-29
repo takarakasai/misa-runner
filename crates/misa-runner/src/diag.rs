@@ -603,6 +603,17 @@ pub fn check(cfg: &AppConfig) -> Result<(), String> {
         robot.model.nq
     );
     println!("ポーズ: {:?}", robot.poses.pose_names().collect::<Vec<_>>());
+    // **当たり判定のメッシュが落ちていたら、動力学の結果は当てにならない。**
+    // 落ちたリンクは何にも当たらなくなるので、`sim` は止まる。ここは知らせるだけ。
+    if !robot.bad_meshes.is_empty() {
+        println!(
+            "**当たり判定のメッシュを {} 件読めません**（sim はこの状態では回りません）:",
+            robot.bad_meshes.len()
+        );
+        for m in robot.bad_meshes.iter().take(10) {
+            println!("  {m}");
+        }
+    }
     println!(
         "シーケンス: {:?}",
         robot.poses.sequence_names().collect::<Vec<_>>()

@@ -45,6 +45,11 @@ pub struct Robot {
     /// 読むのは `sim`（`--features sim`）だけ。
     #[allow(dead_code)]
     pub root_link: String,
+    /// 読めなかった**当たり判定**のメッシュ。空なら健全。
+    ///
+    /// 落ちたメッシュは黙って消え、**衝突しないぶん動いて見えてしまう**ので、
+    /// 動力学を回す前に必ず見ること。
+    pub bad_meshes: Vec<String>,
 }
 
 impl Robot {
@@ -62,6 +67,44 @@ impl Robot {
                 parsed.report
             );
         }
+
+        // **読めなかったメッシュは黙って消える。** 当たり判定のメッシュが
+        // 落ちると、そのリンクは当たり判定がほぼ無い状態で走り、**衝突が
+        // 起きないぶん「うまく動いている」ように見える**。keel の分解した
+        // 胴体で実際に起きた: STL が 0 バイトになっていたのに、残った箱
+        // 2 個だけで立って歩いていた (2026-09-02)。
+        //
+        // ここでは数えるだけ。**止めるのは動力学を回す `sim` だけ**で、
+        // `dump`（運動学だけ）と実機の `run` には当たり判定が要らない。
+        //
+        // 同じ相対パスが複数の基準から引けることがある（keel は
+        // `urdf/mesh/` に 0 バイトの同名ファイルが並んでいて、実体は
+        // その 1 つ上にある）ので、**中身のある候補が 1 つでもあれば良し**とする。
+        let dir = std::path::Path::new(misa_path)
+            .parent()
+            .unwrap_or(std::path::Path::new("."));
+        let mut bad_meshes: Vec<String> = Vec::new();
+        for l in &parsed.file.link {
+            for c in &l.collision {
+                let misarta::native::schema::Geom::Mesh { file: rel, .. } = &c.geom else {
+                    continue;
+                };
+                let sizes: Vec<u64> = [dir.join(rel), dir.join("..").join(rel)]
+                    .iter()
+                    .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+                    .collect();
+                let why = match sizes.iter().max() {
+                    Some(&n) if n > 0 => continue,
+                    Some(_) => "空です",
+                    None => "見つかりません",
+                };
+                let msg = format!("{} の {rel} が{why}", l.name);
+                if !bad_meshes.contains(&msg) {
+                    bad_meshes.push(msg);
+                }
+            }
+        }
+
         let (model, _visual, _collision) = misarta::native::build_model(&parsed.file)
             .map_err(|e| format!("モデルの構築に失敗: {e:?}"))?;
 
@@ -90,6 +133,7 @@ impl Robot {
             home_q,
             limits,
             root_link,
+            bad_meshes,
         })
     }
 
@@ -496,8 +540,14 @@ mod tests {
                 println!("飛ばす: {} （モデル {} が無い）", cfg.name, cfg.control.model);
                 continue;
             }
+            let robot = match load_from_config(&cfg) {
+                Ok(r) => r,
+                Err(e) => {
+                    println!("飛ばす: {} （読めません: {e}）", cfg.name);
+                    continue;
+                }
+            };
             checked += 1;
-            let robot = load_from_config(&cfg).unwrap();
             let model_limits = robot.limits.clone();
             let rest = rest_pose(&cfg, &robot);
             let layout = crate::snapshot::axis_layout(&cfg).unwrap();
