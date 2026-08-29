@@ -609,7 +609,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         // その場で保持する。脱力へは落とさない — 荷重のかかった四足を
         // 脱力させると崩れる）。
         if !measured_seen {
-            measured_seen = !obs.any_unread();
+            measured_seen = layout.commanded_axes_read(&obs);
             if !measured_seen && !warned_unread {
                 warned_unread = true;
                 log::warn!(

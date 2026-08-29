@@ -59,6 +59,22 @@ impl AxisLayout {
 
     /// 脚の軸数。**歩容が触る範囲**で、ここまでは常に先頭に並ぶ。
     pub const LEG_AXES: usize = 12;
+
+    /// **こちらが指令を出す軸の観測が、全部読めているか。**
+    ///
+    /// 待つのは指令を出す軸だけ。keel の車輪のように**観測だけの軸は
+    /// 相手が出していないことがある**（`/low_state` は脚 12 本しか載せない）。
+    /// それを待つと永久に立ち上がれない。実際そうなった (2026-09-04)。
+    ///
+    /// 逆に、指令を出す軸が読めていないうちに立たせてはいけない。観測は
+    /// 0 のままで、脱力からの遷移はそれを実測として始点に張る。
+    pub fn commanded_axes_read(&self, obs: &misa_core::Observation) -> bool {
+        let head = self.head;
+        (0..Self::LEG_AXES)
+            .map(|i| AxisId::new(i as u16))
+            .chain(head)
+            .all(|id| obs.get(id).is_some_and(|a| a.health.valid))
+    }
 }
 
 /// プロファイルから軸の並びを組む。
@@ -341,6 +357,42 @@ mod tests {
     /// **補助軸の本数が違う機体が入ること。**
     ///
     /// namiashi は腕 1 軸、keel は車輪 4 軸。ここが固定だと 2 台目が載らない。
+    /// **待つのは指令を出す軸だけ。**
+    ///
+    /// keel の車輪は観測だけの軸で、ブリッジの `/low_state` は脚 12 本しか
+    /// 載せない。それを待つと `状態を受け取りました` が永久に出ず、立ち
+    /// 上がれない。実機で実際に詰まった (2026-09-04)。
+    #[test]
+    fn observe_only_axes_do_not_block_startup() {
+        let lay = layout();
+        let mut obs = misa_core::Observation::empty(lay.table.len(), 4);
+        assert!(!lay.commanded_axes_read(&obs), "何も読めていなければ待つ");
+        // 脚 12 本（と head）だけ埋める。補助軸は未取得のまま。
+        for i in 0..AxisLayout::LEG_AXES {
+            obs.get_mut(AxisId::new(i as u16)).unwrap().health.valid = true;
+        }
+        if let Some(id) = lay.head {
+            obs.get_mut(id).unwrap().health.valid = true;
+        }
+        assert!(
+            lay.commanded_axes_read(&obs),
+            "観測だけの軸が来ていなくても立ち上がれること"
+        );
+    }
+
+    /// 逆に、**指令を出す軸が 1 本でも欠けていたら待つ。**
+    #[test]
+    fn a_missing_leg_axis_still_blocks_startup() {
+        let lay = layout();
+        let mut obs = misa_core::Observation::empty(lay.table.len(), 4);
+        for i in 0..lay.table.len() {
+            obs.get_mut(AxisId::new(i as u16)).unwrap().health.valid = true;
+        }
+        assert!(lay.commanded_axes_read(&obs));
+        obs.get_mut(AxisId::new(5)).unwrap().health.valid = false;
+        assert!(!lay.commanded_axes_read(&obs), "脚が 1 本欠けたら待つ");
+    }
+
     /// **ブリッジ越しの機体には kp/kd を載せる。**
     ///
     /// 載せ忘れると MIT の τ が恒等的に 0 になり、位置を指令しているのに

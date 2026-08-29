@@ -204,13 +204,33 @@ impl Ros2Plant {
         if self.reported.as_ref() == Some(&missing) {
             return;
         }
+        // **「来ていない」の重さは軸によって違う。**
+        //
+        // 指令を出す軸（脚 12 本）が来ていないなら、こちらは相手の姿勢を
+        // 知らないまま指令することになる。立ち上げは止まる。
+        //
+        // 観測だけの軸（keel の車輪）は、相手が出していなくても実害が無い。
+        // 指令も出していない。**同じ重さで警告すると、毎回出る無害なほうに
+        // 慣れて、重いほうを見落とす。**
+        let driven_missing: Vec<&String> = missing
+            .iter()
+            .filter(|n| self.axes.id_of(n).is_some_and(|id| id.index() < 12))
+            .collect();
         if missing.is_empty() {
             log::info!("{} 軸すべてを low_state で解決しました", self.index.len());
+        } else if driven_missing.is_empty() {
+            log::info!(
+                "low_state に無い関節が {} 本あります: {missing:?}。\
+                 いずれも観測だけの軸なので、指令には影響しません",
+                missing.len()
+            );
         } else {
             // **黙って 0 のままにしない。** どの軸が来ていないかを言う。
-            log::warn!(
-                "low_state に無い関節が {} 本あります: {missing:?}（相手が出しているのは {names:?}）",
-                missing.len()
+            log::error!(
+                "**指令を出す関節が {} 本 low_state に来ていません**: {driven_missing:?}。\
+                 相手の姿勢を知らないまま指令することになるので立ち上げは止まります\
+                 （相手が出しているのは {names:?}）",
+                driven_missing.len()
             );
         }
         self.reported = Some(missing);
