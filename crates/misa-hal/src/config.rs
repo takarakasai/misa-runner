@@ -418,6 +418,49 @@ pub struct Ros2Hardware {
     /// **目標角そのもの**の変化率の上限 [rad/s]。0 で無制限。
     #[serde(default = "default_max_target_rate")]
     pub max_target_rate_rad_s: f64,
+    /// MIT モードのゲイン。脚の 3 関節ぶんを `[hip, thigh, calf]` の順に。
+    ///
+    /// **ブリッジ越しの機体はこれが要る。** 向こうは MIT しか持たないので、
+    /// `τ = kp·(q_d − q) + kd·(q̇_d − q̇) + τ_ff` の kp/kd をこちらが毎周期
+    /// 載せる。**入れ忘れると τ が恒等的に 0 になり、位置を指令しているのに
+    /// 機体は脱力したまま崩れる。** 既定を置かないのはそのためで、
+    /// 宣言が無ければ起動時に止める。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mit_gains: Option<MitGains>,
+}
+
+/// MIT モードの kp/kd。脚の 3 関節ぶん。
+///
+/// **関節ごとに違う。** 膝は自重を支える側なので腿より大きく要る。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MitGains {
+    /// `[hip, thigh, calf]` の kp [N·m/rad]。
+    pub kp: [f64; 3],
+    /// `[hip, thigh, calf]` の kd [N·m·s/rad]。
+    pub kd: [f64; 3],
+}
+
+impl MitGains {
+    /// 軸表の並び（脚 × 3）から `[hip, thigh, calf]` の添字へ。
+    pub fn for_joint(&self, k: usize) -> (f64, f64) {
+        (self.kp[k.min(2)], self.kd[k.min(2)])
+    }
+
+    /// **0 や負のゲインを黙って通さない。** 0 は「脱力」と区別が付かず、
+    /// 位置を指令しているのに動かない状態になる。
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        for (n, v) in [("kp", &self.kp), ("kd", &self.kd)] {
+            for (k, x) in v.iter().enumerate() {
+                if !x.is_finite() || *x < 0.0 {
+                    return Err(format!("mit_gains.{n}[{k}] = {x} は使えません"));
+                }
+            }
+        }
+        if self.kp.iter().all(|v| *v == 0.0) {
+            return Err("mit_gains.kp が全部 0 です。この設定では機体は脱力したまま崩れます".into());
+        }
+        Ok(())
+    }
 }
 
 impl Default for Ros2Hardware {
@@ -432,6 +475,7 @@ impl Default for Ros2Hardware {
             cmd_vel_timeout_ms: default_cmd_vel_timeout_ms(),
             default_max_speed_rad_s: default_max_speed(),
             max_target_rate_rad_s: default_max_target_rate(),
+            mit_gains: None,
         }
     }
 }
@@ -499,6 +543,14 @@ impl HardwareConfig {
     }
 
     /// **目標角そのもの**の変化率の上限 [rad/s]。0 で無制限。
+    /// MIT ゲイン。シリアル構成は持たない（サーボが内部で持つ）。
+    pub fn mit_gains(&self) -> Option<MitGains> {
+        match self {
+            HardwareConfig::Serial(_) => None,
+            HardwareConfig::Ros2(h) => h.mit_gains,
+        }
+    }
+
     pub fn max_target_rate_rad_s(&self) -> f64 {
         match self {
             HardwareConfig::Serial(h) => h.legs.max_target_rate_rad_s,

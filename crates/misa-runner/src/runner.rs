@@ -600,6 +600,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
             &out.targets,
             cfg.hardware.default_max_speed_rad_s(),
             out.leg_mode == JointMode::Idle,
+            cfg.hardware.mit_gains(),
         );
 
         // 記録は**送る指令**と、その指令を計算するのに使った観測の組。

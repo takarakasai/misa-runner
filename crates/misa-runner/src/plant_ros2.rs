@@ -95,6 +95,24 @@ impl Ros2Plant {
             }
         };
 
+        // **ゲインが無いまま繋がない。** ブリッジは MIT しか持たないので、
+        // kp/kd を載せないと τ が恒等的に 0 になる。位置を指令しているのに
+        // 機体は脱力したまま崩れ、**ログには「指令どおり出している」と
+        // 残る**ので、実機の前で原因を探すことになる。ここで止める。
+        match r.mit_gains {
+            Some(g) => g.validate()?,
+            None => {
+                return Err(format!(
+                    "[hardware] に mit_gains がありません。ブリッジは MIT しか\
+                     受けないので、kp/kd が無いと機体は脱力したまま崩れます。\n\
+                     　　　プロファイルに例えばこう書いてください:\n\
+                     　　　  [hardware.mit_gains]\n\
+                     　　　  kp = [40.0, 60.0, 60.0]   # hip, thigh, calf\n\
+                     　　　  kd = [ 1.0,  1.5,  1.5]"
+                ))
+            }
+        }
+
         let ctx = r2r::Context::create().map_err(|e| format!("ROS 2 の初期化に失敗: {e}"))?;
         let mut node = r2r::Node::create(ctx, &format!("{}_plant", r.node_name), &r.namespace)
             .map_err(|e| format!("ノードを作れません: {e}"))?;
@@ -251,7 +269,13 @@ impl Plant for Ros2Plant {
                 // ブリッジは見ないが、記録と相手側のログのために入れておく。
                 control_mode: c.mode as i32,
                 joint_angle: c.position_rad,
-                joint_angular_velocity: if limp { 0.0 } else { c.velocity_rad_s },
+                // **速度上限をここへ入れてはいけない。** `Command` の
+                // `velocity_rad_s` はシリアルサーボ向けの「上限」だが、MIT の
+                // `joint_angular_velocity` は**目標速度 q̇_d** で、
+                // `τ = kp(q_d − q) + kd(q̇_d − q̇) + τ_ff` にそのまま入る。
+                // 上限（keel は 8 rad/s）を渡すと、kd を入れた瞬間に全関節が
+                // その速度で回ろうとする。位置保持の目標速度は 0。
+                joint_angular_velocity: 0.0,
                 joint_tau: if limp { 0.0 } else { c.torque_ff_nm },
                 kp: if limp { 0.0 } else { c.kp_nm_per_rad },
                 kd: if limp { 0.0 } else { c.kd_nm_s_per_rad },

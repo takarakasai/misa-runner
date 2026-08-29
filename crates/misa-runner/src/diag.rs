@@ -605,6 +605,22 @@ pub fn check(cfg: &AppConfig) -> Result<(), String> {
     println!("ポーズ: {:?}", robot.poses.pose_names().collect::<Vec<_>>());
     // **当たり判定のメッシュが落ちていたら、動力学の結果は当てにならない。**
     // 落ちたリンクは何にも当たらなくなるので、`sim` は止まる。ここは知らせるだけ。
+    // **ブリッジ越しの機体は MIT ゲインが要る。** 無いと τ が恒等的に 0 で、
+    // 位置を指令しているのに脱力したまま崩れる。`run` は起動時に止まるが、
+    // 実機の前へ行く前にここで気づけるようにする。
+    match cfg.hardware.mit_gains() {
+        Some(g) => match g.validate() {
+            Ok(()) => println!(
+                "MIT ゲイン: kp {:?} / kd {:?}（hip, thigh, calf）",
+                g.kp, g.kd
+            ),
+            Err(e) => println!("**MIT ゲインが不正です**: {e}"),
+        },
+        None if matches!(cfg.hardware, misa_hal::config::HardwareConfig::Ros2(_)) => println!(
+            "**[hardware] に mit_gains がありません**（run はこの状態では起動しません）。\n             　ブリッジは MIT しか受けないので、kp/kd が無いと機体は脱力したまま崩れます"
+        ),
+        None => {}
+    }
     if !robot.bad_meshes.is_empty() {
         println!(
             "**当たり判定のメッシュを {} 件読めません**（sim はこの状態では回りません）:",

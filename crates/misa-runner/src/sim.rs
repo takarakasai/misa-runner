@@ -269,6 +269,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             &out.targets,
             cfg.hardware.default_max_speed_rad_s(),
             out.leg_mode == misa_hal::joint::JointMode::Idle,
+            cfg.hardware.mit_gains(),
         );
         if let Some(rec) = recorder.as_ref() {
             let mut shadow = outgoing.clone();

@@ -238,6 +238,7 @@ pub fn command(
     targets: &JointVec,
     max_speed_rad_s: f64,
     relaxed: bool,
+    gains: Option<misa_hal::config::MitGains>,
 ) -> Command {
     let mut cmd = Command::idle(layout.table.len());
     let mode = if relaxed {
@@ -248,10 +249,19 @@ pub fn command(
     for leg in 0..4 {
         for k in 0..3 {
             let id = AxisId::new((leg * 3 + k) as u16);
-            *cmd.get_mut(id).expect("軸表と長さが揃っている") = AxisCommand {
+            let mut a = AxisCommand {
                 mode,
                 ..AxisCommand::position(targets.legs[leg][k], max_speed_rad_s)
             };
+            // **MIT の機体には kp/kd を毎周期載せる。** 無いと τ が恒等的に
+            // 0 になり、位置を指令しているのに脱力したまま崩れる。
+            // シリアルの機体はサーボが内部で持つので `None`。
+            if let Some(g) = gains {
+                let (kp, kd) = g.for_joint(k);
+                a.kp_nm_per_rad = kp;
+                a.kd_nm_s_per_rad = kd;
+            }
+            *cmd.get_mut(id).expect("軸表と長さが揃っている") = a;
         }
     }
     // **head 以外の補助軸には指令を出さない。** 車輪を動かすのは歩容の
@@ -262,6 +272,12 @@ pub fn command(
                 mode,
                 ..AxisCommand::position(targets.arm, max_speed_rad_s)
             };
+            if let Some(g) = gains {
+                // ヘッドは脚ではないので、いちばん軽い hip の値を借りる。
+                let (kp, kd) = g.for_joint(0);
+                a.kp_nm_per_rad = kp;
+                a.kd_nm_s_per_rad = kd;
+            }
         }
     }
     cmd
@@ -304,6 +320,54 @@ mod tests {
     /// **補助軸の本数が違う機体が入ること。**
     ///
     /// namiashi は腕 1 軸、keel は車輪 4 軸。ここが固定だと 2 台目が載らない。
+    /// **ブリッジ越しの機体には kp/kd を載せる。**
+    ///
+    /// 載せ忘れると MIT の τ が恒等的に 0 になり、位置を指令しているのに
+    /// 機体は脱力したまま崩れる。**ログには「指令どおり出している」と残る**
+    /// ので、実機の前で原因を探すことになる。
+    #[test]
+    fn a_bridge_command_carries_the_mit_gains() {
+        let g = misa_hal::config::MitGains {
+            kp: [40.0, 60.0, 70.0],
+            kd: [1.0, 1.5, 2.0],
+        };
+        let cmd = command(&layout(), &JointVec::zeros(), 8.0, false, Some(g));
+        let t = layout().table;
+        for (name, kp, kd) in [
+            ("FL_hip_joint", 40.0, 1.0),
+            ("FL_thigh_joint", 60.0, 1.5),
+            ("FL_calf_joint", 70.0, 2.0),
+        ] {
+            let a = cmd.get(t.id_of(name).unwrap()).unwrap();
+            assert_eq!((a.kp_nm_per_rad, a.kd_nm_s_per_rad), (kp, kd), "{name}");
+        }
+    }
+
+    /// **シリアルの機体には載せない。** あちらはサーボが内部で持つ。
+    #[test]
+    fn a_serial_command_leaves_the_gains_alone() {
+        let cmd = command(&layout(), &JointVec::zeros(), 8.0, false, None);
+        let a = cmd.get(AxisId::new(0)).unwrap();
+        assert_eq!((a.kp_nm_per_rad, a.kd_nm_s_per_rad), (0.0, 0.0));
+    }
+
+    /// **kp が全部 0 の設定は弾く。** 0 は脱力と区別が付かない。
+    #[test]
+    fn all_zero_gains_are_refused() {
+        let g = misa_hal::config::MitGains {
+            kp: [0.0; 3],
+            kd: [1.0; 3],
+        };
+        let e = g.validate().unwrap_err();
+        assert!(e.contains("脱力"), "{e}");
+        assert!(misa_hal::config::MitGains {
+            kp: [40.0, 60.0, 60.0],
+            kd: [1.0, 1.5, 1.5],
+        }
+        .validate()
+        .is_ok());
+    }
+
     #[test]
     fn a_robot_with_four_wheels_instead_of_an_arm_fits() {
         let lay = wheeled_layout();
@@ -326,7 +390,7 @@ mod tests {
         let lay = wheeled_layout();
         let mut q = JointVec::zeros();
         q.legs[0][1] = 0.9;
-        let cmd = command(&lay, &q, 8.0, false);
+        let cmd = command(&lay, &q, 8.0, false, None);
 
         assert_eq!(cmd.len(), 16);
         assert_eq!(cmd.get(AxisId::new(1)).unwrap().mode, ControlMode::Position);
@@ -441,7 +505,7 @@ mod tests {
         let mut q = JointVec::zeros();
         q.legs[2][1] = 0.75; // RL_thigh
         q.arm = -0.25;
-        let cmd = command(&layout(), &q, 8.0, false);
+        let cmd = command(&layout(), &q, 8.0, false, None);
 
         let t = layout().table;
         let id = t.id_of("RL_thigh_joint").unwrap();
@@ -455,7 +519,7 @@ mod tests {
     fn relaxing_keeps_the_targets_it_was_holding() {
         let mut q = JointVec::zeros();
         q.legs[0][1] = 1.0;
-        let cmd = command(&layout(), &q, 8.0, true);
+        let cmd = command(&layout(), &q, 8.0, true, None);
         let a = cmd.get(AxisId::new(1)).unwrap();
         assert_eq!(a.mode, ControlMode::Idle);
         assert_eq!(a.position_rad, 1.0);

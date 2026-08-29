@@ -156,6 +156,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                 &out.targets,
                 cfg.hardware.default_max_speed_rad_s(),
                 out.leg_mode == misa_hal::joint::JointMode::Idle,
+                cfg.hardware.mit_gains(),
             );
             let verdict = shadow_gate.apply(&mut shadow, &obs, period);
             rec.push(misa_core::record::Frame {
