@@ -329,6 +329,12 @@ fn resolve_kinematics_posture(poses: &PoseLibrary, name: &str) -> JointVec {
     if let Some(pose) = poses.pose(name) {
         return poses.resolve(&pose.angles, JointVec::zeros());
     }
+    // **`home` は `[[pose]]` ではなくモデルの `[home.joint_positions]`。**
+    // ここで警告を出すと「モデルに home が無い」と読めてしまうが、
+    // 実際には在って、それをそのまま使っている。
+    if name == "home" {
+        return poses.home();
+    }
     log::warn!(
         "姿勢 {name:?} がモデルにありません。[home] を使います（あるポーズ: {:?}）",
         poses.pose_names().collect::<Vec<_>>()
@@ -569,4 +575,5 @@ mod tests {
         assert_eq!(resolve_kinematics_posture(&lib, "nope"), home);
     }
 }
+
 

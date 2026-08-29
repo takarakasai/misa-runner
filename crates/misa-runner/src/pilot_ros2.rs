@@ -54,6 +54,13 @@ struct Shared {
     pose_pending: Option<PoseSlot>,
     attitude_rad: [f64; 3],
     height_offset_m: f64,
+    /// 胴体姿勢の上限 [rad]。`gait.body_attitude_max_rad`。
+    ///
+    /// **プロポ側は Teleop がここで丸めているのに、サービスは素通しだった。**
+    /// keel の本番経路はサービスなので、丸めるのはこちら側でも要る。
+    attitude_max_rad: f64,
+    /// 高さオフセットの上限 [m]。`gait.height_range_m`。
+    height_range_m: f64,
 }
 
 impl Default for Shared {
@@ -67,6 +74,9 @@ impl Default for Shared {
             pose_pending: None,
             attitude_rad: [0.0; 3],
             height_offset_m: 0.0,
+            // **既定は 0 = 無効。** プロファイルが明示したときだけ効く。
+            attitude_max_rad: 0.0,
+            height_range_m: 0.0,
         }
     }
 }
@@ -99,7 +109,11 @@ impl Ros2Pilot {
             _ => ("misa_run".to_string(), String::new(), 300),
         };
 
-        let shared = Arc::new(Mutex::new(Shared::default()));
+        let shared = Arc::new(Mutex::new(Shared {
+            attitude_max_rad: cfg.gait.body_attitude_max_rad,
+            height_range_m: cfg.gait.height_range_m,
+            ..Shared::default()
+        }));
         let spin_shared = Arc::clone(&shared);
 
         // **ノードを立てる失敗は呼び出し側へ返す。** スレッドの中で落とすと、
@@ -271,6 +285,50 @@ macro_rules! spawn_service {
     };
 }
 
+/// 胴体姿勢の要求を上限へ丸める。`Err` は「そもそも無効」。
+///
+/// **無効なら受け取らない。** 「ok」と返しておいて何も起きないのが
+/// いちばん困る（指令しているのに動かない、が原因不明のまま残る）。
+///
+/// **軸ごとではなく合成量で丸める。** 3 軸を別々に上限まで入れると
+/// 合わさったぶんが脚の可動域を食う。keel の実測では roll と yaw を
+/// それぞれ 0.40 rad 入れただけで hip が ±0.785 を超える（単軸なら
+/// 0.60 まで入る）。プロポ側の `Teleop` も合成量で丸めている。
+fn clamp_attitude(want: [f64; 3], max_rad: f64) -> Result<([f64; 3], String), String> {
+    if max_rad <= 0.0 {
+        return Err("gait.body_attitude_max_rad が 0 なので胴体姿勢は無効です".into());
+    }
+    if !want.iter().all(|v| v.is_finite()) {
+        return Err(format!("有限でない値です: {want:?}"));
+    }
+    let n = (want[0] * want[0] + want[1] * want[1] + want[2] * want[2]).sqrt();
+    if n <= max_rad || n == 0.0 {
+        return Ok((want, String::new()));
+    }
+    let k = max_rad / n;
+    Ok((
+        [want[0] * k, want[1] * k, want[2] * k],
+        format!("合成量 {n:.3} rad を上限 {max_rad:.3} rad へ丸めました"),
+    ))
+}
+
+/// 高さオフセットを `±range` へ丸める。`Err` は「そもそも無効」。
+fn clamp_height(want_m: f64, range_m: f64) -> Result<(f64, String), String> {
+    if range_m <= 0.0 {
+        return Err("gait.height_range_m が 0 なので高さ変更は無効です".into());
+    }
+    if !want_m.is_finite() {
+        return Err(format!("有限でない値です: {want_m}"));
+    }
+    let got = want_m.clamp(-range_m, range_m);
+    let msg = if got != want_m {
+        format!("{want_m:+.3} m を ±{range_m:.3} m へ丸めました")
+    } else {
+        String::new()
+    };
+    Ok((got, msg))
+}
+
 spawn_service!(
     spawn_set_mode,
     r2r::misa_msgs::srv::SetMode::Service,
@@ -327,8 +385,13 @@ spawn_service!(
     r2r::misa_msgs::srv::SetBodyAttitude::Service,
     r2r::misa_msgs::srv::SetBodyAttitude::Response,
     |req, s| {
-        s.attitude_rad = [req.roll, req.pitch, req.yaw];
-        (true, String::new())
+        match clamp_attitude([req.roll, req.pitch, req.yaw], s.attitude_max_rad) {
+            Ok((got, msg)) => {
+                s.attitude_rad = got;
+                (true, msg)
+            }
+            Err(e) => (false, e),
+        }
     }
 );
 
@@ -337,14 +400,66 @@ spawn_service!(
     r2r::misa_msgs::srv::SetHeight::Service,
     r2r::misa_msgs::srv::SetHeight::Response,
     |req, s| {
-        s.height_offset_m = req.offset_m;
-        (true, String::new())
+        match clamp_height(req.offset_m, s.height_range_m) {
+            Ok((got, msg)) => {
+                s.height_offset_m = got;
+                (true, msg)
+            }
+            Err(e) => (false, e),
+        }
     }
 );
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **無効なら「ok」と言わない。** 受け付けたと返しておいて何も
+    /// 起きないと、指令しているのに動かない理由が残らない。
+    #[test]
+    fn the_attitude_service_refuses_when_the_feature_is_off() {
+        let e = clamp_attitude([0.1, 0.0, 0.0], 0.0).unwrap_err();
+        assert!(e.contains("body_attitude_max_rad"), "{e}");
+        let e = clamp_height(0.05, 0.0).unwrap_err();
+        assert!(e.contains("height_range_m"), "{e}");
+    }
+
+    /// **丸めるのは軸ごとではなく合成量。**
+    ///
+    /// 3 軸それぞれ上限まで入れられると、合わさったぶんが脚の可動域を
+    /// 食う。keel の実測では roll と yaw を 0.40 rad ずつ入れただけで
+    /// hip が ±0.785 を超える（単軸なら 0.60 まで入る）。
+    #[test]
+    fn the_attitude_is_clamped_by_its_magnitude_not_per_axis() {
+        let (got, msg) = clamp_attitude([0.6, 0.6, 0.6], 0.6).unwrap();
+        let n = (got[0] * got[0] + got[1] * got[1] + got[2] * got[2]).sqrt();
+        assert!((n - 0.6).abs() < 1e-9, "合成量 {n:.4} が上限 0.6 と違う");
+        // 向きは変えない。
+        assert!((got[0] - got[1]).abs() < 1e-12 && (got[1] - got[2]).abs() < 1e-12);
+        assert!(msg.contains("丸めました"), "{msg}");
+    }
+
+    /// 上限の内側はそのまま通す。**丸めていないのに「丸めた」と言わない。**
+    #[test]
+    fn an_attitude_inside_the_limit_passes_through_untouched() {
+        let (got, msg) = clamp_attitude([0.3, 0.0, 0.0], 0.6).unwrap();
+        assert_eq!(got, [0.3, 0.0, 0.0]);
+        assert!(msg.is_empty(), "{msg}");
+    }
+
+    #[test]
+    fn the_height_offset_is_clamped_both_ways() {
+        assert_eq!(clamp_height(0.5, 0.08).unwrap().0, 0.08);
+        assert_eq!(clamp_height(-0.5, 0.08).unwrap().0, -0.08);
+        assert_eq!(clamp_height(0.02, 0.08).unwrap().0, 0.02);
+    }
+
+    /// NaN を素通しすると、そのまま IK まで流れて姿勢が全部 NaN になる。
+    #[test]
+    fn a_non_finite_request_is_refused() {
+        assert!(clamp_attitude([f64::NAN, 0.0, 0.0], 0.6).is_err());
+        assert!(clamp_height(f64::INFINITY, 0.08).is_err());
+    }
 
     /// **cmd_vel が来ていない間は速度 0、モードはそのまま。**
     ///

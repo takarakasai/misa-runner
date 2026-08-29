@@ -242,7 +242,8 @@ cargo run --release --features sim,ros2 -- \
         --viz --viz-endpoint tcp/127.0.0.1:7447
 
 # 2) 別端末で articara。Live gait feed に tcp/127.0.0.1:7447 を入れて Start
-cd ../articara && cargo run --release --features viz -- --model ../mdls/keel/mvp_v12.misa
+cd ../articara && cargo run --release --features viz -- \
+    --model ../keel/model/proto2_asset/urdf/mvp_v2.misa
 
 # 3) さらに別端末で操縦。**トピックは名前空間つき**
 ros2 service call /keel/misa_run/set_gait misa_msgs/srv/SetGait '{gait: 2}'
@@ -253,13 +254,24 @@ ros2 topic pub -r 20 /keel/cmd_vel geometry_msgs/msg/Twist '{linear: {x: 0.12}}'
 `cmd_vel` を止めると 300 ms 後に速度が 0 に落ちて、その場で立つ
 （**モードは変えない**）。
 
-**`--kp 200 --kv 2.0` は必須。** namiashi の既定（60 / 1.0）だと keel は
-自重を支えられず崩れる。
+胴体をその場で傾ける（足は接地したまま）:
 
-**歩容の値はまだ当たっていない。** 前進指令で後退する（脚間隔が namiashi の
-1.7 倍なのに `[gait]` が namiashi の値のまま）。**これを詰めるのがこの環境の
-使いどころ**で、`stance_height_m` / `swing_height_m` / `*_cycle_s` を振って
-終端の胴体位置を見るのが早い。
+```sh
+ros2 service call /keel/misa_run/set_body_attitude \
+    misa_msgs/srv/SetBodyAttitude '{roll: 0.0, pitch: 0.3, yaw: 0.0}'
+```
+
+**上限は「合成量」で、軸ごとではない**（`gait.body_attitude_max_rad`、keel は
+0.50）。超えた要求は向きを保ったまま丸めて、応答にそう書く。0 のときは
+`ok: false` で返す — **「受け付けた」と言っておいて何も起きないのが
+いちばん困る**ので。
+
+> **keel は MuJoCo でまだ立てない。** 腿の凸包が胴体の凸包に食い込んで
+> 85,000 N 超で押し返され、腿が指令の 1/30 しか動かない。ゲイン・刻み・
+> 膝の向きのどれでも直らない。原因と回復策は `robots/keel.toml` の冒頭に
+> 書いてある（要点: モデルに `[[collision_pair]]` が無く、articara の MJCF
+> 出力もそれを見ていない）。**ここが片付くまで、シムで歩容の値を振っても
+> 意味が無い。** `dump`（運動学だけ）は正しく動くので、可動域の確認には使える。
 
 **車輪 4 軸は articara に出ない。** `GaitVizFrame` が脚 12 関節しか運ばない
 ため。MuJoCo の中では存在していて、指令は出していない（歩容の仕事ではない

@@ -11,13 +11,17 @@ name = "keel"
 model = "../keel/model/proto2_asset/urdf/mvp_v2.misa"
 rate_hz = 200.0
 kinematics_pose = "home"
-# **proto2 のモデルは [[pose]] を 1 つも持たない。** 旧 mvp_v12 にあった
-# home / constrain2 / test は無くなった。名前を指しても警告が出て home
-# （全関節 0 = 脚を伸ばし切った姿勢）に落ちるだけなので、指さない。
+# 屈伸の 2 姿勢をモデルに足した（2026-09-02）。IK で足先を胴体高さ
+# 0.14 / 0.38 に置いた解で、hip は 0。
 #
-# **実機の電源投入姿勢はこれで決まらない。** 畳んだ姿勢が要るなら、
-# モデルに [[pose]] を足すか、STM ブリッジ側で持つ必要がある。
-start_pose = ""
+#   crouch  屈。足を引き上げて**車輪（胴体 -0.155 m）で座る**
+#   extend  伸。脚を伸ばして立つ。車輪は 0.225 m 浮く
+#
+# 電源投入時は車輪で座っているのが自然なので、待機も初期姿勢も crouch。
+# **実機の電源投入姿勢がこれと違うなら、ここを直すこと。** 脱力からの
+# 遷移はこの姿勢を始点に張るので、食い違うと実機では起こらない軌道が出る。
+start_pose = "crouch"
+rest_pose = "crouch"
 [poses]
 greeting = ""
 greeting_alt = ""
@@ -55,11 +59,27 @@ greeting_alt = ""
 # 入れてあるので、いまは同じ間違いをすると止まる。
 knee_pattern = "both_back"
 trot_cycle_s = 0.35
-stance_height_m = 0.27
+stance_height_m = 0.30
 swing_height_m = 0.07
 max_vx_m_s = 0.4
 max_vy_m_s = 0.2
 max_wz_rad_s = 0.8
+# **その場で胴体を傾ける。** 足は接地したまま胴体だけ回る。0 だと無効（既定）。
+#
+# **上限は「合成量」で、軸ごとではない。** 単軸なら 0.60 まで入るが、
+# 3 軸に分けると合わさったぶんが脚の可動域を食う。立ち高さ 0.30 での実測
+# （`dump --tilt-roll R --tilt-pitch P --tilt-yaw Y`、違反件数）:
+#
+#   単軸 0.60           roll OK   pitch OK   yaw OK
+#   合成 0.60  pitch=yaw       508 件（FL_calf が -2.705 に当たる）
+#   合成 0.60  roll=pitch=yaw  540 件
+#   合成 0.55  pitch=yaw       OK
+#   合成 0.50  21 方向を掃引   すべて OK  ← ここを採る
+#
+# 立ち高さを下げると pitch が先に当たる（0.27 では合成 0.60 で 1 件、
+# 0.26 では 0.55 で 1 件）。stance を下げるならここも下げること。
+body_attitude_max_rad = 0.50
+body_attitude_tau_s = 0.15
 
 # 車輪 4 軸。歩容もチキンヘッドも触らないので、指令は出ない（観測のみ）。
 [[aux]]
