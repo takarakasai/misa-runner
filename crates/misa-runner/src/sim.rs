@@ -108,6 +108,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         ));
     }
     let model_limits = robot.limits.clone();
+    let model_rates = robot.rate_limits.clone();
     let layout = crate::snapshot::axis_layout(cfg)?;
     let dt = 1.0 / cfg.control.rate_hz;
 
@@ -188,7 +189,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // ことがある (2026-09-01)。実際には後脚の膝が可動域に当たって脚の
     // 長さが変わっていただけで、歩行ではなかった。**動力学が付くと
     // それらしく動いてしまうぶん、シムのほうが誤魔化されやすい。**
-    let limits = crate::snapshot::safety_config(cfg, &layout, &model_limits, dt, 5.0);
+    let limits = crate::snapshot::safety_config(cfg, &layout, &model_limits, &model_rates, dt, 5.0);
     let mut violations: Vec<String> = Vec::new();
     let mut shadow_gate = misa_core::SafetyGate::new(limits.clone());
     let recorder = match cli.str("record") {

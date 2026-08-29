@@ -67,11 +67,15 @@ greeting_alt = ""
 # +2.182 に当たって swing 0.10 が限界だが、`<<` は負側なので 0.20 まで入る。
 # そのぶん swing を 0.16 まで上げられて、指令どおりの量が出るようになった。
 knee_pattern = "both_back"
-trot_cycle_s = 0.35
+trot_cycle_s = 0.45
+# **walk は trot より目標が速い**（接地比 0.75 で遊脚時間が短い）。既定の
+# 周期だと calf に 10.08 rad/s を要求してモータの定格 10.47 に迫るので、
+# 0.8 s まで伸ばして 7.69 に落とす。`dump` が毎回突き合わせる。
+walk_cycle_s = 0.8
 stance_height_m = 0.30
 # `<<` なら 0.20 まで可動域内。0.10 → 0.13 → 0.16 で 80% → 87% → 100% と
 # 素直に伸びる。0.16 で指令どおりになったのでここで止める。
-swing_height_m = 0.16
+swing_height_m = 0.08
 max_vx_m_s = 0.4
 max_vy_m_s = 0.2
 max_wz_rad_s = 0.8
@@ -119,7 +123,11 @@ state_timeout_ms = 50
 # cmd_vel は 10〜20 Hz の publisher もあるので、状態より緩く取る。
 cmd_vel_timeout_ms = 300
 default_max_speed_rad_s = 8.0
-max_target_rate_rad_s = 3.0
+# **目標の変化率の上限。歩容の要求を下回ってはいけない。**
+# trot が要求するのは thigh 3.69 / calf 6.68 rad/s（`dump` が毎回出す）。
+# 8.0 なら歩容には当たらず、目標が跳んだとき（歩容の切り替え、IK の
+# クランプ）は捕まる。モデルの定格（calf 10.47）との厳しいほうが効く。
+max_target_rate_rad_s = 8.0
 
 # MIT のゲイン。既定は kp 120 / kd 2.0（hip, thigh, calf とも）。
 #

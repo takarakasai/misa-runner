@@ -37,6 +37,12 @@ pub struct Robot {
     /// 校正値を PC が持たない機体（ブリッジ越し）では、これが可動域の
     /// 唯一の出どころになる。
     pub limits: BTreeMap<String, (f64, f64)>,
+    /// モデルが宣言する定格速度 [rad/s]。宣言の無い関節は入らない。
+    ///
+    /// **目標の変化率の上限に使う。** 定格より速い目標は追えないので、
+    /// そこで丸めるのが正しい。歩容がここを超える要求を出していたら
+    /// `dump` が知らせる。
+    pub rate_limits: BTreeMap<String, f64>,
     /// 胴体リンクの名前（`.misa` の `root`）。
     ///
     /// **機体ごとに違う**（namiashi は `trunk`、keel は `base_link`）。
@@ -116,6 +122,16 @@ impl Robot {
             .map(|j| (j.name.clone(), (j.limit.lower, j.limit.upper)))
             .collect();
 
+        // モデルが宣言する定格速度 [rad/s]。**目標の変化率の上限に使う。**
+        // 定格を超えた目標を出しても追えないので、そこで丸めるのが正しい。
+        let rate_limits: BTreeMap<String, f64> = parsed
+            .file
+            .joint
+            .iter()
+            .filter(|j| j.limit.velocity > 0.0)
+            .map(|j| (j.name.clone(), j.limit.velocity))
+            .collect();
+
         let root_link = parsed.file.robot.root.clone();
         let poses = PoseLibrary::from_misa(&parsed.file);
         let posture = resolve_kinematics_posture(&poses, kinematics_pose);
@@ -132,6 +148,7 @@ impl Robot {
             poses,
             home_q,
             limits,
+            rate_limits,
             root_link,
             bad_meshes,
         })
@@ -552,7 +569,7 @@ mod tests {
             let rest = rest_pose(&cfg, &robot);
             let layout = crate::snapshot::axis_layout(&cfg).unwrap();
             let dt = 1.0 / cfg.control.rate_hz;
-            let limits = crate::snapshot::safety_config(&cfg, &layout, &model_limits, dt, 5.0);
+            let limits = crate::snapshot::safety_config(&cfg, &layout, &model_limits, &robot.rate_limits, dt, 5.0);
             for select in [GaitSelect::Crawl, GaitSelect::Walk, GaitSelect::Trot] {
                 let mut controller = crate::controller::Controller::new(robot_for(&cfg), cfg.clone());
                 let mut intent = misa_core::Intent {

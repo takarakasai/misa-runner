@@ -121,7 +121,14 @@ bus_rate_hz = 500.0
 gear_ratio = 10.0
 
 default_max_speed_rad_s = 8.0
-max_target_rate_rad_s = 3.0
+# **3.0 では歩容に当たっていた。** 2026-09-02 に安全ゲートを実機の指令へ
+# 配線したので、そのままだと歩容を鈍らせることになる。**実機の挙動を変え
+# たくないので、歩容ではなく上限を上げた**（要求は trot が calf 3.88、
+# walk が 5.21 rad/s。`dump` が毎回突き合わせる）。
+#
+# 目標が跳んだとき（1 周期で 1 rad なら 200 rad/s）は変わらず捕まる。
+# モデルの定格は 33.5 rad/s なので、効くのはこちらの 6.0。
+max_target_rate_rad_s = 6.0
 status_interval_ms = 1000
 
 [[hardware.legs.bus]]

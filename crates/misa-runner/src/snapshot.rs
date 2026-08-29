@@ -106,24 +106,44 @@ pub fn safety_config(
     cfg: &AppConfig,
     layout: &AxisLayout,
     model_limits: &BTreeMap<String, (f64, f64)>,
+    model_rates: &BTreeMap<String, f64>,
     control_period_s: f64,
     stale_ticks: f64,
 ) -> SafetyConfig {
-    let rate = cfg.hardware.max_target_rate_rad_s();
+    // **設定とモデルの定格の、厳しいほう。**
+    //
+    // 設定側は「目標をどれだけ穏やかに動かすか」という運用の判断で、
+    // モデル側は「モータが何 rad/s まで回るか」という物理の事実。
+    // 定格より速い目標は追えないので、どちらも超えないところで丸める。
+    let rate_of = |id: AxisId| -> f64 {
+        let cfg_rate = cfg.hardware.max_target_rate_rad_s();
+        let model = layout
+            .table
+            .name(id)
+            .and_then(|n| model_rates.get(n).copied())
+            .unwrap_or(0.0);
+        match (cfg_rate > 0.0, model > 0.0) {
+            (true, true) => cfg_rate.min(model),
+            (true, false) => cfg_rate,
+            (false, true) => model,
+            (false, false) => 0.0,
+        }
+    };
     let mut axes = Vec::with_capacity(layout.table.len());
-    // **可動域を持っているのはバスを直接握る構成だけ。** ブリッジ越しの機体
-    // では向こうが持つので、こちらは制限しない（いずれモデルの `[joint.limit]`
-    // から埋める）。無制限のまま指令を出すのは危ないが、その経路には
-    // まだ指令を出す実装が無い。
+    // **可動域の出どころは構成で違う。** バスを直接握る構成は校正で採った
+    // 実測値を持つのでそれを使い、ブリッジ越しの機体はモデルの
+    // `[joint.limit]` から埋める（向こうも持っているが、こちらで丸めてから
+    // 出す。二重にかかるのは無駄ではない）。
     let serial = cfg.hardware.serial().ok();
     for leg in LegSlot::ALL {
         match serial.and_then(|h| h.bus_for(leg)) {
             Some(bus) => {
-                for m in &bus.motors {
+                for (joint, m) in bus.motors.iter().enumerate() {
+                    let id = AxisId::new((leg.index() * 3 + joint) as u16);
                     axes.push(AxisLimits {
                         min_rad: m.min_rad,
                         max_rad: m.max_rad,
-                        max_target_rate_rad_s: rate,
+                        max_target_rate_rad_s: rate_of(id),
                         max_torque_nm: 0.0,
                     });
                 }
@@ -136,7 +156,7 @@ pub fn safety_config(
                     axes.push(AxisLimits {
                         min_rad,
                         max_rad,
-                        max_target_rate_rad_s: rate,
+                        max_target_rate_rad_s: rate_of(id),
                         max_torque_nm: 0.0,
                     });
                 }
@@ -155,7 +175,7 @@ pub fn safety_config(
         axes.push(AxisLimits {
             min_rad,
             max_rad,
-            max_target_rate_rad_s: rate,
+            max_target_rate_rad_s: rate_of(id),
             max_torque_nm: 0.0,
         });
     }
@@ -447,7 +467,7 @@ mod tests {
 
         let mut model = BTreeMap::new();
         model.insert("FL_thigh_joint".to_string(), (-2.5, 2.5));
-        let sc = safety_config(&cfg, &lay, &model, 0.005, 5.0);
+        let sc = safety_config(&cfg, &lay, &model, &Default::default(), 0.005, 5.0);
 
         let id = lay.table.id_of("FL_thigh_joint").unwrap();
         assert_eq!(sc.axes[id.index()].min_rad, -2.5);
@@ -464,7 +484,7 @@ mod tests {
         let lay = axis_layout(&cfg).unwrap();
         let mut model = BTreeMap::new();
         model.insert("FL_hip_joint".to_string(), (-9.9, 9.9));
-        let sc = safety_config(&cfg, &lay, &model, 0.005, 5.0);
+        let sc = safety_config(&cfg, &lay, &model, &Default::default(), 0.005, 5.0);
 
         let sh = cfg.hardware.serial().unwrap();
         let m = &sh.bus_for(LegSlot::Fl).unwrap().motors[0];
@@ -574,7 +594,7 @@ mod tests {
         .unwrap();
         let cfg = crate::config::AppConfig::from_toml(&text).unwrap();
         let lay = axis_layout(&cfg).unwrap();
-        let sc = safety_config(&cfg, &lay, &BTreeMap::new(), 1.0 / cfg.control.rate_hz, 5.0);
+        let sc = safety_config(&cfg, &lay, &BTreeMap::new(), &Default::default(), 1.0 / cfg.control.rate_hz, 5.0);
         assert_eq!(sc.axes.len(), lay.table.len());
 
         // FL の hip は設定の 1 本目のバスの 1 個目のモータ。

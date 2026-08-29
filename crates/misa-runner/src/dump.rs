@@ -45,6 +45,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let robot = crate::robot::load_from_config(cfg)?;
     // Controller へ move する前に控えておく。
     let model_limits = robot.limits.clone();
+    let model_rates = robot.rate_limits.clone();
     let rest = crate::robot::rest_pose(cfg, &robot);
     let mut controller = Controller::new(robot, cfg.clone());
     let dt = 1.0 / cfg.control.rate_hz;
@@ -102,7 +103,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // 制御ループを触る改修は「dump を録って差分する」で検証できる。
     // ゲートは `run` と同じく影で回すだけ（出力は捨てる）。
     let layout = crate::snapshot::axis_layout(cfg)?;
-    let limits = crate::snapshot::safety_config(cfg, &layout, &model_limits, dt, 5.0);
+    let limits = crate::snapshot::safety_config(cfg, &layout, &model_limits, &model_rates, dt, 5.0);
     let mut shadow_gate = misa_core::SafetyGate::new(limits.clone());
     let recorder = match cli.str("record") {
         Some(path) => {
@@ -120,6 +121,8 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     };
 
     let mut violations: Vec<String> = Vec::new();
+    let mut peak_rate = [0.0f64; 12];
+    let mut prev_targets: Option<JointVec> = None;
     let steps = (seconds / dt).ceil() as usize;
     let period = Duration::from_secs_f64(dt);
     let mut next = Instant::now();
@@ -136,6 +139,22 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         }
         let out = controller.tick(&cmd, &measured, imu.rpy_rad, dt);
         check_limits(&limits, &layout, &out.targets, t, &mut violations);
+        // **歩容が要求する目標の変化率を測る。** 安全ゲートの上限を超えて
+        // いたら、実機ではゲートが丸めて歩容が崩れる。keel で実際に起きた:
+        // trot が calf に 16 rad/s を要求していて、モータの定格 10.47 も
+        // 設定の 3.0 も超えていた (2026-09-02)。
+        if let Some(p) = prev_targets.as_ref() {
+            for leg in 0..4 {
+                for k in 0..3 {
+                    let i = leg * 3 + k;
+                    let r = (out.targets.legs[leg][k] - p.legs[leg][k]).abs() / dt;
+                    if r > peak_rate[i] {
+                        peak_rate[i] = r;
+                    }
+                }
+            }
+        }
+        prev_targets = Some(out.targets);
         if i % every == 0 {
             println!("{t:5.2}  {:<12} {}", out.state.label(), row(&out.targets));
         }
@@ -183,6 +202,59 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             } else {
                 next = now;
             }
+        }
+    }
+
+    // **歩容の要求が安全ゲートの上限に収まっているか。**
+    //
+    // 収まっていないと、実機ではゲートが目標を鈍らせて歩容が崩れる。
+    // 「シムでは歩けたのに実機で歩けない」がここから来る。
+    {
+        let mut over: Vec<String> = Vec::new();
+        println!("\n歩容が要求する目標の変化率と、安全ゲートの上限 [rad/s]");
+        for (leg, names) in JOINT_NAMES.iter().enumerate() {
+            let mut line = String::new();
+            for (k, jn) in names.iter().enumerate() {
+                let i = leg * 3 + k;
+                let cap = limits
+                    .axes
+                    .get(i)
+                    .map(|a| a.max_target_rate_rad_s)
+                    .unwrap_or(0.0);
+                let mark = if cap > 0.0 && peak_rate[i] > cap {
+                    over.push(format!("{jn} は {:.2} 要求、上限 {cap:.2}", peak_rate[i]));
+                    "✗"
+                } else {
+                    " "
+                };
+                line.push_str(&format!(
+                    "{:<6}{:5.2}/{}{}  ",
+                    jn.get(3..jn.len() - 6).unwrap_or(jn),
+                    peak_rate[i],
+                    if cap > 0.0 {
+                        format!("{cap:.2}")
+                    } else {
+                        "無制限".into()
+                    },
+                    mark
+                ));
+            }
+            println!("  {}  {line}", ["FL", "FR", "RL", "RR"][leg]);
+        }
+        if !over.is_empty() {
+            println!(
+                "\n**歩容が安全ゲートの上限を超えています（{} 軸）。** 実機では\
+                 ゲートが目標を鈍らせて歩容が崩れます:",
+                over.len()
+            );
+            for o in over.iter().take(6) {
+                println!("  {o}");
+            }
+            println!(
+                "  上限は hardware.max_target_rate_rad_s と、モデルが宣言する\
+                 定格速度の厳しいほう。歩容側（swing_height_m / *_cycle_s）を\
+                 緩めるか、上限を見直してください"
+            );
         }
     }
 

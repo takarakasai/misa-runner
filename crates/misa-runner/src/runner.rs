@@ -495,8 +495,10 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
     }
     // Controller へ move する前に控えておく。
     let model_limits = robot.limits.clone();
+    let model_rates = robot.rate_limits.clone();
     let mut controller = Controller::with_arm(robot, cfg.clone(), arm_app_driven);
 
+    let mut last_verdict_clean = true;
     let mut publisher = open_viz(&opts.viz)?;
     let started = Instant::now();
     let mut motors_enabled = false;
@@ -505,11 +507,19 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
     let mut watch = Watch::new(&cfg);
     // 記録と、その脇で回す SafetyGate。
     //
-    // **ゲートは影で回すだけで、出力は捨てる。** 実機に流れる指令はこれまでと
-    // 同じで、記録に載る SafetyVerdict だけがゲートの判断。配線する前に、
-    // 生きたデータでゲートが何を丸めるつもりだったかを見ておくためにある。
+    // **ゲートは実機へ流れる指令そのものに掛かる**（2026-09-02 に配線した。
+    // それまでは影で回して出力を捨てていた）。可動域・目標の変化率・観測の
+    // 古さをここで丸め、何をしたかを `SafetyVerdict` として記録に残す。
+    // 記録に載るのは**丸めたあとの指令**で、実機へ出したものと一致する。
     let layout = crate::snapshot::axis_layout(&cfg)?;
-    let mut shadow_gate = misa_core::SafetyGate::new(crate::snapshot::safety_config(&cfg, &layout, &model_limits, period.as_secs_f64(), STALE_TICKS));
+    let mut gate = misa_core::SafetyGate::new(crate::snapshot::safety_config(
+        &cfg,
+        &layout,
+        &model_limits,
+        &model_rates,
+        period.as_secs_f64(),
+        STALE_TICKS,
+    ));
     let recorder = match opts.record.as_deref() {
         Some(path) => {
             let header = misa_core::record::Header {
@@ -595,7 +605,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
         if out.leg_mode != JointMode::Idle {
             watch.tick(&out.targets, &measured);
         }
-        let outgoing = crate::snapshot::command(
+        let mut outgoing = crate::snapshot::command(
             &layout,
             &out.targets,
             cfg.hardware.default_max_speed_rad_s(),
@@ -603,11 +613,41 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
             cfg.hardware.mit_gains(),
         );
 
-        // 記録は**送る指令**と、その指令を計算するのに使った観測の組。
-        // ゲートは影で回すだけで、出力（`shadow`）は捨てる。
+        // **ここが指令を書き換えてよい唯一の場所。** `dt` は実測を渡す
+        // （目標周期を渡すと、ループが遅れている間に目標だけ規定どおり
+        // 進んで変化率の制限が意味を失う）。
+        let verdict = gate.apply(&mut outgoing, &obs, last_tick.elapsed());
+        // **丸めたことを黙っていない。** ただし毎周期出すと埋もれるので、
+        // 状態が変わったときだけ。可動域や変化率に当たり続けているのは、
+        // 歩容か設定のどちらかが機体に合っていないという意味。
+        if verdict.is_clean() != last_verdict_clean {
+            last_verdict_clean = verdict.is_clean();
+            if verdict.is_clean() {
+                log::info!("安全ゲート: 丸めなくなりました");
+            } else {
+                log::warn!(
+                    "安全ゲート: 可動域 {} 軸 / 変化率 {} 軸 / トルク {} 軸\
+                     {}{}",
+                    verdict.clamped.len(),
+                    verdict.rate_limited.len(),
+                    verdict.torque_limited.len(),
+                    if verdict.held_for_stale_observation {
+                        " / 観測が古いので目標を進めていません"
+                    } else {
+                        ""
+                    },
+                    if verdict.faulted.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" / 異常ビット {} 軸", verdict.faulted.len())
+                    }
+                );
+            }
+        }
+
+        // 記録は**実機へ出した指令**（丸めたあと）と、それを計算するのに
+        // 使った観測の組。
         if let Some(rec) = recorder.as_ref() {
-            let mut shadow = outgoing.clone();
-            let verdict = shadow_gate.apply(&mut shadow, &obs, last_tick.elapsed());
             rec.push(misa_core::record::Frame {
                 seq: ticks,
                 time: obs.time,
