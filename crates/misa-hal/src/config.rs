@@ -421,12 +421,19 @@ pub struct Ros2Hardware {
     /// MIT モードのゲイン。脚の 3 関節ぶんを `[hip, thigh, calf]` の順に。
     ///
     /// **ブリッジ越しの機体はこれが要る。** 向こうは MIT しか持たないので、
-    /// `τ = kp·(q_d − q) + kd·(q̇_d − q̇) + τ_ff` の kp/kd をこちらが毎周期
-    /// 載せる。**入れ忘れると τ が恒等的に 0 になり、位置を指令しているのに
-    /// 機体は脱力したまま崩れる。** 既定を置かないのはそのためで、
-    /// 宣言が無ければ起動時に止める。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mit_gains: Option<MitGains>,
+    /// `τ = kp·(q̇_d − q) + kd·(q̇_d − q̇) + τ_ff` の kp/kd をこちらが毎周期
+    /// 載せる。**0 のまま出すと τ が恒等的に 0 になり、位置を指令している
+    /// のに機体は脱力したまま崩れる**（ログには「指令どおり出している」と
+    /// 残る）。既定は 120 / 2.0。
+    #[serde(default = "default_mit_gains")]
+    pub mit_gains: MitGains,
+}
+
+fn default_mit_gains() -> MitGains {
+    MitGains {
+        kp: [120.0; 3],
+        kd: [2.0; 3],
+    }
 }
 
 /// MIT モードの kp/kd。脚の 3 関節ぶん。
@@ -475,7 +482,7 @@ impl Default for Ros2Hardware {
             cmd_vel_timeout_ms: default_cmd_vel_timeout_ms(),
             default_max_speed_rad_s: default_max_speed(),
             max_target_rate_rad_s: default_max_target_rate(),
-            mit_gains: None,
+            mit_gains: default_mit_gains(),
         }
     }
 }
@@ -547,7 +554,7 @@ impl HardwareConfig {
     pub fn mit_gains(&self) -> Option<MitGains> {
         match self {
             HardwareConfig::Serial(_) => None,
-            HardwareConfig::Ros2(h) => h.mit_gains,
+            HardwareConfig::Ros2(h) => Some(h.mit_gains),
         }
     }
 

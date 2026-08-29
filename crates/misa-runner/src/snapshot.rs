@@ -351,6 +351,17 @@ mod tests {
         assert_eq!((a.kp_nm_per_rad, a.kd_nm_s_per_rad), (0.0, 0.0));
     }
 
+    /// **既定は kp 120 / kd 2.0。** 立ち上げ用の柔らかい値で、この値では
+    /// keel は立てない（MuJoCo で同じ制御則を回すと胴体が 0.250 まで沈む。
+    /// 足だけで立つのは kp 300 から）。**歩かせる前に上げること。**
+    #[test]
+    fn the_default_bridge_gains_are_the_soft_bring_up_pair() {
+        let h = misa_hal::config::Ros2Hardware::default();
+        assert_eq!(h.mit_gains.kp, [120.0; 3]);
+        assert_eq!(h.mit_gains.kd, [2.0; 3]);
+        assert!(h.mit_gains.validate().is_ok());
+    }
+
     /// **kp が全部 0 の設定は弾く。** 0 は脱力と区別が付かない。
     #[test]
     fn all_zero_gains_are_refused() {

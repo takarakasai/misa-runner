@@ -95,23 +95,16 @@ impl Ros2Plant {
             }
         };
 
-        // **ゲインが無いまま繋がない。** ブリッジは MIT しか持たないので、
-        // kp/kd を載せないと τ が恒等的に 0 になる。位置を指令しているのに
-        // 機体は脱力したまま崩れ、**ログには「指令どおり出している」と
-        // 残る**ので、実機の前で原因を探すことになる。ここで止める。
-        match r.mit_gains {
-            Some(g) => g.validate()?,
-            None => {
-                return Err(format!(
-                    "[hardware] に mit_gains がありません。ブリッジは MIT しか\
-                     受けないので、kp/kd が無いと機体は脱力したまま崩れます。\n\
-                     　　　プロファイルに例えばこう書いてください:\n\
-                     　　　  [hardware.mit_gains]\n\
-                     　　　  kp = [40.0, 60.0, 60.0]   # hip, thigh, calf\n\
-                     　　　  kd = [ 1.0,  1.5,  1.5]"
-                ))
-            }
-        }
+        // **0 のゲインで繋がない。** ブリッジは MIT しか持たないので、
+        // kp が 0 だと τ が恒等的に 0 になる。位置を指令しているのに機体は
+        // 脱力したまま崩れ、**ログには「指令どおり出している」と残る**ので、
+        // 実機の前で原因を探すことになる。既定は 120 / 2.0。
+        r.mit_gains.validate()?;
+        log::info!(
+            "MIT ゲイン kp {:?} / kd {:?}（hip, thigh, calf）",
+            r.mit_gains.kp,
+            r.mit_gains.kd
+        );
 
         let ctx = r2r::Context::create().map_err(|e| format!("ROS 2 の初期化に失敗: {e}"))?;
         let mut node = r2r::Node::create(ctx, &format!("{}_plant", r.node_name), &r.namespace)
