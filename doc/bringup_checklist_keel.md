@@ -6,7 +6,7 @@
 [`bringup_checklist.md`](bringup_checklist.md)（namiashi 版） /
 [`../ros/README.md`](../ros/README.md) / `../robots/keel.toml`
 
-作成日: 2026-09-04（**実機はまだ一度も動かしていない**）
+作成日: 2026-09-04（同日、段階 1-2 まで実機で通した。記録欄を参照）
 
 ---
 
