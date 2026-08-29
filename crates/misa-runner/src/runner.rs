@@ -252,13 +252,24 @@ struct Watch {
 }
 
 impl Watch {
-    fn new(cfg: &AppConfig) -> Self {
+    /// **可動域の出どころは 2 つある。** 校正でこちらが採った実測値
+    /// （シリアル構成）と、モデルの `[joint.limit]`。
+    ///
+    /// 実測値があればそちらを優先する。無ければモデル。**両方を見ないと、
+    /// ブリッジ越しの機体では ±∞ のままになって逸脱警告が一度も出ない**
+    /// （keel が実際にそうだった。2026-09-04 に気づいて直した）。
+    fn new(cfg: &AppConfig, model_limits: &std::collections::BTreeMap<String, (f64, f64)>) -> Self {
         let mut limits = [[(f64::NEG_INFINITY, f64::INFINITY); 3]; 4];
-        for (slot, dst) in LegSlot::ALL.iter().zip(limits.iter_mut()) {
+        for (leg_i, slot) in LegSlot::ALL.iter().enumerate() {
+            for k in 0..3 {
+                if let Some(v) = model_limits.get(misa_hal::joint::JOINT_NAMES[leg_i][k]) {
+                    limits[leg_i][k] = *v;
+                }
+            }
             let Some(bus) = cfg.hardware.serial().ok().and_then(|h| h.bus_for(*slot)) else {
                 continue;
             };
-            for (m, d) in bus.motors.iter().zip(dst.iter_mut()) {
+            for (m, d) in bus.motors.iter().zip(limits[leg_i].iter_mut()) {
                 *d = (m.min_rad, m.max_rad);
             }
         }
@@ -526,7 +537,7 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
     let mut motors_enabled = false;
     let mut measured_seen = false;
     let mut fault_hint_shown = false;
-    let mut watch = Watch::new(&cfg);
+    let mut watch = Watch::new(&cfg, &model_limits);
     // 記録と、その脇で回す SafetyGate。
     //
     // **ゲートは実機へ流れる指令そのものに掛かる**（2026-09-02 に配線した。
