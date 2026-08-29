@@ -141,7 +141,7 @@ misa-run run  --robot robots/namiashi.toml --record run.rec   # 毎周期を記�
 | 機体 | 手順書 | 特徴 |
 |---|---|---|
 | namiashi | [`doc/bringup_checklist.md`](doc/bringup_checklist.md) | シリアル直結。校正（可動域・符号・ゼロ点）をこちらで採る |
-| keel | [`doc/bringup_checklist_keel.md`](doc/bringup_checklist_keel.md) | STM ブリッジ越し。校正は向こうが持つので、**1 軸だけ動かす段階が作れない** |
+| keel | [`doc/realbot_build.md`](doc/realbot_build.md) → [`doc/bringup_checklist_keel.md`](doc/bringup_checklist_keel.md) | 前者がビルドと通信確認、後者がモータを動かす段階。STM ブリッジ越しで校正は向こうが持つので、**1 軸だけ動かす段階が作れない** |
 
 ## 校正（実機に通電したら最初にやること）
 

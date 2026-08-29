@@ -296,6 +296,11 @@ memory と `handover.md` にあるが、keel について要点だけ:
   止めるかどうかは operator が決める。実効値は `check` が出す。
 - 歩容は開ループ。
 
+**ここから先（モータが力を出す段階）は
+[`bringup_checklist_keel.md`](bringup_checklist_keel.md) に分けてある。**
+脚を浮かせて励磁 → ゲインを上げる → 接地 → 歩く、の順に合格条件と
+「止める条件」を並べたもの。
+
 RT 優先度（`chrt`）は**立ち上げ中は使わない** — 暴走したプロセスを殺しにくく
 なる。`run` の状態行に出る「遅延最大」を見てから判断する。ブリッジ側は
 `tools/setup_rt.sh` で `cap_sys_nice,cap_ipc_lock` を付ける流儀なので、
