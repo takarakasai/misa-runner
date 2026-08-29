@@ -47,14 +47,19 @@ fi
 # 実機では ksm_mvp_real_ws がその機体で colcon build されている。PC では
 # ref/ 以下の参照用チェックアウト（.gitignore 済み）。merge-install なので
 # install/ 直下が prefix。
+# **中身（share/low_command_msgs）で判定する。** ディレクトリの有無で見ると、
+# 途中で失敗した install/ を掴んで「見つかったのに型が無い」になる。
 if [ -z "${KSM_WS:-}" ]; then
   for _cand in \
     "$HOME/ksm_mvp_real_ws/install" \
     "$HOME/work/ksm_mvp_real_ws/install" \
-    "/opt/ksm_mvp_real/install" \
+    "$HOME"/work/*/ksm_mvp_real_ws/install \
+    "$HOME"/*/ksm_mvp_real_ws/install \
+    "$(dirname "$_misa_root")"/ksm_mvp_real_ws/install \
+    /opt/ksm_mvp_real/install \
     "$_misa_root/ref/ksm_mvp_real_ws/install"
   do
-    [ -d "$_cand" ] && KSM_WS="$_cand" && break
+    [ -d "$_cand/share/low_command_msgs" ] && KSM_WS="$_cand" && break
   done
 fi
 

@@ -385,6 +385,7 @@ misa-run dump --robot robots/namiashi.toml --gait trot --vx 0.1 --secs 10 --reco
 | 可動域クランプ | `motors[].min_rad` / `max_rad` | HAL が指令を必ず内側へ丸める |
 | 異常ビット監視 | `legs.status_interval_ms`（既定 1 s） | 過電流・過熱・ストールを検出して ERROR ログ |
 | 受信断 | `control.teleop_timeout_ms` | 速度 0・その場起立 |
+| 傾きの監視 | `control.max_tilt_rad`（省略時は姿勢指令の上限 + 0.3 rad） | 鉛直から傾きすぎたら ERROR ログ（**脱力はしない**） |
 | Ctrl-C / SIGTERM | — | 全軸を脱力してから終了 |
 
 **スルーレート制限と軸の速度上限は別物。** 前者は「目標が何 rad/s で動くか」、
@@ -394,6 +395,16 @@ misa-run dump --robot robots/namiashi.toml --gait trot --vx 0.1 --secs 10 --reco
 **異常ビットで自動脱力はしない。** 立っている四足を脱力させると倒れるので、
 ERROR を毎回はっきり出したうえで、止めるかどうかは operator がモード
 スイッチで決める。
+
+**傾きの監視も同じ扱い**（報告するだけ）。**接地センサが無い機体では、転倒に
+近づいたことを知る手がかりが IMU の姿勢角しかない。** 測るのは鉛直からの傾き
+（`cos θ = cos roll · cos pitch`）で、roll と pitch の和ではない — 足すと斜めに
+傾いたときに過大評価になる。しきい値を固定値にせず
+`gait.body_attitude_max_rad + 0.3 rad`（最低 0.5 rad）から導くのは、**意図して
+傾ける量が機体ごとに違う**から（namiashi 0.6 → 0.9 rad、keel 0.20 → 0.50 rad）。
+指令どおり傾けただけで報告が出ると、本当の転倒と区別が付かなくなる。
+報告は立ち上がりだけで、戻ったら INFO を 1 行出す。`replay` が「傾き超過」の
+周期数と最大値を数える。
 
 ## 動作モード
 

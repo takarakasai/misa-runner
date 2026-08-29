@@ -138,6 +138,17 @@ impl AppConfig {
         toml::to_string_pretty(self).map_err(|e| format!("TOML の生成に失敗: {e}"))
     }
 
+    /// 傾きを報告するしきい値 [rad]。`0` なら無効。
+    ///
+    /// 省略時は**意図して傾ける量 + 0.3 rad**（最低 0.5 rad = 29°）。
+    /// `sim` が転倒と判定するのは 1 rad なので、その内側で先に声を上げる。
+    pub fn max_tilt_rad(&self) -> f64 {
+        match self.control.max_tilt_rad {
+            Some(v) => v,
+            None => (self.gait.body_attitude_max_rad + 0.3).max(0.5),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         // **名前はファイル名になる。** flock と目印のパスに入るので、
         // `/` や `..` が混ざると別のディレクトリを触りに行く。
@@ -181,6 +192,23 @@ impl AppConfig {
             || self.gait.max_wz_rad_s <= 0.0
         {
             return Err("gait の速度上限は正の値が必要です".into());
+        }
+        // **傾きの報告は、意図して傾ける量より外側でしか意味を持たない。**
+        // 指令どおり傾けただけで「転倒しかけ」と出ると、本当の転倒と
+        // 区別が付かなくなり、そのうち誰も読まなくなる。省略時は導出値なので
+        // この矛盾は起こらない。明示的に書いたときだけ突き合わせる。
+        if let Some(v) = self.control.max_tilt_rad {
+            if v < 0.0 {
+                return Err("control.max_tilt_rad は 0 以上（0 で無効）".into());
+            }
+            if v > 0.0 && v <= self.gait.body_attitude_max_rad {
+                return Err(format!(
+                    "control.max_tilt_rad ({}) が gait.body_attitude_max_rad ({}) 以下です。\
+                     指令どおり傾けただけで転倒と報告されるので、姿勢の上限より\
+                     大きく取ってください",
+                    v, self.gait.body_attitude_max_rad
+                ));
+            }
         }
         Ok(())
     }
@@ -262,6 +290,23 @@ pub struct ControlConfig {
     /// S.BUS が途絶えたとみなすまでの時間 (ms)。
     #[serde(default = "default_teleop_timeout_ms")]
     pub teleop_timeout_ms: u64,
+    /// 胴体がこれ以上傾いたら「転倒しかけている」と報告する [rad]。`0` で無効。
+    ///
+    /// **報告だけで、自動では脱力しない。** 荷重がかかった四足を勝手に
+    /// 脱力させると崩れるので、止めるかどうかは operator が決める（受信断や
+    /// 異常ビットと同じ方針）。**接地センサが無い機体では、転倒に近づいた
+    /// ことを知る手がかりが IMU の姿勢角しかない。**
+    ///
+    /// 測るのは鉛直からの傾き（`cos θ = cos roll · cos pitch`）で、roll と
+    /// pitch の和ではない。
+    ///
+    /// **省略時は `gait.body_attitude_max_rad + 0.3`（最低 0.5）** を使う
+    /// （[`AppConfig::max_tilt_rad`]）。固定値にしないのは、**意図して傾ける
+    /// 量が機体ごとに違う**から — namiashi は 0.6 rad まで傾けるので 0.5 の
+    /// 固定値だと指令どおり傾けただけで転倒扱いになり、keel は 0.20 rad なので
+    /// 0.9 では倒れてから気づくことになる。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tilt_rad: Option<f64>,
 }
 
 fn default_model_path() -> String {
@@ -285,6 +330,7 @@ fn default_teleop_timeout_ms() -> u64 {
     100
 }
 
+
 impl Default for ControlConfig {
     fn default() -> Self {
         Self {
@@ -298,6 +344,8 @@ impl Default for ControlConfig {
             zero_multiturn_on_boot: false,
             kinematics_pose: default_kinematics_pose(),
             teleop_timeout_ms: default_teleop_timeout_ms(),
+            // 省略 = 姿勢指令の上限から導く（`AppConfig::max_tilt_rad`）。
+            max_tilt_rad: None,
         }
     }
 }
@@ -592,6 +640,63 @@ FL_hip_joint = 0.0
         );
         // 制御周期の上限はバスの周期ではなく向こうが決める。
         assert_eq!(cfg.hardware.max_control_rate_hz(), None);
+    }
+
+    /// **傾きのしきい値は機体ごとに違う。** 固定値にすると、意図して
+    /// 大きく傾ける機体（namiashi は 0.6 rad）で指令どおりの姿勢が転倒扱いに
+    /// なり、あまり傾けない機体（keel は 0.20 rad）では倒れてから気づく。
+    /// 姿勢指令の上限（と、明示的な傾きのしきい値）だけを差し替えた設定。
+    fn tilt_cfg(attitude_max_rad: f64, max_tilt_rad: Option<f64>) -> AppConfig {
+        AppConfig {
+            control: ControlConfig {
+                max_tilt_rad,
+                ..Default::default()
+            },
+            gait: GaitTuning {
+                body_attitude_max_rad: attitude_max_rad,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_tilt_limit_is_derived_from_how_far_the_body_is_tilted_on_purpose() {
+        assert!((tilt_cfg(0.20, None).max_tilt_rad() - 0.50).abs() < 1e-12, "keel");
+        assert!((tilt_cfg(0.6, None).max_tilt_rad() - 0.9).abs() < 1e-12, "namiashi");
+        // 姿勢を振らない機体でも 0.5 rad を下回らない。
+        assert!((tilt_cfg(0.0, None).max_tilt_rad() - 0.5).abs() < 1e-12);
+        // 導出値は必ず姿勢指令の上限より外側。
+        for max in [0.0, 0.1, 0.2, 0.6, 1.0] {
+            assert!(tilt_cfg(max, None).max_tilt_rad() > max, "{max}");
+        }
+    }
+
+    /// 明示的に書いた値が姿勢指令の上限以下なら、設定として認めない。
+    #[test]
+    fn a_tilt_limit_inside_the_attitude_command_is_rejected() {
+        let e = tilt_cfg(0.6, Some(0.5)).validate().expect_err("弾かれていない");
+        assert!(e.contains("max_tilt_rad"), "{e}");
+        // 0 は「無効にする」なので通る。
+        let off = tilt_cfg(0.6, Some(0.0));
+        off.validate().expect("0 は無効化として認める");
+        assert_eq!(off.max_tilt_rad(), 0.0);
+    }
+
+    /// 同梱のプロファイル 2 枚とも、導出値が姿勢指令の外側にある。
+    #[test]
+    fn every_shipped_profile_reports_a_tilt_beyond_its_attitude_command() {
+        for name in ["namiashi", "keel"] {
+            let path = format!("{}/../../robots/{name}.toml", env!("CARGO_MANIFEST_DIR"));
+            let text = std::fs::read_to_string(&path).expect("プロファイルが読めません");
+            let cfg = AppConfig::from_toml(&text).expect("プロファイルが読めない");
+            assert!(
+                cfg.max_tilt_rad() > cfg.gait.body_attitude_max_rad,
+                "{name}: 傾きの報告 {} が姿勢指令の上限 {} の内側",
+                cfg.max_tilt_rad(),
+                cfg.gait.body_attitude_max_rad
+            );
+        }
     }
 
     #[test]

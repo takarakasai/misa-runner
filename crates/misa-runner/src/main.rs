@@ -211,10 +211,19 @@ fn replay(cli: &Cli) -> Result<(), String> {
                 .filter(|f| f.verdict.held_for_stale_observation)
                 .count();
             let faulted = frames.iter().filter(|f| !f.verdict.faulted.is_empty()).count();
+            // 傾きは丸めていないので「丸めた周期」には入らない。別に数える。
+            let tilted = frames.iter().filter(|f| f.verdict.tilt_rad.is_some()).count();
             println!("  可動域      {clamped}");
             println!("  スルーレート {limited}");
             println!("  観測が古い  {held}");
             println!("  異常ビット  {faulted}");
+            if tilted > 0 {
+                let worst = frames
+                    .iter()
+                    .filter_map(|f| f.verdict.tilt_rad)
+                    .fold(0.0f64, f64::max);
+                println!("傾き超過      {tilted} 周期（最大 {:.0}°）", worst.to_degrees());
+            }
             Ok(())
         }
         [a, b] => {

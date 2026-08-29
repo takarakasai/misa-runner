@@ -614,6 +614,16 @@ pub fn check(cfg: &AppConfig) -> Result<(), String> {
             Err(e) => println!("**MIT ゲインが不正です**（run は起動しません）: {e}"),
         }
     }
+    // **接地センサが無い機体では、転倒に近づいたことを知る手がかりが
+    // 姿勢角しかない。** 有効かどうかを実機の前に見せる。
+    if cfg.max_tilt_rad() > 0.0 {
+        println!(
+            "傾きの報告: {:.0}° 超で ERROR（自動では脱力しません）",
+            cfg.max_tilt_rad().to_degrees()
+        );
+    } else {
+        println!("傾きの報告: 無効（control.max_tilt_rad = 0）");
+    }
     // **当たり判定のメッシュが落ちていたら、動力学の結果は当てにならない。**
     // 落ちたリンクは何にも当たらなくなるので、`sim` は止まる。ここは知らせるだけ。
     if !robot.bad_meshes.is_empty() {

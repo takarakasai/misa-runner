@@ -499,6 +499,9 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
     let mut controller = Controller::with_arm(robot, cfg.clone(), arm_app_driven);
 
     let mut last_verdict_clean = true;
+    // 傾きの報告は**立ち上がりだけ**。毎周期出すと、倒れたあと床で
+    // 転がっている間ずっと埋まる。
+    let mut tilt_reported = false;
     let mut publisher = open_viz(&opts.viz)?;
     let started = Instant::now();
     let mut motors_enabled = false;
@@ -643,6 +646,28 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
                     }
                 );
             }
+        }
+
+        // **傾きは丸めとは別に報告する。** 接地センサが無いので、転倒に
+        // 近づいたことを知る手がかりは姿勢角しかない。**自動では脱力しない**
+        // （立っている四足を脱力させると崩れる）ので、止めるかどうかは
+        // operator が決める。
+        match (verdict.tilt_rad, tilt_reported) {
+            (Some(tilt), false) => {
+                tilt_reported = true;
+                log::error!(
+                    "**胴体が {:.0}° 傾いています**（上限 {:.0}°）。\
+                     転倒しかけているかもしれません。自動では脱力しません — \
+                     脱力させるか電源を切るかは operator が決めてください",
+                    tilt.to_degrees(),
+                    cfg.max_tilt_rad().to_degrees()
+                );
+            }
+            (None, true) => {
+                tilt_reported = false;
+                log::info!("胴体の傾きが上限の内側へ戻りました");
+            }
+            _ => {}
         }
 
         // 記録は**実機へ出した指令**（丸めたあと）と、それを計算するのに

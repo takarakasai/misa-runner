@@ -184,6 +184,7 @@ pub fn safety_config(
         max_observation_age: std::time::Duration::from_secs_f64(
             control_period_s * stale_ticks.max(1.0),
         ),
+        max_tilt_rad: cfg.max_tilt_rad(),
     }
 }
 

@@ -64,21 +64,59 @@ echo "── 3. apt パッケージ ──────────────�
 PKGS=(build-essential pkg-config git curl libudev-dev python3-colcon-common-extensions)
 missing=()
 for p in "${PKGS[@]}"; do
-  if dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed"; then
-    ok "$p"
-  else
-    missing+=("$p"); bad "$p が入っていません"
-  fi
+  # **`... | grep -q` を判定に使わないこと。** `pipefail` を張ってあるので、
+  # grep が最初の一致で抜けた拍子に上流が SIGPIPE で死ぬと、パイプライン全体が
+  # 141（失敗）になる。**入っているのに「入っていない」と言う日が出る。**
+  # いったん変数に取ってから中身を見る。
+  st="$(dpkg-query -W -f='${Status}' "$p" 2>/dev/null)"
+  case "$st" in
+    *"install ok installed"*) ok "$p" ;;
+    *) missing+=("$p"); bad "$p が入っていません" ;;
+  esac
 done
 # **libclang は「パッケージ名」ではなく「dlopen できるか」で見る。** r2r は
 # bindgen で rcl の束縛を作り、bindgen は clang-sys が実行時に探した
 # libclang を使う。`libclang-dev`（libclang.so 付き）でも
 # `libclang1-<N>`（libclang-<N>.so.<N> だけ）でも通るので、パッケージ名で
 # 判定すると入っているのに「無い」と言うことになる。
-if ldconfig -p 2>/dev/null | grep -qE "libclang(-[0-9]+)?\.so"; then
-  ok "libclang（$(ldconfig -p | grep -oE "libclang(-[0-9]+)?\.so[^ ]*" | head -1)）"
-else
+#
+# **ここも `| grep -q` では駄目**（上と同じ SIGPIPE の罠）。ld.so.cache が
+# 大きい機体（Jetson など）では、キャッシュの前寄りに libclang があると grep が
+# 先に抜けて ldconfig が SIGPIPE で死に、**同じ機体で見つかったり見つからなかったり
+# する**。2026-09-03 に実際にこれを踏んだ。
+ldcache="$(ldconfig -p 2>/dev/null)"
+libclang_so=""
+if [[ "$ldcache" =~ libclang(-[0-9]+)?\.so[^[:space:]]* ]]; then
+  libclang_so="${BASH_REMATCH[0]}"
+fi
+# **`.so` だけでは足りない。** bindgen は clang の組み込みヘッダ
+# （resource dir の stdbool.h / stddef.h など）も読む。`libclang1-<N>` は
+# ライブラリだけなので、それだけの機体では ROS のヘッダを開いた先で
+#
+#   /opt/ros/humble/include/rcutils/rcutils/allocator.h:25:10:
+#     fatal error: 'stdbool.h' file not found
+#
+# と落ちる（2026-09-03 に機体で踏んだ）。**組み込みヘッダは別パッケージ**
+# （libclang-common-<N>-dev。`libclang-dev` か `clang` を入れると付いてくる）。
+clang_hdr=""
+if command -v clang >/dev/null 2>&1; then
+  rd="$(clang -print-resource-dir 2>/dev/null)"
+  [ -n "$rd" ] && [ -f "$rd/include/stdbool.h" ] && clang_hdr="$rd/include"
+fi
+if [ -z "$clang_hdr" ]; then
+  for h in /usr/lib/llvm-*/lib/clang/*/include/stdbool.h /usr/lib/clang/*/include/stdbool.h; do
+    [ -f "$h" ] && clang_hdr="$(dirname "$h")" && break
+  done
+fi
+if [ -z "$libclang_so" ]; then
   missing+=(libclang-dev); bad "libclang が見つかりません（bindgen が動きません）"
+elif [ -z "$clang_hdr" ]; then
+  missing+=(libclang-dev)
+  bad "libclang（$libclang_so）はあるが、clang の組み込みヘッダがありません"
+  echo "     bindgen が stdbool.h を開けず r2r_rcl のビルドスクリプトが落ちます"
+else
+  ok "libclang（$libclang_so）"
+  ok "clang 組み込みヘッダ（$clang_hdr）"
 fi
 if [ ${#missing[@]} -gt 0 ]; then
   echo
@@ -117,6 +155,10 @@ if [ -n "${KSM_WS:-}" ] && [ -d "${KSM_WS}/share/low_command_msgs" ]; then
   ok "low_command_msgs / low_state_msgs: $KSM_WS"
 else
   bad "ブリッジの ws が見つかりません。KSM_WS=<ksm_mvp_real_ws>/install を指定"
+  # 自動探索が外したときは、機体を軽く掘って候補を出す（$HOME 5 階層まで）。
+  while IFS= read -r hit; do
+    [ -n "$hit" ] && echo "     候補: KSM_WS=${hit%/share/low_command_msgs}"
+  done <<<"$(find "$HOME" /opt -maxdepth 6 -type d -path '*/share/low_command_msgs' 2>/dev/null | head -3)"
 fi
 for m in sensor_msgs geometry_msgs; do
   found=0
@@ -145,6 +187,54 @@ else
 fi
 
 echo
+echo "── 7. コピー由来の残り物 ──────────────"
+# **PC からツリーごとコピーしてきた場合、colcon と cargo の成果物も付いてくる。**
+# どちらも .gitignore 対象なので clone では来ないが、rsync や scp では来る。
+# 別の distro / 別の arch で作ったものが混ざると、原因の分かりにくい失敗になる。
+cache="ros/build/misa_msgs/CMakeCache.txt"
+if [ -f "$cache" ]; then
+  built_distro="$(grep -oE '/opt/ros/[a-z]+' "$cache" | head -1 | cut -d/ -f4)"
+  if [ -n "$built_distro" ] && [ "$built_distro" != "${ROS_DISTRO:-}" ]; then
+    bad "misa_msgs が $built_distro でビルドされています（いまは ${ROS_DISTRO:-未設定}）"
+    echo "     rm -rf ros/build ros/install ros/log     # 作り直す"
+  else
+    ok "misa_msgs のビルドは ${built_distro:-?} 由来"
+  fi
+elif [ -d ros/install/misa_msgs ]; then
+  warn "ros/install/misa_msgs はあるが ros/build が無い（コピー物の可能性）。作り直すのが安全:"
+  echo "     rm -rf ros/build ros/install ros/log"
+fi
+# ELF の e_machine（18 バイト目から 2 バイト）で arch を見る。file(1) に頼らない。
+if [ -f target/release/misa-run ]; then
+  em="$(od -An -t x1 -j18 -N2 target/release/misa-run | tr -d ' \n')"
+  here="$(uname -m)"
+  case "$em:$here" in
+    b700:aarch64|3e00:x86_64) ok "target/ は $here 向け" ;;
+    *) warn "target/release/misa-run が別の arch のようです（e_machine=$em / いまは $here）"
+       echo "     cargo clean     # 混ぜたままでも作り直されるが、無駄と紛れの元" ;;
+  esac
+fi
+# dev-siblings.sh の [patch] が付いてくると、兄弟の無い機体でビルドが落ちる。
+if [ -f .cargo/config.toml ] && grep -q '^\[patch' .cargo/config.toml; then
+  miss=0
+  while IFS= read -r ppath; do
+    [ -d "$ppath" ] || miss=$((miss+1))
+  done <<<"$(grep -oE 'path = "[^"]+"' .cargo/config.toml | cut -d'"' -f2)"
+  if [ "$miss" -gt 0 ]; then
+    # **警告では済まない。** 2026-09-03 に機体で踏んだ:
+    #   error: failed to load source for dependency `articara`
+    #   unable to update /home/keel/work/20260903/articara
+    # `[patch]` の指す先が無いと、その crate を使うかどうかに関係なく
+    # 解決の段で止まる。コピーで持ち込んだツリーで必ず踏む。
+    bad ".cargo/config.toml の [patch] が無いパスを指しています（$miss 件）"
+    echo "     rm -f .cargo/config.toml            # PC の [patch] を捨てる"
+    echo "     ./scripts/dev-siblings.sh --off     # でも同じ（生成物を消す）"
+  else
+    warn ".cargo/config.toml の [patch] が有効です（ローカルの兄弟を見ます）"
+  fi
+fi
+
+echo
 if [ "$DO_BUILD" != 1 ]; then
   echo "前提の確認だけ終わりました（NG $fail 件）。ビルドまで進めるなら --build"
   [ "$fail" -gt 0 ] && exit 1
@@ -152,14 +242,14 @@ if [ "$DO_BUILD" != 1 ]; then
 fi
 [ "$fail" -gt 0 ] && { echo "NG が $fail 件あるのでビルドしません"; exit 1; }
 
-echo "── 7. misa_msgs ────────────────────────"
+echo "── 8. misa_msgs ────────────────────────"
 ( cd ros && colcon build --packages-select misa_msgs ) || exit 1
 # 生成物のパスが変わるので環境を張り直す。
 # shellcheck source=/dev/null
 source scripts/realbot-env.sh || exit 1
 
 echo
-echo "── 8. misa-run ─────────────────────────"
+echo "── 9. misa-run ─────────────────────────"
 feat=(--features ros2)
 [ "$LEAN" = 1 ] && feat=(--no-default-features --features ros2)
 jobs_arg=()
@@ -168,7 +258,7 @@ echo "  cargo build --release ${feat[*]} ${jobs_arg[*]}"
 cargo build --release "${feat[@]}" "${jobs_arg[@]}" || exit 1
 
 echo
-echo "── 9. check ────────────────────────────"
+echo "── 10. check ──────────────────────────"
 ./target/release/misa-run check --robot robots/keel.toml || exit 1
 
 cat <<'NEXT'

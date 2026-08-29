@@ -16,8 +16,26 @@ source /opt/ros/humble/setup.bash
 ./scripts/setup-realbot.sh --apt --build
 ```
 
-**この文書と `setup-realbot.sh` は、まだ humble / aarch64 で走らせていない**
-（確認したのは PC の jazzy / x86_64）。§9 に何が未確認かを書いてある。
+**機体で確かめた環境**（2026-09-03、`setup-realbot.sh` の出力）:
+
+```
+aarch64 / Linux 5.15.185-rt-tegra / 8 コア / RAM 61.4 GiB / 空き 1.7 TiB
+ROS 2 humble / rustc 1.98.0 / libclang-14.so.13
+build-essential pkg-config git curl libudev-dev colcon すべて既存
+```
+
+RAM が 61 GiB あるので `--jobs` を絞る必要はない（§5）。**カーネルが PREEMPT_RT** なのは namiashi の
+radxa と違う点で、`run` のジッタを詰める段で効く（§7）。
+
+**ビルドは機体で通った**（2026-09-03、`--features ros2`）。ただし前提のうち
+2 つは足りず、手当てが要った:
+
+- **`libclang-dev`** — `libclang1-14` だけでは bindgen が `stdbool.h` を
+  開けない（§1）
+- **`.cargo/config.toml` を消す** — PC からコピーしたツリーに `[patch]` が
+  付いてきて、cargo が解決の段で止まる（§2）
+
+ブリッジとの実通信（`bridge` / `run`）はまだ。未確認は §9。
 
 ---
 
@@ -64,11 +82,32 @@ serialport はビルドされる**（`libudev-dev` が要るのはこのため�
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ```
 
-**libclang は apt のパッケージ名で判定しないこと。** `r2r` は bindgen で
-`rcl` の束縛を作り、bindgen は `clang-sys` が実行時に探した libclang を使う。
-`libclang-dev` でも `libclang1-<N>` でも通るので、`libclang-dev` の有無で
-見ると「入っているのに無い」と言うことになる（この PC がまさにその状態で、
-`libclang1-18` だけでビルドは通っている）。
+**libclang は 2 つ揃って初めて足りる。** `r2r` は bindgen で `rcl` の束縛を
+作るので、
+
+1. **共有ライブラリ** — `clang-sys` が実行時に dlopen する
+   （`libclang-dev` でも `libclang1-<N>` でも可）
+2. **clang の組み込みヘッダ** — resource dir の `stdbool.h` / `stddef.h` など。
+   **`libclang1-<N>` には入っていない**（`libclang-common-<N>-dev`。
+   `libclang-dev` か `clang` を入れると付いてくる）
+
+1 だけの機体では、ROS のヘッダを開いた先でこう落ちる（2026-09-03 に踏んだ）:
+
+```
+/opt/ros/humble/include/rcutils/rcutils/allocator.h:25:10:
+  fatal error: 'stdbool.h' file not found
+thread 'main' panicked at r2r_rcl-0.9.5/build.rs:100:10:
+  Unable to generate bindings: ClangDiagnostic(...)
+```
+
+```sh
+sudo apt-get install -y libclang-dev      # 両方入る
+clang -print-resource-dir                 # 組み込みヘッダの場所
+```
+
+判定を apt のパッケージ名でやらないのはこのため（`libclang1-18` だけの PC でも
+`ldconfig` には出る）。`setup-realbot.sh` は **`ldconfig` と
+`clang -print-resource-dir` の両方**を見る。
 
 ---
 
@@ -83,6 +122,30 @@ cd misa-runner
 **keel には要らない**。付けても害はないので付けておく。
 
 `Cargo.lock` を追跡しているので、実機は PC とまったく同じ revision を引く。
+**逆に、`Cargo.lock` が指す revision が push されていないと実機だけ落ちる**
+（`failed to load source` / `object not found`）。PC で兄弟クレートを直した
+直後に実機をビルドするなら、その push を先に済ませること。
+
+コピーで持ち込んだツリーには `ros/build` `ros/install` `target/`
+`.cargo/config.toml` が付いてくる（どれも `.gitignore` 対象なので clone では
+来ない）。**別の distro / 別の arch で作ったものが混ざる**ので、
+`setup-realbot.sh` の §7 が点検する。作り直すのが安全:
+
+```sh
+rm -rf ros/build ros/install ros/log     # misa_msgs を humble で作り直す
+cargo clean                              # x86_64 の成果物を捨てる
+rm -f .cargo/config.toml                 # PC の [patch] を持ち込まない
+```
+
+**`.cargo/config.toml` は必ず消すこと。** `dev-siblings.sh` が書く `[patch]` は
+PC のローカルパスを指しているので、機体では解決の段で止まる（**使っていない
+crate でも止まる**）:
+
+```
+error: failed to load source for dependency `articara`
+  unable to update /home/keel/work/20260903/articara
+  No such file or directory (os error 2)
+```
 
 ---
 
@@ -224,7 +287,13 @@ memory と `handover.md` にあるが、keel について要点だけ:
 - **`start_pose` / `rest_pose` = `crouch`** は IK で作った姿勢。**実機の電源
   投入姿勢と違うなら直す。** 脱力からの遷移はここを始点に張るので、食い違うと
   実機では起こらない軌道が出る。
-- **接地センサが無い**（`has_contacts: false`）。転倒検知も接地推定もできない。
+- **接地センサが無い**（`has_contacts: false`）。接地推定もしていない。歩容は
+  接地を入力に取らないので位置制御で歩くところまでは成立するが、早着地・
+  遅離地の吸収と脚オドメトリは無い。
+- **転倒の手がかりは IMU の姿勢角だけ。** 鉛直から `control.max_tilt_rad`
+  （keel は導出値 0.50 rad = 29°）を超えたら `run` が ERROR を出す。
+  **自動では脱力しない** — 荷重がかかった四足を脱力させると崩れるので、
+  止めるかどうかは operator が決める。実効値は `check` が出す。
 - 歩容は開ループ。
 
 RT 優先度（`chrt`）は**立ち上げ中は使わない** — 暴走したプロセスを殺しにくく
@@ -247,8 +316,10 @@ PC で直して push、実機は `git pull && cargo build` が筋。
 
 | 件 | 状態 |
 |---|---|
-| humble でのビルド | **未確認。** 手元は jazzy / rolling しかない。r2r 0.9.5 の対応 distro に humble は入っている（`SUPPORTED_ROS_DISTROS`）ので、落ちるとしても distro の外ではなく msg 側の差分 |
-| aarch64 でのビルド | **未確認。** 依存に arch 依存の native crate は `ring` / `libudev-sys` / `bindgen` だけで、いずれも aarch64 で通るはず |
+| 機体の前提（apt / rust / libclang / ROS） | ✅ 2026-09-03 に機体で確認。`libclang-dev` の追加が要った |
+| humble / aarch64 でのビルド | ✅ **2026-09-03 に機体で通った**（`--features ros2`、misa_msgs は humble で 10.5 秒）。所要時間は未計測 |
+| ブリッジの ws の場所 | ✅ `misa-runner` の隣（`../ksm_mvp_real_ws/install`）。自動探索が拾う |
+| モデルの置き方 | 機体には rsync で `../keel/model/...` に置いた（§4 の a）。**リポジトリには同梱していないので、機体を作り直すとまた要る** |
 | `IDL_PACKAGE_FILTER` を絞ったビルド | ✅ PC で確認（`--features ros2` が 2 分 55 秒で通り、`check` も通る） |
 | ブリッジとの実通信 | ❌ **一度もしていない。** `bridge` も `run` も実機では未実行 |
-| RMW / `ROS_DOMAIN_ID` | ブリッジ側の設定を確認していない。`colcon_defaults.yaml` にも launch にも指定は無く、既定（fastrtps / 0）と思われる |
+| RMW / `ROS_DOMAIN_ID` | 機体は **`ROS_DOMAIN_ID=100`**（2026-09-03 の出力）。RMW は既定のまま。**ブリッジ側が同じ 100 かは未確認** — `/low_state` が見えなければまずここ |

@@ -63,6 +63,16 @@ pub struct SafetyConfig {
     pub axes: Vec<AxisLimits>,
     /// 観測がこれより古ければ、目標を進めるのをやめて現状を保持する。
     pub max_observation_age: Duration,
+    /// 胴体がこれ以上傾いたら「転倒しかけている」と報告する [rad]。`0` で無効。
+    ///
+    /// **報告だけで、指令には触らない**（[`SafetyGate::apply`] を見よ）。
+    /// 接地センサが無い機体では、転倒に近づいたことを知る唯一の手がかりが
+    /// IMU の姿勢角になる。
+    ///
+    /// **胴体を意図的に傾ける量（`gait.body_attitude_max_rad`）より大きく
+    /// 取ること。** 指令どおり傾いただけで報告が出ると、本当の転倒と
+    /// 区別が付かなくなる。
+    pub max_tilt_rad: f64,
 }
 
 /// この周期で何をしたか。**記録に残して後から説明するためのもの。**
@@ -78,10 +88,20 @@ pub struct SafetyVerdict {
     pub held_for_stale_observation: bool,
     /// 異常ビットが立っている軸。**指令には触っていない。**
     pub faulted: Vec<AxisId>,
+    /// 傾きが `max_tilt_rad` を超えていれば、その傾き [rad]。
+    ///
+    /// **指令には触っていない。** 超えていない・IMU が無い・値が古いときは
+    /// `None`。「傾いていない」と「分からない」を潰さないため。
+    pub tilt_rad: Option<f64>,
 }
 
 impl SafetyVerdict {
     /// 何かに手を入れたか。ログを間引くのに使う。
+    ///
+    /// **`tilt_rad` はここに入れない。** この関数は「丸めたかどうか」の
+    /// 間引きに使われていて、傾きは軸ごとの丸めとは重みも寿命も違う
+    /// （転倒は 1 回出れば operator が動く話で、可動域に当たり続けている
+    /// のとは扱いが別）。runner 側で独立に立ち上がりだけ報告する。
     pub fn is_clean(&self) -> bool {
         self.clamped.is_empty()
             && self.rate_limited.is_empty()
@@ -137,6 +157,12 @@ impl SafetyGate {
             v.faulted.push(id);
         }
 
+        // **転倒しかけていても指令には触らない。** 異常ビットと同じ理由で、
+        // 荷重がかかった四足を勝手に脱力させると崩れる。報告して operator の
+        // 判断に委ねる。接地センサが無い機体では、これが転倒に近づいたことを
+        // 知る唯一の手がかりになる。
+        v.tilt_rad = self.tilt_exceeded(obs);
+
         let n = cmd.len().min(self.cfg.axes.len()).min(obs.len());
         for i in 0..n {
             let id = AxisId::new(i as u16);
@@ -184,6 +210,30 @@ impl SafetyGate {
         }
         v
     }
+
+    /// 傾きが上限を超えていれば、その傾き [rad]。
+    ///
+    /// **測るのは「鉛直からの傾き」で、roll と pitch の和ではない。**
+    /// 足すと斜めに倒れかけたときに過大評価になる（roll = pitch = 0.3 なら
+    /// 和は 0.6 rad だが、胴体の z 軸が鉛直から離れた角は 0.42 rad）。
+    /// 胴体 z 軸と鉛直のなす角は `cos θ = cos roll · cos pitch`。
+    ///
+    /// yaw は見ない。**向きが変わっても倒れてはいない。**
+    fn tilt_exceeded(&self, obs: &Observation) -> Option<f64> {
+        if self.cfg.max_tilt_rad <= 0.0 {
+            return None;
+        }
+        let imu = obs.imu?;
+        // **古い姿勢角で判断しない。** 止まった値が閾値の外側で固まると、
+        // 実際には戻っているのに報告が出続ける（逆に、倒れる瞬間の値を
+        // 見落とすほうは `max_observation_age` の側で捕まる）。
+        if imu.age > self.cfg.max_observation_age {
+            return None;
+        }
+        let [roll, pitch, _yaw] = imu.rpy_rad;
+        let tilt = (roll.cos() * pitch.cos()).clamp(-1.0, 1.0).acos();
+        (tilt > self.cfg.max_tilt_rad).then_some(tilt)
+    }
 }
 
 #[cfg(test)]
@@ -197,6 +247,7 @@ mod tests {
     fn gate(limits: AxisLimits, n: usize) -> SafetyGate {
         SafetyGate::new(SafetyConfig {
             axes: vec![limits; n],
+            max_tilt_rad: 0.5,
             max_observation_age: Duration::from_millis(100),
         })
     }
@@ -208,6 +259,15 @@ mod tests {
             a.position_rad = position_rad;
             a.health.valid = true;
         }
+        o
+    }
+
+    /// 傾いた IMU を載せた観測。`age` は新しいまま。
+    fn with_tilt(mut o: Observation, roll: f64, pitch: f64) -> Observation {
+        o.imu = Some(crate::observation::Imu {
+            rpy_rad: [roll, pitch, 0.0],
+            ..Default::default()
+        });
         o
     }
 
@@ -358,5 +418,73 @@ mod tests {
         let mut cmd = position_cmd(2, 0.1);
         let v = g.apply(&mut cmd, &fresh_obs(2, 0.1), DT);
         assert!(v.is_clean(), "{v:?}");
+    }
+
+    /// **傾きを報告しても指令は 1 ビットも変わらない。**
+    ///
+    /// 立っている四足を勝手に脱力させると崩れる。止めるかどうかは
+    /// operator が決める（異常ビットと同じ扱い）。
+    #[test]
+    fn an_excessive_tilt_is_reported_without_touching_the_command() {
+        let mut g = gate(AxisLimits::UNLIMITED, 1);
+        let obs = with_tilt(fresh_obs(1, 0.0), 0.9, 0.0);
+        let mut cmd = position_cmd(1, 0.4);
+        let v = g.apply(&mut cmd, &obs, DT);
+        assert_eq!(cmd.get(AxisId::new(0)).unwrap().position_rad, 0.4);
+        assert!((v.tilt_rad.unwrap() - 0.9).abs() < 1e-9, "{:?}", v.tilt_rad);
+        // 丸めては**いない**ので、間引き用の判定は clean のまま。
+        assert!(v.is_clean());
+    }
+
+    #[test]
+    fn a_tilt_within_the_limit_is_not_reported() {
+        let mut g = gate(AxisLimits::UNLIMITED, 1);
+        let obs = with_tilt(fresh_obs(1, 0.0), 0.3, 0.0);
+        let mut cmd = position_cmd(1, 0.0);
+        assert_eq!(g.apply(&mut cmd, &obs, DT).tilt_rad, None);
+    }
+
+    /// **roll と pitch を足さない。** 足すと斜めの傾きを過大評価して、
+    /// 指令どおり傾けただけで転倒扱いになる。
+    #[test]
+    fn tilt_is_measured_from_vertical_not_by_summing_roll_and_pitch() {
+        let mut g = gate(AxisLimits::UNLIMITED, 1);
+        // roll = pitch = 0.3。和は 0.6 > 0.5 だが、鉛直からの傾きは 0.42。
+        let obs = with_tilt(fresh_obs(1, 0.0), 0.3, 0.3);
+        let mut cmd = position_cmd(1, 0.0);
+        assert_eq!(g.apply(&mut cmd, &obs, DT).tilt_rad, None);
+        let expect = (0.3f64.cos() * 0.3f64.cos()).acos();
+        assert!((0.42 - expect).abs() < 0.01, "{expect}");
+    }
+
+    /// IMU を積んでいない機体では**「傾いていない」ではなく「分からない」**。
+    #[test]
+    fn without_an_imu_there_is_nothing_to_report() {
+        let mut g = gate(AxisLimits::UNLIMITED, 1);
+        let mut cmd = position_cmd(1, 0.0);
+        assert_eq!(g.apply(&mut cmd, &fresh_obs(1, 0.0), DT).tilt_rad, None);
+    }
+
+    /// **古い姿勢角で判断しない。** 止まった値が閾値の外で固まると、
+    /// 戻っているのに報告が出続ける。
+    #[test]
+    fn a_stale_attitude_is_not_judged() {
+        let mut g = gate(AxisLimits::UNLIMITED, 1);
+        let mut obs = with_tilt(fresh_obs(1, 0.0), 0.9, 0.0);
+        obs.imu.as_mut().unwrap().age = Duration::from_millis(300);
+        let mut cmd = position_cmd(1, 0.0);
+        assert_eq!(g.apply(&mut cmd, &obs, DT).tilt_rad, None);
+    }
+
+    #[test]
+    fn a_zero_limit_disables_the_tilt_report() {
+        let mut g = SafetyGate::new(SafetyConfig {
+            axes: vec![AxisLimits::UNLIMITED; 1],
+            max_tilt_rad: 0.0,
+            max_observation_age: Duration::from_millis(100),
+        });
+        let obs = with_tilt(fresh_obs(1, 0.0), 1.4, 0.0);
+        let mut cmd = position_cmd(1, 0.0);
+        assert_eq!(g.apply(&mut cmd, &obs, DT).tilt_rad, None);
     }
 }
