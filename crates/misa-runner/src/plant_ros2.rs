@@ -419,7 +419,18 @@ pub fn diagnose(cfg: &AppConfig, seconds: Option<f64>) -> Result<(), String> {
     let mut seen = 0u64;
 
     println!("ブリッジの往復を確認します（指令は脱力のまま）");
-    println!("t[s]    受信   最古[ms]  異常  {}", layout.table.name(AxisId::new(0)).unwrap_or(""));
+    println!(
+        "**手で 1 関節ずつ動かして、名前と符号がこちらの想定と合うか見てください。**\n\
+         　膝を後ろへ畳む向きで calf が負、腿を後ろへ倒す向きで thigh が正。"
+    );
+    println!();
+    println!(
+        "t[s]    受信   最古[ms] 異常  {}",
+        ["FL", "FR", "RL", "RR"]
+            .iter()
+            .map(|l| format!("|{:<7}{:<7}{:<7}", format!("{l} hip"), "thigh", "calf"))
+            .collect::<String>()
+    );
 
     let started = Instant::now();
     while forever || Instant::now() < deadline {
@@ -439,9 +450,27 @@ pub fn diagnose(cfg: &AppConfig, seconds: Option<f64>) -> Result<(), String> {
                     )
                 })
                 .collect();
-            let q0 = obs.get(AxisId::new(0)).map(|a| a.position_rad).unwrap_or(f64::NAN);
+            // **脚 12 軸ぶんを並べる。** 1 軸だけでは名前と符号の突き合わせが
+            // できない。namiashi の `legs` と同じ役割をここが担う。
+            let q: String = (0..12)
+                .map(|i| {
+                    let v = obs
+                        .get(AxisId::new(i as u16))
+                        .filter(|a| a.health.valid)
+                        .map(|a| a.position_rad);
+                    let cell = match v {
+                        Some(v) => format!("{v:+.3} "),
+                        None => "  --   ".to_string(),
+                    };
+                    if i % 3 == 0 {
+                        format!("|{cell}")
+                    } else {
+                        cell
+                    }
+                })
+                .collect();
             println!(
-                "{:6.1}  {:5.1}%  {:8.1}  {:4}  {q0:+.4}",
+                "{:6.1}  {:5.1}%  {:8.1}  {:4} {q}",
                 started.elapsed().as_secs_f64(),
                 100.0 * seen as f64 / ticks.max(1) as f64,
                 obs.worst_age().as_secs_f64() * 1e3,
