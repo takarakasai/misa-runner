@@ -275,6 +275,9 @@ fn print_help() {
                             --record で毎周期を記録する（別スレッドで書く）
   sim    [--gait G] [--vx V] MuJoCo で動力学込みに回す（--features sim のビルド）
          [--secs S] [--kp K] [--kv K] [--base-height M] [--record PATH]
+         [--cam-fixed]             カメラを固定する（既定は胴体を追う）。
+                                   **地面が無地なので、追従だと歩いても
+                                   止まって見える。** 進んだことを見せる用
          [--friction MU]           接地摩擦（既定 0.7）。**足が滑ると歩容は
                                    成立しない。**「接地中の足の滑り」を見る
          [--timestep S]            物理の刻み [s]（既定 MuJoCo の 2 ms）
@@ -419,6 +422,8 @@ const VALUE_FLAGS: &[&str] = &[
     "cam-el",
     "cam-dist",
     "cam-z",
+    "cam-x",
+    "cam-y",
     "config",
     "secs",
     "gait",
@@ -466,6 +471,7 @@ const BOOL_FLAGS: &[&str] = &[
     "plain",
     "forever",
     "chicken",
+    "cam-fixed",
 ];
 
 impl Cli {

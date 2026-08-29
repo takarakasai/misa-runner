@@ -123,6 +123,15 @@ pub struct RenderOptions {
     pub distance: f64,
     /// 注視点の高さ [m]。
     pub look_z: f64,
+    /// 固定カメラの注視点 `[x, y]` [m]。追従カメラでは使わない。
+    /// **移動の中点に置く**と、始点も終点も画面に収まる。
+    pub look_xy: [f64; 2],
+    /// 胴体を追わずにその場に固定する。
+    ///
+    /// **地面が無地なので、追従カメラだと歩いても止まって見える。** 進んだ
+    /// ことを絵で見せたいときは固定にして、`distance` を移動量ぶん広く取る。
+    /// その代わり機体は小さくなるので、姿勢や脚の動きを見るときは追従のまま。
+    pub fixed: bool,
 }
 
 #[cfg(feature = "render")]
@@ -238,11 +247,15 @@ impl MujocoPlant {
         let body = model
             .body(&self.root_link)
             .ok_or_else(|| format!("胴体リンク {} がモデルにありません", self.root_link))?;
-        let mut cam = MjvCamera::new_tracking(body.id);
+        let mut cam = if opts.fixed {
+            MjvCamera::new_free(&model)
+        } else {
+            MjvCamera::new_tracking(body.id)
+        };
         cam.azimuth = opts.azimuth;
         cam.elevation = opts.elevation;
         cam.distance = opts.distance;
-        cam.lookat = [0.0, 0.0, opts.look_z];
+        cam.lookat = [opts.look_xy[0], opts.look_xy[1], opts.look_z];
         renderer.set_camera(cam);
 
         self.render = Some(Render {

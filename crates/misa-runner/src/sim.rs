@@ -159,6 +159,8 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                 // **機体の大きさで変える。** keel は namiashi より大きい。
                 distance: cli.f64("cam-dist").unwrap_or(1.6),
                 look_z: cli.f64("cam-z").unwrap_or(0.22),
+                look_xy: [cli.f64("cam-x").unwrap_or(0.0), cli.f64("cam-y").unwrap_or(0.0)],
+                fixed: cli.flag("cam-fixed"),
             })?;
             println!("MuJoCo の絵を {dir} へ {} fps で落とします", cli.f64("fps").unwrap_or(30.0));
             Some(cli.f64("fps").unwrap_or(30.0))
