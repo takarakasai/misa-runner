@@ -104,6 +104,56 @@ impl GaitSelect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PoseSlot(pub u8);
 
+/// 歩容パラメータの実行中の上書き。
+///
+/// **`None` はプロファイルの値のまま。** 操縦側が値を持つのは、実機でも
+/// シムでも「動かしながら詰める」のが歩容の直し方だから。歩容ごとに基準値が
+/// 違う（trot と walk で周期が違う）ので、**歩容を切り替えたら上書きは捨てる**
+/// のが呼び出し側の約束。
+///
+/// 範囲は [`GaitTune::clamped`] が持つ。**操縦側の刻みも制御側の丸めも同じ
+/// 定数を使う**ので、画面に出ている値と歩容に入る値がずれない。
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct GaitTune {
+    /// 1 周期の時間 [s]。**胴体の揺れをいちばん効かせる**（2 脚支持の時間が
+    /// 長いほど、そのあいだに支持脚の対角線まわりへ落ちる量が増える）。
+    pub cycle_period_s: Option<f64>,
+    /// 遊脚の頂点の高さ [m]。
+    pub swing_height_m: Option<f64>,
+    /// 歩幅の上限 [m]。**速度から決まる着地点をここで丸める**ので、これを
+    /// 下げると速度指令に届かなくなる。
+    pub step_length_m: Option<f64>,
+    /// 接地比 [0,1)。0.5 が trot、上げるほど接地している足が増える。
+    pub duty_factor: Option<f64>,
+}
+
+impl GaitTune {
+    /// 周期 [s] の範囲。
+    pub const CYCLE_S: (f64, f64) = (0.20, 2.00);
+    /// 遊脚高さ [m] の範囲。
+    pub const SWING_M: (f64, f64) = (0.0, 0.15);
+    /// 歩幅 [m] の範囲。
+    pub const STEP_M: (f64, f64) = (0.01, 0.40);
+    /// 接地比の範囲。
+    pub const DUTY: (f64, f64) = (0.30, 0.95);
+
+    /// 範囲へ丸める。**上書きしていない項目は上書きしていないまま。**
+    pub fn clamped(self) -> Self {
+        let c = |v: Option<f64>, (lo, hi): (f64, f64)| v.map(|x| x.clamp(lo, hi));
+        Self {
+            cycle_period_s: c(self.cycle_period_s, Self::CYCLE_S),
+            swing_height_m: c(self.swing_height_m, Self::SWING_M),
+            step_length_m: c(self.step_length_m, Self::STEP_M),
+            duty_factor: c(self.duty_factor, Self::DUTY),
+        }
+    }
+
+    /// 何も上書きしていないか。
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// 1 周期ぶんの意図。
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Intent {
@@ -131,6 +181,9 @@ pub struct Intent {
     pub aux_rad: Vec<Option<f64>>,
     /// 操縦入力が生きているか。false なら [`Self::failsafe`] を通す。
     pub link_ok: bool,
+    /// 歩容パラメータの上書き。**既定（すべて `None`）ではプロファイルの
+    /// 値がそのまま効く**ので、上書きを送らない操縦系の挙動は変わらない。
+    pub gait_tune: GaitTune,
 }
 
 impl Intent {
@@ -148,6 +201,9 @@ impl Intent {
     /// **モードは変えず、速度と姿勢要求だけを落とす。** 立っているなら
     /// 立ったまま、脱力なら脱力のまま。トリガも落とすのは、切れた瞬間の
     /// 立ち上がりを演出の開始と誤読しないため。
+    ///
+    /// **歩容パラメータの上書きは持ち越す。** 切れた瞬間に基準値へ戻すと、
+    /// 止まる途中で歩容の刻みが変わる（接地の予定と実際がずれる）。
     pub fn failsafe(&self) -> Self {
         Self {
             velocity: Velocity::ZERO,

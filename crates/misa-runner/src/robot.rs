@@ -156,11 +156,7 @@ impl Robot {
 
     /// 歩容コントローラを組み立てる。
     pub fn build_gait(&self, tuning: &GaitTuning, select: GaitSelect) -> AnyGaitController {
-        let mut cfg =
-            GaitConfig::for_type(gait_type_of(select)).with_swing_height(tuning.swing_height_m);
-        if let Some(period) = cycle_period_of(tuning, select) {
-            cfg = cfg.with_cycle_period(period);
-        }
+        let cfg = base_gait_config(tuning, select);
         let mode = gait_mode_of(select, tuning.crawl_use_linear);
         let mut ctrl =
             AnyGaitController::new(mode, cfg, self.kin_at_height(tuning.stance_height_m));
@@ -373,6 +369,60 @@ pub fn gait_mode_of(select: GaitSelect, crawl_use_linear: bool) -> GaitMode {
 /// 「実行中の高さ変更が効く」根拠にしてはいけない**（実際に取り違えた）。
 pub fn gait_supports_body_height(mode: GaitMode) -> bool {
     matches!(mode, GaitMode::LinearCrawl)
+}
+
+/// プロファイルから決まる、その歩容の基準となる [`GaitConfig`]。
+///
+/// **歩容ごとに基準が違う。** 周期は `trot_cycle_s` / `walk_cycle_s` /
+/// `crawl_cycle_s`（未設定なら歩容ライブラリの既定）、遊脚高さは全歩容で
+/// `swing_height_m`、歩幅と接地比はライブラリの既定のまま。
+///
+/// 実行中の上書き（[`misa_core::GaitTune`]）はここへ重ねる。**基準値を
+/// 知らないと「1 段上げる」が書けない**ので、操縦側もこれを読む。
+pub fn base_gait_config(tuning: &GaitTuning, select: GaitSelect) -> GaitConfig {
+    let mut cfg =
+        GaitConfig::for_type(gait_type_of(select)).with_swing_height(tuning.swing_height_m);
+    if let Some(period) = cycle_period_of(tuning, select) {
+        cfg = cfg.with_cycle_period(period);
+    }
+    cfg
+}
+
+/// 基準の [`GaitConfig`] に実行中の上書きを重ねる。
+///
+/// **上書きは丸めてから入れる**（[`misa_core::GaitTune::clamped`]）。操縦側も
+/// 同じ範囲で刻むので、画面の値と歩容に入る値は一致する。
+pub fn tuned_gait_config(
+    tuning: &GaitTuning,
+    select: GaitSelect,
+    tune: &misa_core::GaitTune,
+) -> GaitConfig {
+    let mut cfg = base_gait_config(tuning, select);
+    let t = tune.clamped();
+    if let Some(v) = t.cycle_period_s {
+        cfg.cycle_period_s = v;
+    }
+    if let Some(v) = t.swing_height_m {
+        cfg.swing_height_m = v;
+    }
+    if let Some(v) = t.step_length_m {
+        cfg.max_step_length_m = v;
+    }
+    if let Some(v) = t.duty_factor {
+        cfg.duty_factor = v;
+    }
+    cfg
+}
+
+/// その歩容の基準値を、そのまま操縦側の初期値として使える形で。
+pub fn base_gait_tune(tuning: &GaitTuning, select: GaitSelect) -> misa_core::GaitTune {
+    let c = base_gait_config(tuning, select);
+    misa_core::GaitTune {
+        cycle_period_s: Some(c.cycle_period_s),
+        swing_height_m: Some(c.swing_height_m),
+        step_length_m: Some(c.max_step_length_m),
+        duty_factor: Some(c.duty_factor),
+    }
 }
 
 fn cycle_period_of(tuning: &GaitTuning, select: GaitSelect) -> Option<f64> {

@@ -231,6 +231,58 @@ cargo run --release --features sim -- \
     sim --robot robots/namiashi.toml --gait trot --vx 0.15 --secs 8
 ```
 
+### キーボードで操縦しながら歩容パラメータを詰める
+
+`--pilot keys` は端末のキーで動かす。**歩容パラメータを歩きながら替えられる**
+のがこちらの主目的で、周期・遊脚高さ・歩幅・接地比が対象。
+
+```sh
+cargo run --release --features sim -- sim --robot robots/keel.toml \
+    --gait trot --kp 1200 --kv 30 --timestep 0.0005 --pilot keys
+```
+
+```text
+w / s  前後      a / d  横        q / e  旋回      space  速度を 0
+0/1/2  脱力/初期姿勢/歩行         z/x/c  Crawl/Walk/Trot
+r / f  立ち高さ  i/k/j/l  傾ける  v  水平へ
+
+t / g  周期   1 段 0.05 s     **揺れにいちばん効く**
+y / b  遊脚   1 段 0.005 m
+u / n  歩幅   1 段 0.01 m     速度から決まる着地点の上限
+. / ,  接地比 1 段 0.02       0.5 が trot
+m      いまの歩容の基準値へ戻す
+```
+
+状態行に現在値が出て、**基準値と違う項目には `*` が付く**。`z` / `x` / `c` で
+歩容を替えると、その歩容の基準値に戻る（周期の基準は歩容ごとに違うので、
+trot で詰めた値を crawl へ持ち込ませない）。
+
+**替えても跳ねない。** `quadruped_gait::AnyGaitController::set_config` は
+**位相を保つ**ので、歩容を作り直したときのように接地と遊脚の割り当てが
+跨がない。作り直す道（歩容の切り替え）は 4 脚接地かつ速度 0 に限ってある。
+
+台本からも同じ経路を通せる。**端末が要らないので試験と掃引に使える。**
+
+```sh
+misa-run sim --robot robots/keel.toml --gait trot --vx 0.12 \
+    --cycle 0.45 --swing 0.06 --step-length 0.12 --duty 0.55
+
+# 歩きながら替える（8 秒で切り替え、跳ねないかを見る）
+misa-run sim ... --tune-at 8.0 --cycle 1.00
+```
+
+**詰めた値が定格に収まるかは `dump` で見る。** `sim` は動力学、`dump` は
+要求レートと可動域で、同じフラグを受け付ける。
+
+```sh
+misa-run dump --robot robots/keel.toml --gait trot --swing 0.10
+#   FL  hip  0.02/8.00  thigh  3.1/8.00  calf  9.16/8.00 ✗   ← ゲート超え
+```
+
+実機（`run`）には出していない。プロポは歩容パラメータを触らない
+（チャンネルが足りない）ので、`Intent::gait_tune` は既定の「上書きなし」で
+入り、**上書きを送らない操縦系の挙動は変わらない**。
+
 ### プロポで操縦しながら見る
 
 `--pilot sbus` で**実物の送信機から操縦できる**。要るのは受信機と CH348 基板

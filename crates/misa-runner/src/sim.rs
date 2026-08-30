@@ -52,8 +52,22 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // **台本もプロポも同じ Pilot。** どちらから入っても制御則は同じ経路を
     // 通るので、プロポの解釈（チャンネル・不感帯・エクスポ）を実機を
     // 壊さずに確かめられる。
+    // **歩容パラメータの上書き。** 与えなかった項目はプロファイルのまま。
+    // キーボード（`--pilot keys`）で触るのと同じ経路を通るので、台本で
+    // 詰めた値をそのままプロファイルへ書き戻せる。
+    let tune = misa_core::GaitTune {
+        cycle_period_s: cli.f64("cycle"),
+        swing_height_m: cli.f64("swing"),
+        step_length_m: cli.f64("step-length"),
+        duty_factor: cli.f64("duty"),
+    }
+    .clamped();
+    // **途中で替える。** 歩きながら替えても跳ねないかを見るため。
+    let tune_at = cli.f64("tune-at");
+
     let mut pilot: Box<dyn misa_core::Pilot> = match cli.str("pilot").unwrap_or("script") {
-        "script" => Box::new(crate::pilot::ScriptPilot::new(Intent {
+        "script" => Box::new({
+            let mut p = crate::pilot::ScriptPilot::new(Intent {
             mode: ModeRequest::Walk,
             gait,
             aux_rad: vec![None],
@@ -69,8 +83,20 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                 cli.f64("tilt-pitch").unwrap_or(0.0),
                 cli.f64("tilt-yaw").unwrap_or(0.0),
             ],
+            // 台本は最初から入れる（`--tune-at` があるときは後で入る）。
+            gait_tune: if tune_at.is_some() {
+                misa_core::GaitTune::default()
+            } else {
+                tune
+            },
             ..Intent::default()
-        })),
+            });
+            if let Some(at) = tune_at {
+                p.tune_at(at, tune);
+                println!("{at:.1} s で歩容パラメータを替えます");
+            }
+            p
+        }),
         // **キーボード。** MuJoCo を見ながら手で動かす用。押しっぱなしは
         // 端末から取れないので、押すたびに 1 段ずつ足す形になっている。
         "keys" => Box::new(crate::pilot_keys::KeyPilot::open(cfg, gait)?),

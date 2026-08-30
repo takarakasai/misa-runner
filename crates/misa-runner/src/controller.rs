@@ -79,6 +79,9 @@ pub struct Controller {
     arm_app_driven: bool,
     gait: AnyGaitController,
     gait_select: GaitSelect,
+    /// 歩容へ入れてある上書き。**入っているものと比べて、変わったときだけ
+    /// `set_config` を呼ぶ**（毎周期呼んでも害は無いが、ログが埋まる）。
+    gait_tune: misa_core::GaitTune,
     state: State,
     player: Option<PosePlayer>,
     /// 直近に出した目標。遷移の始点であり、`Relaxed` からの復帰点でもある。
@@ -137,6 +140,7 @@ impl Controller {
             arm_app_driven,
             gait,
             gait_select,
+            gait_tune: misa_core::GaitTune::default(),
             state: State::Relaxed,
             player: None,
             targets: JointVec::zeros(),
@@ -402,6 +406,7 @@ impl Controller {
             _ => [0.0; 3],
         };
         let v = self.ramp_velocity(want, dt);
+        self.apply_gait_tune(&cmd.gait_tune);
         self.gait.set_velocity_cmd(velocity_cmd(v[0], v[1], v[2]));
         self.gait
             .set_body_attitude_observed(attitude_rad[0], attitude_rad[1]);
@@ -627,10 +632,42 @@ impl Controller {
         self.ramped_v
     }
 
+    /// 歩容パラメータの上書きを歩容へ入れる。
+    ///
+    /// **歩きながら替えられるのは `set_config` が位相を保つから。** 作り直すと
+    /// 位相が 0 に戻り、接地と遊脚の割り当てが跨いで全脚の目標が跳ぶ
+    /// （歩容の切り替えを 4 脚接地かつ速度 0 に限っているのはそのため）。
+    ///
+    /// **`LinearCrawl` では効かない。** あちらは `GaitConfig` を持たない。
+    fn apply_gait_tune(&mut self, tune: &misa_core::GaitTune) {
+        let want = tune.clamped();
+        if want == self.gait_tune {
+            return;
+        }
+        let cfg = crate::robot::tuned_gait_config(&self.cfg.gait, self.gait_select, &want);
+        self.gait.set_config(cfg.clone());
+        log::info!(
+            "歩容パラメータ: 周期 {:.3} s / 遊脚 {:.3} m / 歩幅 {:.3} m / 接地比 {:.2}",
+            cfg.cycle_period_s,
+            cfg.swing_height_m,
+            cfg.max_step_length_m,
+            cfg.duty_factor,
+        );
+        self.gait_tune = want;
+    }
+
+    /// いま歩容に入っている上書き。**表示と試験のため。**
+    pub fn gait_tune(&self) -> misa_core::GaitTune {
+        self.gait_tune
+    }
+
     fn set_gait(&mut self, select: GaitSelect) {
         log::info!("歩容を {} に切り替えます", select.label());
         self.gait = self.robot.build_gait(&self.cfg.gait, select);
         self.gait_select = select;
+        // **作り直したので上書きは落ちている。** 次の周期で操縦側が送って
+        // くる値が入る（操縦側も歩容を替えたら基準値へ戻す約束）。
+        self.gait_tune = misa_core::GaitTune::default();
         // 歩容ごとに可否が違うので、切り替えたら言い直す。
         self.warned_body_height = false;
     }

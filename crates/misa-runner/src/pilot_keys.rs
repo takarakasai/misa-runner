@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use misa_core::{GaitSelect, Intent, ModeRequest, Pilot, Time, Velocity};
+use misa_core::{GaitSelect, GaitTune, Intent, ModeRequest, Pilot, Time, Velocity};
 
 use crate::config::AppConfig;
 
@@ -50,8 +50,45 @@ pub enum Key {
     TiltLeft,
     TiltRight,
     Level,
+    Tune(Knob, i8),
+    TuneReset,
     Help,
     Quit,
+}
+
+/// 実行中に触れる歩容パラメータ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Knob {
+    /// 1 周期の時間。**揺れにいちばん効く。**
+    Cycle,
+    /// 遊脚の頂点の高さ。
+    Swing,
+    /// 歩幅の上限。
+    Step,
+    /// 接地比。
+    Duty,
+}
+
+impl Knob {
+    /// 1 回の押下で動く量。**速度と違って上限の 1/8 では粗すぎる**ので、
+    /// パラメータごとに実用的な刻みを決め打ちしてある。
+    fn step(self) -> f64 {
+        match self {
+            Knob::Cycle => 0.05,
+            Knob::Swing => 0.005,
+            Knob::Step => 0.01,
+            Knob::Duty => 0.02,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Knob::Cycle => "周期",
+            Knob::Swing => "遊脚",
+            Knob::Step => "歩幅",
+            Knob::Duty => "接地比",
+        }
+    }
 }
 
 /// 1 文字を押下へ。知らない文字は `None`。
@@ -79,6 +116,16 @@ pub fn decode(c: u8) -> Option<Key> {
         b'j' => Key::TiltLeft,
         b'l' => Key::TiltRight,
         b'v' => Key::Level,
+        // **歩容パラメータ。上段が +、下段が −。** 走らせながら詰める用。
+        b't' => Key::Tune(Knob::Cycle, 1),
+        b'g' => Key::Tune(Knob::Cycle, -1),
+        b'y' => Key::Tune(Knob::Swing, 1),
+        b'b' => Key::Tune(Knob::Swing, -1),
+        b'u' => Key::Tune(Knob::Step, 1),
+        b'n' => Key::Tune(Knob::Step, -1),
+        b'.' => Key::Tune(Knob::Duty, 1),
+        b',' => Key::Tune(Knob::Duty, -1),
+        b'm' => Key::TuneReset,
         b'h' | b'?' => Key::Help,
         // **Ctrl-C も自分で拾う。** raw モードでは端末が SIGINT を出さない
         // ので、これを見落とすと止められなくなる。
@@ -95,6 +142,20 @@ pub struct Limits {
     pub max_wz: f64,
     pub height_range: f64,
     pub attitude_max: f64,
+    /// 歩容ごとの基準値（Crawl / Walk / Trot の順）。
+    ///
+    /// **「1 段上げる」を書くには基準値が要る。** 周期は歩容ごとに違うので
+    /// 3 つ持ち、歩容を替えたらその歩容の基準へ戻す。
+    pub base_tune: [GaitTune; 3],
+}
+
+/// 歩容 → `base_tune` の添字。
+fn gait_index(g: GaitSelect) -> usize {
+    match g {
+        GaitSelect::Crawl => 0,
+        GaitSelect::Walk => 1,
+        GaitSelect::Trot => 2,
+    }
 }
 
 impl Limits {
@@ -105,7 +166,14 @@ impl Limits {
             max_wz: cfg.gait.max_wz_rad_s,
             height_range: cfg.gait.height_range_m,
             attitude_max: cfg.gait.body_attitude_max_rad,
+            base_tune: [GaitSelect::Crawl, GaitSelect::Walk, GaitSelect::Trot]
+                .map(|g| crate::robot::base_gait_tune(&cfg.gait, g)),
         }
+    }
+
+    /// その歩容の基準値。
+    pub fn base_of(&self, g: GaitSelect) -> GaitTune {
+        self.base_tune[gait_index(g)]
     }
 }
 
@@ -153,7 +221,13 @@ pub fn apply(intent: &mut Intent, key: Key, lim: &Limits) {
         // 立っている機体が脱力しかねない。
         Key::Stop => intent.velocity = Velocity::ZERO,
         Key::Mode(m) => intent.mode = m,
-        Key::Gait(g) => intent.gait = g,
+        // **歩容を替えたら、その歩容の基準値へ戻す。** 周期の基準が歩容ごとに
+        // 違うので、trot で詰めた 0.40 s を crawl へ持ち込むと訳が分からなく
+        // なる。制御側も切り替えで上書きを落とすので、これで揃う。
+        Key::Gait(g) => {
+            intent.gait = g;
+            intent.gait_tune = lim.base_of(g);
+        }
         Key::Higher => {
             intent.height_offset_m = clamp(
                 intent.height_offset_m + lim.height_range / STEPS as f64,
@@ -188,12 +262,31 @@ pub fn apply(intent: &mut Intent, key: Key, lim: &Limits) {
             intent.body_attitude_rad[1] = p;
         }
         Key::Level => intent.body_attitude_rad = [0.0; 3],
+        Key::Tune(knob, dir) => {
+            let d = knob.step() * f64::from(dir);
+            let t = &mut intent.gait_tune;
+            // **上書きしていない項目は基準値から始める。** 0 から始めると
+            // 1 回目の押下で歩容が跳ぶ。
+            let base = lim.base_of(intent.gait);
+            let f = match knob {
+                Knob::Cycle => (&mut t.cycle_period_s, base.cycle_period_s),
+                Knob::Swing => (&mut t.swing_height_m, base.swing_height_m),
+                Knob::Step => (&mut t.step_length_m, base.step_length_m),
+                Knob::Duty => (&mut t.duty_factor, base.duty_factor),
+            };
+            *f.0 = Some(f.0.or(f.1).unwrap_or(0.0) + d);
+            *t = t.clamped();
+        }
+        Key::TuneReset => intent.gait_tune = lim.base_of(intent.gait),
         Key::Help | Key::Quit => {}
     }
 }
 
 /// 操作の一覧。**起動時に 1 回出す。**
-pub fn help(lim: &Limits) -> String {
+///
+/// 歩容パラメータの欄は `gait` の基準値を出す（歩容ごとに違う）。
+pub fn help(lim: &Limits, gait: GaitSelect) -> String {
+    let base = lim.base_of(gait);
     format!(
         "キーボードで操縦します（押すたびに 1 段。**離しても止まりません**）\n\
          \n\
@@ -207,6 +300,14 @@ pub fn help(lim: &Limits) -> String {
          　  r / f       立ち高さ ±{:.2} m\n\
          　  i / k / j / l   胴体を傾ける（合成 {:.2} rad まで）、v で水平へ\n\
          \n\
+         　**歩容パラメータ（歩きながら替えられます。上段が + / 下段が −）**\n\
+         　  t / g    周期   {:.2} s   1 段 0.05（**揺れにいちばん効く**）\n\
+         　  y / b    遊脚   {:.3} m   1 段 0.005\n\
+         　  u / n    歩幅   {:.3} m   1 段 0.01（速度から決まる着地点の上限）\n\
+         　  . / ,    接地比 {:.2}     1 段 0.02（0.5 が trot）\n\
+         　  m        いまの歩容の基準値へ戻す\n\
+         　  ※ z / x / c で歩容を替えると、その歩容の基準値に戻ります\n\
+         \n\
          　  h / ?    この一覧    Esc / Ctrl-C    終了（脱力して抜けます）\n",
         lim.max_vx,
         lim.max_vx / STEPS as f64,
@@ -214,6 +315,10 @@ pub fn help(lim: &Limits) -> String {
         lim.max_wz,
         lim.height_range,
         lim.attitude_max,
+        base.cycle_period_s.unwrap_or(0.0),
+        base.swing_height_m.unwrap_or(0.0),
+        base.step_length_m.unwrap_or(0.0),
+        base.duty_factor.unwrap_or(0.0),
     )
 }
 
@@ -276,7 +381,7 @@ impl KeyPilot {
     pub fn open(cfg: &AppConfig, gait: GaitSelect) -> Result<Self, String> {
         let limits = Limits::from(cfg);
         let raw = RawMode::enter()?;
-        print!("{}", help(&limits));
+        print!("{}", help(&limits, gait));
 
         let shared = Arc::new(Mutex::new(Shared {
             intent: Intent {
@@ -285,6 +390,9 @@ impl KeyPilot {
                 gait,
                 aux_rad: vec![None],
                 link_ok: true,
+                // **最初からプロファイルの値を持つ。** 上書きが空のままだと
+                // 1 回目の押下で「0 から 1 段」になって歩容が跳ぶ。
+                gait_tune: limits.base_of(gait),
                 ..Intent::default()
             },
             quit: false,
@@ -309,7 +417,10 @@ impl KeyPilot {
                             l.last_key = Some(Instant::now());
                             match key {
                                 Key::Quit => l.quit = true,
-                                Key::Help => print!("\r{}", help(&limits)),
+                                Key::Help => {
+                                    let g = l.intent.gait;
+                                    print!("\r{}", help(&limits, g))
+                                }
                                 other => apply(&mut l.intent, other, &limits),
                             }
                         }
@@ -358,14 +469,27 @@ impl Pilot for KeyPilot {
             .last_key
             .map(|t| format!("{:.0}s前", t.elapsed().as_secs_f64()))
             .unwrap_or_else(|| "未入力".into());
+        let t = l.intent.gait_tune;
+        let base = self.limits.base_of(l.intent.gait);
+        // **基準値と違う項目に * を付ける。** 触ったかどうかが一目で分かる。
+        let mark = |v: Option<f64>, b: Option<f64>| if v == b { " " } else { "*" };
         format!(
-            "キー {since} v=({:+.2},{:+.2},{:+.2}) 高さ{:+.2} 傾き({:+.2},{:+.2})",
+            "キー {since} v=({:+.2},{:+.2},{:+.2}) 高さ{:+.2} 傾き({:+.2},{:+.2}) \
+             周期{}{:.2} 遊脚{}{:.3} 歩幅{}{:.3} 接地比{}{:.2}",
             l.intent.velocity.vx_m_s,
             l.intent.velocity.vy_m_s,
             l.intent.velocity.wz_rad_s,
             l.intent.height_offset_m,
             l.intent.body_attitude_rad[0],
             l.intent.body_attitude_rad[1],
+            mark(t.cycle_period_s, base.cycle_period_s),
+            t.cycle_period_s.unwrap_or(0.0),
+            mark(t.swing_height_m, base.swing_height_m),
+            t.swing_height_m.unwrap_or(0.0),
+            mark(t.step_length_m, base.step_length_m),
+            t.step_length_m.unwrap_or(0.0),
+            mark(t.duty_factor, base.duty_factor),
+            t.duty_factor.unwrap_or(0.0),
         )
     }
 }
@@ -381,6 +505,17 @@ mod tests {
             max_wz: 0.8,
             height_range: 0.08,
             attitude_max: 0.20,
+            base_tune: [base_tune(0.85), base_tune(0.75), base_tune(0.5)],
+        }
+    }
+
+    /// 試験用の基準値。接地比だけ歩容らしく変えてある。
+    fn base_tune(duty: f64) -> GaitTune {
+        GaitTune {
+            cycle_period_s: Some(0.60),
+            swing_height_m: Some(0.05),
+            step_length_m: Some(0.15),
+            duty_factor: Some(duty),
         }
     }
 
@@ -390,6 +525,66 @@ mod tests {
             link_ok: true,
             ..Intent::default()
         }
+    }
+
+    /// **1 回目の押下は基準値から動く。** 0 から動くと歩容が跳ぶ。
+    #[test]
+    fn the_first_press_moves_from_the_profile_value() {
+        let (l, mut i) = (lim(), intent());
+        i.gait_tune = l.base_of(i.gait);
+        apply(&mut i, Key::Tune(Knob::Cycle, -1), &l);
+        assert!((i.gait_tune.cycle_period_s.unwrap() - 0.55).abs() < 1e-9);
+        apply(&mut i, Key::Tune(Knob::Swing, 1), &l);
+        assert!((i.gait_tune.swing_height_m.unwrap() - 0.055).abs() < 1e-9);
+    }
+
+    /// **上書きが空でも、基準値から動く。**
+    #[test]
+    fn an_empty_tune_still_starts_from_the_base() {
+        let (l, mut i) = (lim(), intent());
+        assert!(i.gait_tune.is_empty());
+        apply(&mut i, Key::Tune(Knob::Cycle, 1), &l);
+        assert!((i.gait_tune.cycle_period_s.unwrap() - 0.65).abs() < 1e-9);
+    }
+
+    /// 範囲で頭打ちになり、跨がない。
+    #[test]
+    fn tuning_stops_at_the_range_ends() {
+        let (l, mut i) = (lim(), intent());
+        for _ in 0..200 {
+            apply(&mut i, Key::Tune(Knob::Duty, -1), &l);
+            apply(&mut i, Key::Tune(Knob::Swing, -1), &l);
+        }
+        assert_eq!(i.gait_tune.duty_factor, Some(GaitTune::DUTY.0));
+        assert_eq!(i.gait_tune.swing_height_m, Some(GaitTune::SWING_M.0));
+        for _ in 0..200 {
+            apply(&mut i, Key::Tune(Knob::Cycle, 1), &l);
+        }
+        assert_eq!(i.gait_tune.cycle_period_s, Some(GaitTune::CYCLE_S.1));
+    }
+
+    /// **歩容を替えたら、その歩容の基準値へ戻る。** 周期の基準が歩容ごとに
+    /// 違うので、trot で詰めた値を crawl へ持ち込ませない。
+    #[test]
+    fn switching_gait_resets_the_tune_to_that_gaits_base() {
+        let (l, mut i) = (lim(), intent());
+        apply(&mut i, Key::Tune(Knob::Duty, -1), &l);
+        assert_ne!(i.gait_tune.duty_factor, l.base_of(i.gait).duty_factor);
+        apply(&mut i, Key::Gait(GaitSelect::Walk), &l);
+        assert_eq!(i.gait_tune, l.base_of(GaitSelect::Walk));
+        assert_eq!(i.gait_tune.duty_factor, Some(0.75));
+    }
+
+    /// m は基準値へ戻す。**速度や姿勢は触らない。**
+    #[test]
+    fn tune_reset_leaves_the_rest_alone() {
+        let (l, mut i) = (lim(), intent());
+        apply(&mut i, Key::Forward, &l);
+        apply(&mut i, Key::Tune(Knob::Cycle, -1), &l);
+        let v = i.velocity;
+        apply(&mut i, Key::TuneReset, &l);
+        assert_eq!(i.gait_tune, l.base_of(i.gait));
+        assert_eq!(i.velocity, v);
     }
 
     /// **押すたびに 1 段。** 上限で頭打ちになり、跨がない。

@@ -77,6 +77,15 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         stabilize_head: false,
         body_attitude_rad: tilt,
         link_ok: true,
+        // **`sim` と同じ上書き。** 走らせながら詰めた値が定格に収まるかは
+        // ここで見る（`sim` は動力学、`dump` は要求レートと可動域）。
+        gait_tune: misa_core::GaitTune {
+            cycle_period_s: cli.f64("cycle"),
+            swing_height_m: cli.f64("swing"),
+            step_length_m: cli.f64("step-length"),
+            duty_factor: cli.f64("duty"),
+        }
+        .clamped(),
         ..Intent::default()
     };
 

@@ -330,6 +330,9 @@ fn print_help() {
   config [--out PATH]       既定設定を TOML で出力
   check                     設定とモデルを検証（実機に触れない）
   dump                      歩容を実機なしで再生し、関節角と可動域を検証
+                            [--cycle S] [--swing M] [--step-length M] [--duty D]
+                            **`sim` で詰めた歩容パラメータの要求レートを
+                            ここで確かめる**（定格とゲートに収まるか）
   imu    [--secs S]         IMU の値を表示（モータには触れない）
   sbus   [--secs S] [--plain]
                             プロポ入力と解釈結果を表示（同上）
@@ -355,6 +358,11 @@ fn print_help() {
          [--timestep S]            物理の刻み [s]（既定 MuJoCo の 2 ms）
                                    **重い機体では下げないと立てない。** PD が
                                    明示的なので kv < 2·I/dt でしか安定しない
+         [--cycle S] [--swing M]   **歩容パラメータを上書きする。** 与えな
+         [--step-length M]         かった項目はプロファイルのまま。周期は
+         [--duty D]                揺れに、歩幅は速度の出方に効く
+         [--tune-at S]             上の上書きを S 秒から入れる（**歩きながら
+                                   替える**。位相は保たれるので跳ねない）
   bridge [--secs S]         ROS 2 ブリッジとの往復を確認（**指令は脱力のまま**）
   replay LOG [LOG2]         記録の要約。2 つ渡すと指令を差分する
                             [--limit N] 差分の表示件数（既定 20）
@@ -485,6 +493,12 @@ const VALUE_FLAGS: &[&str] = &[
     "base-height",
     "timestep",
     "friction",
+    // 歩容パラメータの実行中の上書き（`sim`）。
+    "cycle",
+    "swing",
+    "step-length",
+    "duty",
+    "tune-at",
     "pilot",
     "video",
     "fps",

@@ -226,6 +226,10 @@ impl Pilot for Ros2Pilot {
             // 補助軸は ROS から触らない。駆動する主体ができたらそこが持つ。
             aux_rad: Vec::new(),
             link_ok: fresh,
+            // **歩容パラメータは ROS からは触れない。** サービスを増やす前に
+            // 実機で替えて良いかの判断が要る（周期を詰めると要求レートが
+            // 上がり、ゲートが歩容を鈍らせる）。いまはシムのキーボード専用。
+            gait_tune: misa_core::GaitTune::default(),
         }
     }
 }

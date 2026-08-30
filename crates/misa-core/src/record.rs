@@ -29,7 +29,10 @@ use crate::safety::SafetyVerdict;
 use crate::time::Time;
 
 /// 記録の書式。読み込み側が食い違いに気づけるように先頭に入れる。
-pub const FORMAT_VERSION: u32 = 1;
+// **`Intent` に `gait_tune` が増えたので 2。** postcard は自己記述では
+// ないので、版が違う記録は読み側が拒む（黙って別のフィールドとして読む
+// ほうが危ない）。
+pub const FORMAT_VERSION: u32 = 2;
 
 /// 記録の先頭に 1 度だけ置く見出し。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

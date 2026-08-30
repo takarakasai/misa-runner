@@ -91,12 +91,25 @@ impl Pilot for SbusPilot {
 #[allow(dead_code)]
 pub struct ScriptPilot {
     intent: Intent,
+    /// **途中で歩容パラメータを替える**（`(秒, 上書き)`）。
+    ///
+    /// 歩きながら替えても跳ねないことを台本で確かめるためにある。
+    /// キーボードは端末が要るので試験から回せない。
+    tune_at: Option<(f64, misa_core::GaitTune)>,
 }
 
 #[allow(dead_code)]
 impl ScriptPilot {
     pub fn new(intent: Intent) -> Self {
-        Self { intent }
+        Self {
+            intent,
+            tune_at: None,
+        }
+    }
+
+    /// `secs` を過ぎたら `tune` を送るようにする。
+    pub fn tune_at(&mut self, secs: f64, tune: misa_core::GaitTune) {
+        self.tune_at = Some((secs, tune));
     }
 
     pub fn set(&mut self, intent: Intent) {
@@ -112,6 +125,11 @@ impl Pilot for ScriptPilot {
     fn poll(&mut self, now: Time) -> Intent {
         let mut intent = self.intent.clone();
         intent.time = now;
+        if let Some((at, tune)) = self.tune_at {
+            if now.as_secs_f64() >= at {
+                intent.gait_tune = tune;
+            }
+        }
         intent
     }
 }
