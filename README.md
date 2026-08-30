@@ -94,6 +94,25 @@ path override を張る:
 | `viz`（既定） | Zenoh でライブ配信 | — |
 | `sim` | MuJoCo で動力学込みに回す | MuJoCo 3.8 の共有ライブラリ |
 | `render` | MuJoCo の絵を PNG に落とす | EGL |
+
+**`sim` / `render` を付けるなら、先に環境変数を入れること。** 無いと
+`mujoco-rs` のビルドスクリプトが「pkg-config exited with status code 1」で
+落ちる（MuJoCo を pkg-config で探しに行って見つからない）。
+
+```sh
+export MUJOCO_DYNAMIC_LINK_DIR=$HOME/.mujoco/mujoco-3.8.0/lib
+export LD_LIBRARY_PATH=$MUJOCO_DYNAMIC_LINK_DIR:$LD_LIBRARY_PATH   # 実行時にも要る
+```
+
+**feature を触ったら総当たりで確認する。**
+
+```sh
+./scripts/check-features.sh          # ビルドのみ
+./scripts/check-features.sh --test   # テストも
+```
+
+`render` だけで試していると `sim` 単体が壊れていても気づかない
+（`render = ["sim", ...]` と積み上がっているため）。実際に落ちていた。
 | `ros2` | **ROS 2 から操縦**（cmd_vel + サービス 5 本） | 標準 msg と `ros/misa_msgs`。**機体に依らない** |
 
 **機体固有の繋ぎ方はここに入れない。** ブリッジ越しの機体（相手の独自

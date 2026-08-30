@@ -455,7 +455,10 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     if video.is_some() {
         println!("{} フレーム書きました", plant.frames());
     }
-    let _ = &mut video;
+    // **`render` 無しでは `video` は None のまま使われない。** 未使用の
+    // 警告だけを消す（`&mut` を取ると、あちらでは `mut` が付いていないので
+    // ビルドが落ちる。実際 `--features sim` 単体が通らなくなっていた）。
+    let _ = &video;
 
     let end = plant.base_position().unwrap_or([f64::NAN; 3]);
     // **世界座標の移動量だけでは「前へ歩いたか」は分からない。** 機体が
