@@ -4,9 +4,13 @@
 # STM が持ち、CAN は STM が握る。PC が持つのはモデルと歩容の設定だけ。
 #
 # `run` はブリッジ越しに通る（`kind = "ros2"` → Ros2Plant + Ros2Pilot）。
-# **ただし実機とは一度も通信していない。** 実機に触れない順に
+# **`--features bridge-ksm` が要る**（ブリッジ側の low_command_msgs /
+# low_state_msgs に束縛されるため）。`--features ros2` だけだと操縦
+# （cmd_vel + サービス）しか入らない。`check` / `dump` / `sim` は feature 無しで通る。
+#
+# **2026-09-04 に実機で 4 脚起立まで到達。** 手順は doc/realbot_build.md →
+# doc/bringup_checklist_keel.md（記録欄あり）。実機に触れない順に
 # check → dump → bridge → run（bridge は指令が脱力のままなので動かない）。
-# 手順は doc/realbot_build.md。
 name = "keel"
 
 [control]
