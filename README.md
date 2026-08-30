@@ -67,10 +67,8 @@ Zenoh（`--viz`）が要らない環境ではこちらのほうが軽い（20 MB
 cargo build --release --no-default-features
 ```
 
-**keel を実機（機体の PC / ROS 2 humble / aarch64）でビルドするなら
-[`doc/realbot_build.md`](doc/realbot_build.md)。** あちらは ROS 2 と独自 msg が
-前提なので手順がひとつ増える（`--features ros2` と `AMENT_PREFIX_PATH`、
-それにモデルの置き場所）。前提の確認は `./scripts/setup-realbot.sh`。
+**ブリッジ越しの機体（keel など）を実機でビルドするなら、その機体の
+リポジトリを見ること。** 手順も profile も実行ファイルもあちらにある。
 
 ### 兄弟クレートも一緒に直したいとき
 
@@ -97,11 +95,21 @@ path override を張る:
 | `sim` | MuJoCo で動力学込みに回す | MuJoCo 3.8 の共有ライブラリ |
 | `render` | MuJoCo の絵を PNG に落とす | EGL |
 | `ros2` | **ROS 2 から操縦**（cmd_vel + サービス 5 本） | 標準 msg と `ros/misa_msgs`。**機体に依らない** |
-| `bridge-ksm` | **keel の STM ブリッジに繋ぐ**（Plant） | 上に加えてブリッジ側の `low_command_msgs` / `low_state_msgs` |
 
-**`ros2` と `bridge-ksm` を分けてあるのは、操縦だけしたい機体に**
-**ブリッジの独自メッセージを要求しないため。** 別のブリッジが来たら、
-同じ形で別 feature を足す。
+**機体固有の繋ぎ方はここに入れない。** ブリッジ越しの機体（相手の独自
+メッセージに束縛されるもの）は、**別リポジトリのクレートが [`Backend`] を
+実装して差す。** 入れてしまうと、cmd_vel で操縦したいだけの機体でも
+向こうの colcon ws が要るようになる。
+
+```rust
+fn main() -> std::process::ExitCode {
+    misa_runner::main_with(&[&MyBridge])
+}
+```
+
+`Backend` は「このプロファイルを扱えるなら `Plant` と `Pilot` を作る」
+だけの口。サブコマンドも制御則も misa-runner のものがそのまま出る。
+実例は keel-runner（`misa-plant-ksm` + `keel-run`）。
 
 ## 使い方
 
@@ -155,7 +163,7 @@ misa-run run  --robot robots/namiashi.toml --record run.rec   # 毎周期を記�
 | 機体 | 手順書 | 特徴 |
 |---|---|---|
 | namiashi | [`doc/bringup_checklist.md`](doc/bringup_checklist.md) | シリアル直結。校正（可動域・符号・ゼロ点）をこちらで採る |
-| keel | [`doc/realbot_build.md`](doc/realbot_build.md) → [`doc/bringup_checklist_keel.md`](doc/bringup_checklist_keel.md) | 前者がビルドと通信確認、後者がモータを動かす段階。STM ブリッジ越しで校正は向こうが持つので、**1 軸だけ動かす段階が作れない** |
+| keel | **keel-runner リポジトリ**の `doc/` | STM ブリッジ越し。手順も profile も実行ファイル（`keel-run`）もあちらにある |
 
 ## 校正（実機に通電したら最初にやること）
 

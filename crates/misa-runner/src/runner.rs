@@ -480,7 +480,12 @@ fn mode_until_read(want: misa_core::ModeRequest, unread: bool) -> misa_core::Mod
     }
 }
 
-pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String> {
+pub fn run(
+    cfg: AppConfig,
+    robot: Robot,
+    opts: RunOptions,
+    backends: &[&dyn crate::Backend],
+) -> Result<(), String> {
     // **繋ぎ方はプロファイルの `kind` が決める。** ここから下は Plant と
     // Pilot のトレイト越しにしか触らないので、実機でもブリッジ越しでも
     // 同じループが回る。
@@ -497,22 +502,20 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
                 let plant = start_serial(&cfg, &opts, plant, &pilot)?;
                 (Box::new(plant), Box::new(pilot))
             }
-            // **操縦（Pilot）と機体との繋ぎ（Plant）は別の feature。**
-            // `ros2` は cmd_vel + `misa_msgs` だけで機体に依らないが、
-            // ブリッジの Plant は向こうの独自メッセージに束縛される。
-            #[cfg(feature = "bridge-ksm")]
+            // **ブリッジ越しの繋ぎ方は外から差す。** 相手の独自メッセージに
+            // 束縛されるので、この crate には入れない（入れると、操縦だけ
+            // したい機体でも向こうの ws が要るようになる）。
             misa_hal::config::HardwareConfig::Ros2(_) => {
-                let layout = crate::snapshot::axis_layout(&cfg)?;
-                let plant = crate::plant_ros2::Ros2Plant::connect(&cfg, layout.table)?;
-                let pilot = crate::pilot_ros2::Ros2Pilot::connect(&cfg)?;
-                (Box::new(plant), Box::new(pilot))
-            }
-            #[cfg(not(feature = "bridge-ksm"))]
-            misa_hal::config::HardwareConfig::Ros2(_) => {
-                return Err("このビルドには bridge-ksm が入っていません\
-                            （--features bridge-ksm で有効化）。ブリッジ側の\
-                            low_command_msgs / low_state_msgs が要ります"
-                    .into())
+                match backends.iter().find_map(|b| b.connect(&cfg)) {
+                    Some(r) => r?,
+                    None => {
+                        return Err(
+                            "この実行ファイルは kind = \"ros2\" の機体を繋げません。\
+                             機体側のリポジトリの実行ファイルを使ってください"
+                                .into(),
+                        )
+                    }
+                }
             }
         };
 

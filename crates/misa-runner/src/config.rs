@@ -623,29 +623,44 @@ FL_hip_joint = 0.0
         assert_eq!(cfg.control.model, default_model_path());
     }
 
-    /// **2 台目のプロファイルが読めること。**
+    /// **ブリッジ越しのプロファイルが読めること。**
     ///
-    /// keel はブリッジ越しなので配線もモータ id も校正値も持たない。
-    /// 「[hardware] にモータが無い設定は設定として認めない」という検証が
-    /// 効いたままだと、ここで弾かれる。
+    /// この形の機体は配線もモータ id も校正値も持たない。「[hardware] に
+    /// モータが無い設定は設定として認めない」という検証が効いたままだと、
+    /// ここで弾かれる。
+    ///
+    /// **実機のプロファイルは機体側のリポジトリにあるので、ここでは書式だけ
+    /// を見る。** 見ているのは設定の読み書きであって、特定の機体の値ではない。
     #[test]
     fn a_profile_for_a_robot_behind_a_bridge_loads() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../robots/keel.toml");
-        let text = std::fs::read_to_string(path).expect("robots/keel.toml が読めません");
-        let cfg = AppConfig::from_toml(&text).expect("keel のプロファイルが読めない");
-        assert_eq!(cfg.name, "keel");
-        assert_eq!(cfg.aux.len(), 4, "車輪 4 軸");
+        let text = r#"
+name = "bridged"
+[control]
+model = "models/namiashi/namiashi.misa"
+[hardware]
+kind = "ros2"
+namespace = "/bridged"
+[[aux]]
+joint = "FL_wheel_joint"
+role = "wheel"
+"#;
+        let cfg = AppConfig::from_toml(text).expect("ブリッジ越しのプロファイルが読めない");
+        assert_eq!(cfg.name, "bridged");
+        assert_eq!(cfg.aux.len(), 1);
         assert!(
             cfg.hardware.serial().is_err(),
             "ブリッジ越しの構成が serial として読めてしまっている"
         );
         // 制御周期の上限はバスの周期ではなく向こうが決める。
         assert_eq!(cfg.hardware.max_control_rate_hz(), None);
+        // MIT ゲインは既定が入る（0 だと脱力したまま崩れるので）。
+        let g = cfg.hardware.mit_gains().expect("ブリッジ越しならゲインを持つ");
+        assert!(g.validate().is_ok());
     }
 
     /// **傾きのしきい値は機体ごとに違う。** 固定値にすると、意図して
-    /// 大きく傾ける機体（namiashi は 0.6 rad）で指令どおりの姿勢が転倒扱いに
-    /// なり、あまり傾けない機体（keel は 0.20 rad）では倒れてから気づく。
+    /// 大きく傾ける機体（0.6 rad）で指令どおりの姿勢が転倒扱いになり、
+    /// あまり傾けない機体（0.20 rad）では倒れてから気づく。
     /// 姿勢指令の上限（と、明示的な傾きのしきい値）だけを差し替えた設定。
     fn tilt_cfg(attitude_max_rad: f64, max_tilt_rad: Option<f64>) -> AppConfig {
         AppConfig {
@@ -663,8 +678,8 @@ FL_hip_joint = 0.0
 
     #[test]
     fn the_tilt_limit_is_derived_from_how_far_the_body_is_tilted_on_purpose() {
-        assert!((tilt_cfg(0.20, None).max_tilt_rad() - 0.50).abs() < 1e-12, "keel");
-        assert!((tilt_cfg(0.6, None).max_tilt_rad() - 0.9).abs() < 1e-12, "namiashi");
+        assert!((tilt_cfg(0.20, None).max_tilt_rad() - 0.50).abs() < 1e-12, "あまり傾けない機体");
+        assert!((tilt_cfg(0.6, None).max_tilt_rad() - 0.9).abs() < 1e-12, "大きく傾ける機体");
         // 姿勢を振らない機体でも 0.5 rad を下回らない。
         assert!((tilt_cfg(0.0, None).max_tilt_rad() - 0.5).abs() < 1e-12);
         // 導出値は必ず姿勢指令の上限より外側。
@@ -684,11 +699,21 @@ FL_hip_joint = 0.0
         assert_eq!(off.max_tilt_rad(), 0.0);
     }
 
-    /// 同梱のプロファイル 2 枚とも、導出値が姿勢指令の外側にある。
+    /// **同梱のプロファイルはどれも、導出値が姿勢指令の外側にある。**
+    ///
+    /// 機体ごとのプロファイルは別リポジトリにもあるので、ここで見るのは
+    /// `robots/` に入っているものだけ。あちらは あちらで同じ試験を持つ。
     #[test]
     fn every_shipped_profile_reports_a_tilt_beyond_its_attitude_command() {
-        for name in ["namiashi", "keel"] {
-            let path = format!("{}/../../robots/{name}.toml", env!("CARGO_MANIFEST_DIR"));
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../robots");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(dir).expect("robots/ が読めません") {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            seen += 1;
+            let name = path.file_stem().unwrap().to_string_lossy().to_string();
             let text = std::fs::read_to_string(&path).expect("プロファイルが読めません");
             let cfg = AppConfig::from_toml(&text).expect("プロファイルが読めない");
             assert!(
@@ -698,6 +723,7 @@ FL_hip_joint = 0.0
                 cfg.gait.body_attitude_max_rad
             );
         }
+        assert!(seen > 0, "robots/ にプロファイルが 1 枚も無い");
     }
 
     #[test]

@@ -143,7 +143,7 @@ q_model = sign *  q_motor + zero_pose_rad        (sign = ±1)
 
 **この節は namiashi（radxa-cubie-a7z + CH348 の RS485）の話。** keel は機体の
 PC に ROS 2 で繋ぐ構成で前提が違うので、そちらは
-[`realbot_build.md`](realbot_build.md) を見ること（ch9344 も `dialout` も
+**keel-runner リポジトリ**の `doc/realbot_build.md` を見ること（ch9344 も `dialout` も
 要らない代わりに、ROS 2 と独自 msg が要る）。
 
 ### 5.1 リポジトリはすべて push 済み（2026-08-19 完了）

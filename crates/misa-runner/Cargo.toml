@@ -39,12 +39,8 @@ render = ["sim", "misa-plant-mujoco/render"]
 # `geometry_msgs` と、このリポジトリが持つ `misa_msgs` だけ。**機体に依らない。**
 # ビルド手順は ros/README.md。
 ros2 = ["dep:r2r", "dep:futures"]
-# **keel の STM ブリッジを Plant として繋ぐ。**
-#
-# `low_command_msgs` / `low_state_msgs` は**ブリッジ側（ksm_mvp_real_ws）の
-# 独自メッセージ**で、この機体にしか無い。`ros2` から切ってあるのは、
-# **これを有効にすると、操縦だけしたい機体でもブリッジの ws が要るようになる**
-# ため。別のブリッジが来たら、同じ形で別 feature を足す。
-bridge-ksm = ["ros2"]
+# **ブリッジ越しの機体（keel など）はここには入れない。**
+# 相手の独自メッセージに束縛されるので、機体側のリポジトリが `Backend` を
+# 実装して差す。ここに入れると、操縦だけしたい機体でも向こうの ws が要る。
 # ライブ可視化。`quadruped-gait/viz` が GaitVizFrame に serde を付ける。
 viz = ["dep:zenoh", "dep:serde_json", "quadruped-gait/viz"]
