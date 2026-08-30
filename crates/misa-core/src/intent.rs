@@ -230,6 +230,16 @@ pub trait Pilot {
     /// 残り続ける。切れたことは [`Intent::link_ok`] で伝える。
     fn poll(&mut self, now: Time) -> Intent;
 
+    /// 操縦者が終了を求めたか。**呼び出し側はこれを見てループを抜ける。**
+    ///
+    /// キーボードのように**端末を raw モードにする入力では Ctrl-C が
+    /// SIGINT にならない**ので、これを見ないと止める手段が無くなる
+    /// （raw モードのまま殺すと、そのシェルはエコーも改行も効かなくなる）。
+    /// 既定は false。
+    fn quit_requested(&self) -> bool {
+        false
+    }
+
     /// 状態表示に添える 1 行。受信の生きの良さなど、**この入力にしか
     /// 分からないこと**を書く。既定は空。
     fn status_line(&self) -> String {

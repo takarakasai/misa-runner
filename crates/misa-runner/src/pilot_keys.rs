@@ -19,7 +19,7 @@
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use misa_core::{GaitSelect, GaitTune, Intent, ModeRequest, Pilot, Time, Velocity};
 
@@ -439,13 +439,6 @@ impl KeyPilot {
         })
     }
 
-    /// Esc / Ctrl-C が押されたか。**呼び出し側がループを抜ける合図。**
-    pub fn quit_requested(&self) -> bool {
-        self.shared
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .quit
-    }
 }
 
 impl Drop for KeyPilot {
@@ -455,6 +448,12 @@ impl Drop for KeyPilot {
 }
 
 impl Pilot for KeyPilot {
+    /// Esc / Ctrl-C が押されたか。**`Pilot` 越しに見えないと意味が無い**
+    /// （呼び出し側は `Box<dyn Pilot>` しか持っていない）。
+    fn quit_requested(&self) -> bool {
+        self.shared.lock().unwrap_or_else(|e| e.into_inner()).quit
+    }
+
     fn poll(&mut self, _now: Time) -> Intent {
         self.shared
             .lock()

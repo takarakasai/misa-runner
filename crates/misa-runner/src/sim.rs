@@ -280,6 +280,12 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
 
     for i in 0..steps {
         let t = i as f64 * dt;
+        // **操縦者の終了要求。** キーボードは端末を raw モードにするので
+        // Ctrl-C が SIGINT にならない。ここを見ないと止められない。
+        if pilot.quit_requested() {
+            println!("\n操縦者が終了を要求しました（{t:.1} s）");
+            break;
+        }
         // 台本のときだけ、立ち上がってから速度を入れる。プロポのときは
         // 操縦者が入れるので触らない。
         if scripted && controller.state() == State::Active {
