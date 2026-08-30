@@ -2,7 +2,7 @@
 
 対象: 四脚ロボット **namiashi**（LKMTech MG4005 ×12 + 腕 RC サーボ ×1）
 制御機: `radxa-cubie-a7z`
-関連: keel 版は **keel-runner リポジトリ**の `doc/`（ブリッジ越しなので
+関連: namiashi2 版は **namiashi2-runner リポジトリ**の `doc/`（ブリッジ越しなので
 校正の段階が無い） /
 [`boot_config.md`](boot_config.md) / [`runtime_tuning.md`](runtime_tuning.md) /
 [`viz_live.md`](viz_live.md) /

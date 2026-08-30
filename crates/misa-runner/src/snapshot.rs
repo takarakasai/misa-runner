@@ -62,7 +62,7 @@ impl AxisLayout {
 
     /// **こちらが指令を出す軸の観測が、全部読めているか。**
     ///
-    /// 待つのは指令を出す軸だけ。keel の車輪のように**観測だけの軸は
+    /// 待つのは指令を出す軸だけ。namiashi2 の車輪のように**観測だけの軸は
     /// 相手が出していないことがある**（`/low_state` は脚 12 本しか載せない）。
     /// それを待つと永久に立ち上がれない。実際そうなった (2026-09-04)。
     ///
@@ -341,7 +341,7 @@ mod tests {
     }
 
 
-    /// keel を想定した並び。脚 12 + 車輪 4、head 無し。
+    /// namiashi2 を想定した並び。脚 12 + 車輪 4、head 無し。
     fn wheeled_layout() -> AxisLayout {
         let mut cfg = AppConfig::default();
         cfg.aux = ["FL_wheel_joint", "FR_wheel_joint", "RL_wheel_joint", "RR_wheel_joint"]
@@ -356,10 +356,10 @@ mod tests {
 
     /// **補助軸の本数が違う機体が入ること。**
     ///
-    /// namiashi は腕 1 軸、keel は車輪 4 軸。ここが固定だと 2 台目が載らない。
+    /// namiashi は腕 1 軸、namiashi2 は車輪 4 軸。ここが固定だと 2 台目が載らない。
     /// **待つのは指令を出す軸だけ。**
     ///
-    /// keel の車輪は観測だけの軸で、ブリッジの `/low_state` は脚 12 本しか
+    /// namiashi2 の車輪は観測だけの軸で、ブリッジの `/low_state` は脚 12 本しか
     /// 載せない。それを待つと `状態を受け取りました` が永久に出ず、立ち
     /// 上がれない。実機で実際に詰まった (2026-09-04)。
     #[test]
@@ -425,7 +425,7 @@ mod tests {
     }
 
     /// **既定は kp 120 / kd 2.0。** 立ち上げ用の柔らかい値で、この値では
-    /// keel は立てない（MuJoCo で同じ制御則を回すと胴体が 0.250 まで沈む。
+    /// namiashi2 は立てない（MuJoCo で同じ制御則を回すと胴体が 0.250 まで沈む。
     /// 足だけで立つのは kp 300 から）。**歩かせる前に上げること。**
     #[test]
     fn the_default_bridge_gains_are_the_soft_bring_up_pair() {

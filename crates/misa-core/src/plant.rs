@@ -6,7 +6,7 @@
 //!
 //! | 配備先 | 実体 |
 //! |---|---|
-//! | 中間層 MCU（keel） | 周期 Down/Up が `seq` で 1:1 |
+//! | 中間層 MCU（namiashi2） | 周期 Down/Up が `seq` で 1:1 |
 //! | MuJoCo | `ctrl` を書いて `step` して状態を読む |
 //! | Unitree Go2 | `rt/lowcmd` を送って `rt/lowstate` を受ける |
 //! | ログ再生 | 記録した観測を返すだけ |

@@ -67,7 +67,7 @@ Zenoh（`--viz`）が要らない環境ではこちらのほうが軽い（20 MB
 cargo build --release --no-default-features
 ```
 
-**ブリッジ越しの機体（keel など）を実機でビルドするなら、その機体の
+**ブリッジ越しの機体（namiashi2 など）を実機でビルドするなら、その機体の
 リポジトリを見ること。** 手順も profile も実行ファイルもあちらにある。
 
 ### 兄弟クレートも一緒に直したいとき
@@ -109,7 +109,7 @@ fn main() -> std::process::ExitCode {
 
 `Backend` は「このプロファイルを扱えるなら `Plant` と `Pilot` を作る」
 だけの口。サブコマンドも制御則も misa-runner のものがそのまま出る。
-実例は keel-runner（`misa-plant-ksm` + `keel-run`）。
+実例は namiashi2-runner（`misa-plant-ksm` + `namiashi2-run`）。
 
 ## 使い方
 
@@ -163,7 +163,7 @@ misa-run run  --robot robots/namiashi.toml --record run.rec   # 毎周期を記�
 | 機体 | 手順書 | 特徴 |
 |---|---|---|
 | namiashi | [`doc/bringup_checklist.md`](doc/bringup_checklist.md) | シリアル直結。校正（可動域・符号・ゼロ点）をこちらで採る |
-| keel | **keel-runner リポジトリ**の `doc/` | STM ブリッジ越し。手順も profile も実行ファイル（`keel-run`）もあちらにある |
+| namiashi2 | **namiashi2-runner リポジトリ**の `doc/` | STM ブリッジ越し。手順も profile も実行ファイル（`namiashi2-run`）もあちらにある |
 
 ## 校正（実機に通電したら最初にやること）
 
@@ -253,7 +253,7 @@ t[s]   状態         胴体 z[m]  roll   pitch  接地
 **脱力も再現されない**（位置アクチュエータにその概念が無いので `Idle` の軸は
 その場で保持される）。ここを通ったから実機が通るとは考えないこと。
 
-### keel を MuJoCo で動かす（ROS 2 から操縦して articara で見る）
+### namiashi2 を MuJoCo で動かす（ROS 2 から操縦して articara で見る）
 
 2 台目の機体をひととおり動かす手順。**実機はいらない。**
 
@@ -273,18 +273,18 @@ export LD_LIBRARY_PATH=$MUJOCO_DYNAMIC_LINK_DIR:$LD_LIBRARY_PATH
 ```sh
 # 1) runner（MuJoCo + 配信 + ROS 操縦）。--secs 0 で Ctrl-C まで
 cargo run --release --features sim,ros2 -- \
-    sim --robot robots/keel.toml --pilot ros2 --gait trot --secs 0 \
+    sim --robot robots/namiashi2.toml --pilot ros2 --gait trot --secs 0 \
         --kp 1200 --kv 30 --timestep 0.0005 --base-height 0.42 \
         --viz --viz-endpoint tcp/127.0.0.1:7447
 
 # 2) 別端末で articara。Live gait feed に tcp/127.0.0.1:7447 を入れて Start
 cd ../articara && cargo run --release --features viz -- \
-    --model ../keel/model/proto2_asset/urdf/mvp_v2.misa
+    --model ../namiashi2/model/proto2_asset/urdf/mvp_v2.misa
 
 # 3) さらに別端末で操縦。**トピックは名前空間つき**
-ros2 service call /keel/misa_run/set_gait misa_msgs/srv/SetGait '{gait: 2}'
-ros2 service call /keel/misa_run/set_mode misa_msgs/srv/SetMode '{mode: 2}'
-ros2 topic pub -r 20 /keel/cmd_vel geometry_msgs/msg/Twist '{linear: {x: 0.12}}'
+ros2 service call /namiashi2/misa_run/set_gait misa_msgs/srv/SetGait '{gait: 2}'
+ros2 service call /namiashi2/misa_run/set_mode misa_msgs/srv/SetMode '{mode: 2}'
+ros2 topic pub -r 20 /namiashi2/cmd_vel geometry_msgs/msg/Twist '{linear: {x: 0.12}}'
 ```
 
 `cmd_vel` を止めると 300 ms 後に速度が 0 に落ちて、その場で立つ
@@ -293,11 +293,11 @@ ros2 topic pub -r 20 /keel/cmd_vel geometry_msgs/msg/Twist '{linear: {x: 0.12}}'
 胴体をその場で傾ける（足は接地したまま）:
 
 ```sh
-ros2 service call /keel/misa_run/set_body_attitude \
+ros2 service call /namiashi2/misa_run/set_body_attitude \
     misa_msgs/srv/SetBodyAttitude '{roll: 0.0, pitch: 0.3, yaw: 0.0}'
 ```
 
-**上限は「合成量」で、軸ごとではない**（`gait.body_attitude_max_rad`、keel は
+**上限は「合成量」で、軸ごとではない**（`gait.body_attitude_max_rad`、namiashi2 は
 0.20）。超えた要求は向きを保ったまま丸めて、応答にそう書く。0 のときは
 `ok: false` で返す — **「受け付けた」と言っておいて何も起きないのが
 いちばん困る**ので。
@@ -343,11 +343,11 @@ MIT モードで持つ。
 まとめる。GUI もディスプレイも要らない。
 
 ```sh
-cargo run --release --features render -- sim --robot robots/keel.toml \
+cargo run --release --features render -- sim --robot robots/namiashi2.toml \
     --gait trot --vx 0.12 --secs 9 --kp 200 --kv 2.0 --base-height 0.35 \
-    --video /tmp/keel --cam-dist 2.2 --cam-el -18 --cam-az 120
+    --video /tmp/namiashi2 --cam-dist 2.2 --cam-el -18 --cam-az 120
 
-ffmpeg -framerate 30 -i /tmp/keel/frame_%05d.png \
+ffmpeg -framerate 30 -i /tmp/namiashi2/frame_%05d.png \
     -vf "eq=brightness=0.28:contrast=1.5" -c:v libx264 -pix_fmt yuv420p out.mp4
 ```
 
@@ -359,7 +359,7 @@ MuJoCo の既定ヘッドライトだけになって暗い。
 `<visual><global offwidth/offheight>` が要るが、エクスポータはそれを出さない。
 
 カメラは `--cam-az`（方位、90 で真横・180 で真後ろ）/ `--cam-el` /
-`--cam-dist` / `--cam-z`。**機体の大きさで変える** — keel は 2.2 前後、
+`--cam-dist` / `--cam-z`。**機体の大きさで変える** — namiashi2 は 2.2 前後、
 namiashi は 1.1 前後。
 
 `--features render` は**ローカルの articara を見る**（`.cargo/config.toml` の
@@ -432,7 +432,7 @@ ERROR を毎回はっきり出したうえで、止めるかどうかは operato
 （`cos θ = cos roll · cos pitch`）で、roll と pitch の和ではない — 足すと斜めに
 傾いたときに過大評価になる。しきい値を固定値にせず
 `gait.body_attitude_max_rad + 0.3 rad`（最低 0.5 rad）から導くのは、**意図して
-傾ける量が機体ごとに違う**から（namiashi 0.6 → 0.9 rad、keel 0.20 → 0.50 rad）。
+傾ける量が機体ごとに違う**から（namiashi 0.6 → 0.9 rad、namiashi2 0.20 → 0.50 rad）。
 指令どおり傾けただけで報告が出ると、本当の転倒と区別が付かなくなる。
 報告は立ち上がりだけで、戻ったら INFO を 1 行出す。`replay` が「傾き超過」の
 周期数と最大値を数える。

@@ -59,7 +59,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             aux_rad: vec![None],
             link_ok: true,
             // 胴体の傾きを打ち消すようにヘッド軸を動かす。ヘッド軸を持た
-            // ない機体（keel は車輪 4 軸だけ）では立てても何も起きない。
+            // ない機体（namiashi2 は車輪 4 軸だけ）では立てても何も起きない。
             stabilize_head: cli.flag("chicken"),
             // 胴体を傾けたまま歩く。**足は接地したまま胴体だけ回る**ので、
             // チキンヘッドが効いているかはここを振ると見える。
@@ -98,7 +98,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let robot = crate::robot::load_from_config(cfg)?;
     // **当たり判定のメッシュが欠けたまま動力学を回さない。** 落ちたメッシュ
     // のリンクは何にも当たらなくなるので、結果は「うまく動いている」ように
-    // 見えてしまう。keel でこれに引っかかった (2026-09-02)。
+    // 見えてしまう。namiashi2 でこれに引っかかった (2026-09-02)。
     if !robot.bad_meshes.is_empty() {
         return Err(format!(
             "当たり判定のメッシュを {} 件読めません。**このまま回すと当たり判定の\
@@ -157,7 +157,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                 height: cli.usize("height").unwrap_or(480) as u32,
                 azimuth: cli.f64("cam-az").unwrap_or(120.0),
                 elevation: cli.f64("cam-el").unwrap_or(-12.0),
-                // **機体の大きさで変える。** keel は namiashi より大きい。
+                // **機体の大きさで変える。** namiashi2 は namiashi より大きい。
                 distance: cli.f64("cam-dist").unwrap_or(1.6),
                 look_z: cli.f64("cam-z").unwrap_or(0.22),
                 look_xy: [cli.f64("cam-x").unwrap_or(0.0), cli.f64("cam-y").unwrap_or(0.0)],

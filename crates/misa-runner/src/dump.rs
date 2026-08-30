@@ -140,7 +140,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         let out = controller.tick(&cmd, &measured, imu.rpy_rad, dt);
         check_limits(&limits, &layout, &out.targets, t, &mut violations);
         // **歩容が要求する目標の変化率を測る。** 安全ゲートの上限を超えて
-        // いたら、実機ではゲートが丸めて歩容が崩れる。keel で実際に起きた:
+        // いたら、実機ではゲートが丸めて歩容が崩れる。namiashi2 で実際に起きた:
         // trot が calf に 16 rad/s を要求していて、モータの定格 10.47 も
         // 設定の 3.0 も超えていた (2026-09-02)。
         if let Some(p) = prev_targets.as_ref() {

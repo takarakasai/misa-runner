@@ -36,7 +36,7 @@ pub struct AppConfig {
     pub hardware: HardwareConfig,
     /// 脚以外の軸。**機体ごとに数も役割も違う。**
     ///
-    /// namiashi は腕 1 軸、keel は車輪 4 軸。歩容は触らないので、ここに
+    /// namiashi は腕 1 軸、namiashi2 は車輪 4 軸。歩容は触らないので、ここに
     /// 書いてあるかどうかで軸表の長さと `Command` / `Observation` の長さが
     /// 決まる。書かなければ補助軸なしの機体になる。
     #[serde(default = "default_aux_axes")]
@@ -304,7 +304,7 @@ pub struct ControlConfig {
     /// **省略時は `gait.body_attitude_max_rad + 0.3`（最低 0.5）** を使う
     /// （[`AppConfig::max_tilt_rad`]）。固定値にしないのは、**意図して傾ける
     /// 量が機体ごとに違う**から — namiashi は 0.6 rad まで傾けるので 0.5 の
-    /// 固定値だと指令どおり傾けただけで転倒扱いになり、keel は 0.20 rad なので
+    /// 固定値だと指令どおり傾けただけで転倒扱いになり、namiashi2 は 0.20 rad なので
     /// 0.9 では倒れてから気づくことになる。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tilt_rad: Option<f64>,
@@ -357,9 +357,9 @@ impl Default for ControlConfig {
 pub struct GaitTuning {
     /// 膝の曲がる向き。**機体ごとに違う。**
     ///
-    /// namiashi も keel も 4 脚とも後ろ向き（thigh + / calf − で畳む）。
+    /// namiashi も namiashi2 も 4 脚とも後ろ向き（thigh + / calf − で畳む）。
     ///
-    /// **モデルの可動域で決まる。憶測で選ばないこと。** keel の calf は
+    /// **モデルの可動域で決まる。憶測で選ばないこと。** namiashi2 の calf は
     /// `-2.705..-0.838` で常に負なので、後脚に正の膝角を要求する `<>` は
     /// 物理的に取れない。それでも `sim` は動いてしまい、**脚が可動域に
     /// 当たって長さが変わったぶん速く前へ進んで見える**。`dump` と `sim` の

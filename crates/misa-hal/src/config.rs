@@ -343,14 +343,14 @@ pub enum ArmProtocol {
 ///
 /// ```toml
 /// [hardware]
-/// kind = "serial"     # namiashi、keel のベンチ
+/// kind = "serial"     # namiashi、namiashi2 のベンチ
 /// [hardware.legs]
 /// ...
 /// ```
 ///
 /// ```toml
 /// [hardware]
-/// kind = "ros2"       # keel の本番（STM のブリッジへ繋ぐ）
+/// kind = "ros2"       # namiashi2 の本番（STM のブリッジへ繋ぐ）
 /// state_topic = "..."
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -57,7 +57,7 @@ struct Shared {
     /// 胴体姿勢の上限 [rad]。`gait.body_attitude_max_rad`。
     ///
     /// **プロポ側は Teleop がここで丸めているのに、サービスは素通しだった。**
-    /// keel の本番経路はサービスなので、丸めるのはこちら側でも要る。
+    /// namiashi2 の本番経路はサービスなので、丸めるのはこちら側でも要る。
     attitude_max_rad: f64,
     /// 高さオフセットの上限 [m]。`gait.height_range_m`。
     height_range_m: f64,
@@ -291,7 +291,7 @@ macro_rules! spawn_service {
 /// いちばん困る（指令しているのに動かない、が原因不明のまま残る）。
 ///
 /// **軸ごとではなく合成量で丸める。** 3 軸を別々に上限まで入れると
-/// 合わさったぶんが脚の可動域を食う。keel の実測では roll と yaw を
+/// 合わさったぶんが脚の可動域を食う。namiashi2 の実測では roll と yaw を
 /// それぞれ 0.40 rad 入れただけで hip が ±0.785 を超える（単軸なら
 /// 0.60 まで入る）。プロポ側の `Teleop` も合成量で丸めている。
 fn clamp_attitude(want: [f64; 3], max_rad: f64) -> Result<([f64; 3], String), String> {
@@ -427,7 +427,7 @@ mod tests {
     /// **丸めるのは軸ごとではなく合成量。**
     ///
     /// 3 軸それぞれ上限まで入れられると、合わさったぶんが脚の可動域を
-    /// 食う。keel の実測では roll と yaw を 0.40 rad ずつ入れただけで
+    /// 食う。namiashi2 の実測では roll と yaw を 0.40 rad ずつ入れただけで
     /// hip が ±0.785 を超える（単軸なら 0.60 まで入る）。
     #[test]
     fn the_attitude_is_clamped_by_its_magnitude_not_per_axis() {

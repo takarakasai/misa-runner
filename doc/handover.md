@@ -141,9 +141,9 @@ q_model = sign *  q_motor + zero_pose_rad        (sign = ±1)
 
 ## 5. SBC への移行
 
-**この節は namiashi（radxa-cubie-a7z + CH348 の RS485）の話。** keel は機体の
+**この節は namiashi（radxa-cubie-a7z + CH348 の RS485）の話。** namiashi2 は機体の
 PC に ROS 2 で繋ぐ構成で前提が違うので、そちらは
-**keel-runner リポジトリ**の `doc/realbot_build.md` を見ること（ch9344 も `dialout` も
+**namiashi2-runner リポジトリ**の `doc/realbot_build.md` を見ること（ch9344 も `dialout` も
 要らない代わりに、ROS 2 と独自 msg が要る）。
 
 ### 5.1 リポジトリはすべて push 済み（2026-08-19 完了）

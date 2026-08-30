@@ -42,7 +42,7 @@ export PYTHONPATH=$PWD/ros/install/misa_msgs/lib/python3.12/site-packages:$PYTHO
 
 cargo build --release --features ros2          # 操縦だけ（cmd_vel + サービス）
 cargo build --release --features sim,ros2      # MuJoCo で試す
-cargo build --release --features bridge-ksm    # keel の STM ブリッジに繋ぐ
+cargo build --release --features bridge-ksm    # namiashi2 の STM ブリッジに繋ぐ
 ```
 
 `r2r` は crates.io のものなので ros2_rust のオーバーレイは要らない。ただし
@@ -63,7 +63,7 @@ ros2 topic pub -r 20 /cmd_vel geometry_msgs/msg/Twist '{linear: {x: 0.12}}'
 
 ---
 
-# STM ブリッジとの入出力（keel）
+# STM ブリッジとの入出力（namiashi2）
 
 **この節は `--features bridge-ksm` の話。** `low_command_msgs` /
 `low_state_msgs` はブリッジ側（`ksm_mvp_real_ws`）の独自メッセージで、
@@ -108,7 +108,7 @@ Down/Up と同じ相関が取れる。
 ## 確認する
 
 ```sh
-misa-run bridge --robot robots/keel.toml --secs 10
+misa-run bridge --robot robots/namiashi2.toml --secs 10
 ```
 
 **指令は脱力のまま**なので実機に繋いでも動かない。繋がっているか・何軸

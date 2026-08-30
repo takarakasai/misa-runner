@@ -1,7 +1,7 @@
 //! 実機を [`Plant`] にする。
 //!
 //! いまのところ namiashi の構成（CH348 上の RS485 脚バス ×4 + WitMotion IMU +
-//! 補助軸のサーボ）だけ。keel の中間層 UDP と MuJoCo は同じトレイトの別実装に
+//! 補助軸のサーボ）だけ。namiashi2 の中間層 UDP と MuJoCo は同じトレイトの別実装に
 //! なる。
 //!
 //! # S.BUS はここに入らない
@@ -40,7 +40,7 @@ impl SerialPlant {
 
         // **「繋がっている」と「こちらの指令で動く」は別。**
         // 受信機直結の腕は動いてはいるが、アプリの指令では動かない。
-        // head 以外の補助軸（keel の車輪など）は、まだ駆動する主体が無い。
+        // head 以外の補助軸（namiashi2 の車輪など）は、まだ駆動する主体が無い。
         let mut driven = vec![true; axes.len()];
         for id in layout.aux() {
             driven[id.index()] = layout.head == Some(id) && hw.arm.is_app_driven();
