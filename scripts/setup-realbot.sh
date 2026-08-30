@@ -250,8 +250,11 @@ source scripts/realbot-env.sh || exit 1
 
 echo
 echo "── 9. misa-run ─────────────────────────"
-feat=(--features ros2)
-[ "$LEAN" = 1 ] && feat=(--no-default-features --features ros2)
+# **bridge-ksm。** `ros2` だけでは Plant が入らない（あちらは cmd_vel と
+# misa_msgs の操縦用で、機体に依らない）。ブリッジの独自メッセージに繋ぐのは
+# こちら側。
+feat=(--features bridge-ksm)
+[ "$LEAN" = 1 ] && feat=(--no-default-features --features bridge-ksm)
 jobs_arg=()
 [ -n "$JOBS" ] && jobs_arg=(--jobs "$JOBS")
 echo "  cargo build --release ${feat[*]} ${jobs_arg[*]}"

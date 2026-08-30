@@ -89,6 +89,20 @@ path override を張る:
 
 `.cargo/config.toml` は追跡していない（人ごと・マシンごとに違うため）。
 
+### feature
+
+| feature | 何が入るか | 要るもの |
+|---|---|---|
+| `viz`（既定） | Zenoh でライブ配信 | — |
+| `sim` | MuJoCo で動力学込みに回す | MuJoCo 3.8 の共有ライブラリ |
+| `render` | MuJoCo の絵を PNG に落とす | EGL |
+| `ros2` | **ROS 2 から操縦**（cmd_vel + サービス 5 本） | 標準 msg と `ros/misa_msgs`。**機体に依らない** |
+| `bridge-ksm` | **keel の STM ブリッジに繋ぐ**（Plant） | 上に加えてブリッジ側の `low_command_msgs` / `low_state_msgs` |
+
+**`ros2` と `bridge-ksm` を分けてあるのは、操縦だけしたい機体に**
+**ブリッジの独自メッセージを要求しないため。** 別のブリッジが来たら、
+同じ形で別 feature を足す。
+
 ## 使い方
 
 **立ち上げは上から順に。** 各段が通ってから次へ行くと、詰まった場所が常に

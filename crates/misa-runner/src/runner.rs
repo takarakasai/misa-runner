@@ -497,16 +497,22 @@ pub fn run(cfg: AppConfig, robot: Robot, opts: RunOptions) -> Result<(), String>
                 let plant = start_serial(&cfg, &opts, plant, &pilot)?;
                 (Box::new(plant), Box::new(pilot))
             }
-            #[cfg(feature = "ros2")]
+            // **操縦（Pilot）と機体との繋ぎ（Plant）は別の feature。**
+            // `ros2` は cmd_vel + `misa_msgs` だけで機体に依らないが、
+            // ブリッジの Plant は向こうの独自メッセージに束縛される。
+            #[cfg(feature = "bridge-ksm")]
             misa_hal::config::HardwareConfig::Ros2(_) => {
                 let layout = crate::snapshot::axis_layout(&cfg)?;
                 let plant = crate::plant_ros2::Ros2Plant::connect(&cfg, layout.table)?;
                 let pilot = crate::pilot_ros2::Ros2Pilot::connect(&cfg)?;
                 (Box::new(plant), Box::new(pilot))
             }
-            #[cfg(not(feature = "ros2"))]
+            #[cfg(not(feature = "bridge-ksm"))]
             misa_hal::config::HardwareConfig::Ros2(_) => {
-                return Err("このビルドには ros2 が入っていません（--features ros2 で有効化）".into())
+                return Err("このビルドには bridge-ksm が入っていません\
+                            （--features bridge-ksm で有効化）。ブリッジ側の\
+                            low_command_msgs / low_state_msgs が要ります"
+                    .into())
             }
         };
 

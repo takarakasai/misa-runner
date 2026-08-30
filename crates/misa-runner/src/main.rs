@@ -23,7 +23,7 @@ mod jointvec;
 mod pilot;
 #[cfg(feature = "ros2")]
 mod pilot_ros2;
-#[cfg(feature = "ros2")]
+#[cfg(feature = "bridge-ksm")]
 mod plant_ros2;
 mod plant;
 mod pose;
@@ -83,10 +83,14 @@ fn dispatch(cli: &Cli) -> Result<(), String> {
     let cfg = load_config(cli)?;
     match command {
         "check" => diag::check(&cfg),
-        #[cfg(feature = "ros2")]
+        #[cfg(feature = "bridge-ksm")]
         "bridge" => plant_ros2::diagnose(&cfg, secs_or_forever(cli, 10.0)),
-        #[cfg(not(feature = "ros2"))]
-        "bridge" => Err("このビルドには ros2 が入っていません（--features ros2 で有効化）".into()),
+        #[cfg(not(feature = "bridge-ksm"))]
+        "bridge" => Err(
+            "このビルドには bridge-ksm が入っていません（--features bridge-ksm で有効化）。\
+             ブリッジ側の low_command_msgs / low_state_msgs が要ります"
+                .into(),
+        ),
         "dump" => dump::run(&cfg, cli),
         #[cfg(feature = "sim")]
         "sim" => sim::run(&cfg, cli),

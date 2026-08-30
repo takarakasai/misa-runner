@@ -27,7 +27,7 @@ build-essential pkg-config git curl libudev-dev colcon すべて既存
 RAM が 61 GiB あるので `--jobs` を絞る必要はない（§5）。**カーネルが PREEMPT_RT** なのは namiashi の
 radxa と違う点で、`run` のジッタを詰める段で効く（§7）。
 
-**ビルドは機体で通った**（2026-09-03、`--features ros2`）。ただし前提のうち
+**ビルドは機体で通った**（2026-09-03、当時の `--features ros2`。いまは `bridge-ksm`）。ただし前提のうち
 2 つは足りず、手当てが要った:
 
 - **`libclang-dev`** — `libclang1-14` だけでは bindgen が `stdbool.h` を
@@ -50,7 +50,7 @@ radxa と違う点で、`run` のジッタを詰める段で効く（§7）。
 | モータへの経路 | RS485 ×4 を自分で叩く | **STM ブリッジに ROS 2 で頼む** |
 | ch9344 ドライバ | **要る**（DKMS） | 要らない |
 | `dialout` / udev | 要る | 要らない |
-| ROS 2 | 任意（`--features ros2` は操縦用） | **必須**（これが唯一の経路） |
+| ROS 2 | 任意（`--features ros2` は操縦用） | **必須**（`--features bridge-ksm`。これが唯一の経路） |
 | 独自 msg | misa_msgs だけ | misa_msgs **＋ low_command_msgs / low_state_msgs** |
 | 校正値・ゼロ点 | こちらが持つ（`calib`） | **STM が持つ**（こちらは持たない） |
 | モデル | `models/namiashi/` の submodule | **相対パスの外部ディレクトリ**（§4 で詰まる） |
@@ -225,11 +225,12 @@ sha256 094bb2c43e96912ac5d8b401782c1ff84ac9a6c212fa02c219c7156fd6ea6235
 ## 5. ビルド
 
 ```sh
-cargo build --release --features ros2                     # viz つき（既定）
-cargo build --release --no-default-features --features ros2   # 軽いほう
+cargo build --release --features bridge-ksm               # viz つき（既定）
+cargo build --release --no-default-features --features bridge-ksm  # 軽いほう
 ```
 
-`--features ros2` を付け忘れると、`run` が
+**`--features ros2` では足りない。** ブリッジの Plant は `bridge-ksm` の側で、
+`ros2` は cmd_vel と `misa_msgs` だけの操縦用（機体に依らない）。付け忘れると `run` が
 **「このビルドには ros2 が入っていません」**で落ちる（keel はブリッジしか
 経路が無いので、`kind = "ros2"` を扱えないビルドでは何もできない）。
 
@@ -240,8 +241,8 @@ PC での実測（x86_64 / 16 コア / jazzy、依存は取得済み、`target/`
 
 | 構成 | 実時間 | CPU 時間 | ピーク RSS | バイナリ | strip 後 |
 |---|---|---|---|---|---|
-| `--features ros2`（viz つき、フィルタあり） | 2 分 55 秒 | 33 分 | 3.2 GiB | 309 MB | **22 MB** |
-| `--no-default-features --features ros2`（フィルタなしで計測） | — | — | — | 79 MB | — |
+| `--features bridge-ksm`（viz つき、フィルタあり） | 2 分 55 秒 | 33 分 | 3.2 GiB | 309 MB | **22 MB** |
+| `--no-default-features --features bridge-ksm`（フィルタなしで計測） | — | — | — | 79 MB | — |
 
 `target/` は 2.6 GiB。バイナリが大きいのは `[profile.release] debug = true`
 （制御ループのジッタを追うためで、速度には影響しない）。
@@ -322,7 +323,7 @@ PC で直して push、実機は `git pull && cargo build` が筋。
 | 件 | 状態 |
 |---|---|
 | 機体の前提（apt / rust / libclang / ROS） | ✅ 2026-09-03 に機体で確認。`libclang-dev` の追加が要った |
-| humble / aarch64 でのビルド | ✅ **2026-09-03 に機体で通った**（`--features ros2`、misa_msgs は humble で 10.5 秒）。所要時間は未計測 |
+| humble / aarch64 でのビルド | ✅ **2026-09-03 に機体で通った**（当時の `--features ros2`、いまは `bridge-ksm`、misa_msgs は humble で 10.5 秒）。所要時間は未計測 |
 | ブリッジの ws の場所 | ✅ `misa-runner` の隣（`../ksm_mvp_real_ws/install`）。自動探索が拾う |
 | モデルの置き方 | 機体には rsync で `../keel/model/...` に置いた（§4 の a）。**リポジトリには同梱していないので、機体を作り直すとまた要る** |
 | `IDL_PACKAGE_FILTER` を絞ったビルド | ✅ PC で確認（`--features ros2` が 2 分 55 秒で通り、`check` も通る） |

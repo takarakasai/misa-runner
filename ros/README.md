@@ -40,8 +40,9 @@ export LD_LIBRARY_PATH=$PWD/ros/install/misa_msgs/lib:$LD_LIBRARY_PATH
 # ros2 の CLI から型を触るときだけ
 export PYTHONPATH=$PWD/ros/install/misa_msgs/lib/python3.12/site-packages:$PYTHONPATH
 
-cargo build --release --features ros2          # 実機
+cargo build --release --features ros2          # 操縦だけ（cmd_vel + サービス）
 cargo build --release --features sim,ros2      # MuJoCo で試す
+cargo build --release --features bridge-ksm    # keel の STM ブリッジに繋ぐ
 ```
 
 `r2r` は crates.io のものなので ros2_rust のオーバーレイは要らない。ただし
@@ -63,6 +64,11 @@ ros2 topic pub -r 20 /cmd_vel geometry_msgs/msg/Twist '{linear: {x: 0.12}}'
 ---
 
 # STM ブリッジとの入出力（keel）
+
+**この節は `--features bridge-ksm` の話。** `low_command_msgs` /
+`low_state_msgs` はブリッジ側（`ksm_mvp_real_ws`）の独自メッセージで、
+**この機体にしか無い**。上の `ros2`（cmd_vel + `misa_msgs` の操縦）は
+標準 msg と自前 msg だけで済むので、**ブリッジの ws が無くてもビルドできる**。
 
 アクチュエータ側は **`ksm_mvp_real_ws` の既存メッセージ**をそのまま使う。
 こちらで新しく定義するものは無い。
