@@ -45,7 +45,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // 終わって、目でも手でも追えない。操縦するときも同じ。
     let realtime = cli.flag("realtime")
         || viz_cfg.enabled
-        || matches!(cli.str("pilot"), Some("sbus") | Some("ros2"));
+        || matches!(cli.str("pilot"), Some("sbus") | Some("ros2") | Some("keys"));
 
     // **Pilot を先に開く。** 受信機が無いのにモデルを読んでから落ちると、
     // 待たされたうえで原因が最後に出る。
@@ -71,6 +71,9 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             ],
             ..Intent::default()
         })),
+        // **キーボード。** MuJoCo を見ながら手で動かす用。押しっぱなしは
+        // 端末から取れないので、押すたびに 1 段ずつ足す形になっている。
+        "keys" => Box::new(crate::pilot_keys::KeyPilot::open(cfg, gait)?),
         "sbus" => {
             // 受信機だけ開く。脚バスも IMU も MuJoCo の側にある。
             let map = misa_hal::ch348::PortMap::discover().map_err(|e| e.to_string())?;
@@ -86,7 +89,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         }
         other => {
             return Err(format!(
-                "未知の pilot {other:?}（script|sbus{}）",
+                "未知の pilot {other:?}（script|keys|sbus{}）",
                 if cfg!(feature = "ros2") { "|ros2" } else { "" }
             ))
         }
@@ -229,7 +232,12 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         gait.label(),
         cfg.control.rate_hz
     );
-    println!("t[s]   状態         胴体 z[m]  roll   pitch  yaw    接地");
+    // **操縦しているときは指令も出す。** 台本なら固定なので出さない。
+    let show_pilot = !scripted;
+    println!(
+        "t[s]   状態         胴体 z[m]  roll   pitch  yaw    接地{}",
+        if show_pilot { "  操縦" } else { "" }
+    );
 
     // `--secs 0` で操縦者が止めるまで（Ctrl-C）。
     let steps = if seconds <= 0.0 && interactive {
@@ -420,11 +428,16 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                 })
                 .collect();
             println!(
-                "{t:5.2}  {:<12} {z:8.3}  {:+.3} {:+.3} {:+.3}  {feet}",
+                "{t:5.2}  {:<12} {z:8.3}  {:+.3} {:+.3} {:+.3}  {feet}{}",
                 out.state.label(),
                 att[0],
                 att[1],
-                att[2]
+                att[2],
+                if show_pilot {
+                    format!("  {}", pilot.status_line())
+                } else {
+                    String::new()
+                }
             );
         }
     }

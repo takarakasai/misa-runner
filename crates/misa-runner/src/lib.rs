@@ -35,6 +35,7 @@ pub mod diag;
 pub mod dump;
 pub mod jointvec;
 pub mod pilot;
+pub mod pilot_keys;
 #[cfg(feature = "ros2")]
 pub mod pilot_ros2;
 pub mod plant;
@@ -342,6 +343,10 @@ fn print_help() {
                             --record で毎周期を記録する（別スレッドで書く）
   sim    [--gait G] [--vx V] MuJoCo で動力学込みに回す（--features sim のビルド）
          [--secs S] [--kp K] [--kv K] [--base-height M] [--record PATH]
+         [--pilot keys]            **キーボードで操縦する。** --viz と併せて
+                                   articara に出せば、見ながら動かせる。
+                                   押しっぱなしは端末から取れないので、押す
+                                   たびに 1 段ずつ足す（space で速度 0）
          [--cam-fixed]             カメラを固定する（既定は胴体を追う）。
                                    **地面が無地なので、追従だと歩いても
                                    止まって見える。** 進んだことを見せる用
