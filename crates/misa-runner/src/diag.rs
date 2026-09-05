@@ -614,6 +614,62 @@ pub fn check(cfg: &AppConfig) -> Result<(), String> {
             Err(e) => println!("**MIT ゲインが不正です**（run は起動しません）: {e}"),
         }
     }
+    // **WBC はモデルの不備で組み立てに失敗する**（足リンクが無い、トルクの
+    // 定格が無い）。実機に通電してから気づいても遅いので、ここで組んでみる。
+    // 無効なら何も言わない — 使っていない機能の行でログを埋めない。
+    match crate::wbc::WbcRunner::new(&robot, &cfg.wbc) {
+        Ok(Some(w)) => println!(
+            "WBC: {} 出力（質量 {:.2} kg、摩擦 {:.2}）",
+            cfg.wbc.output.label(),
+            w.mass_kg(),
+            cfg.wbc.friction_mu
+        ),
+        Ok(None) => {}
+        Err(e) => println!("**WBC を組み立てられません**（run は起動しません）: {e}"),
+    }
+    // **どの歩容コントローラで回るかを実機の前に見せる。** MPC を選んだ
+    // つもりで `auto` のままだった、が起動ログだけでは分かりにくい。
+    {
+        use crate::teleop::GaitSelect;
+        let modes: Vec<String> = [GaitSelect::Crawl, GaitSelect::Walk, GaitSelect::Trot]
+            .iter()
+            .map(|s| {
+                format!(
+                    "{}={:?}",
+                    s.label(),
+                    crate::robot::gait_mode_of(*s, &cfg.gait)
+                )
+            })
+            .collect();
+        println!(
+            "歩容コントローラ: {}（{}）",
+            cfg.gait.controller.label(),
+            modes.join(" ")
+        );
+        if cfg.gait.controller.has_mpc() {
+            let posture = robot.stance_posture(&cfg.gait);
+            let b = robot.body_inertia_at(&posture);
+            println!(
+                "  MPC の機体諸元: 質量 {:.3} kg / 慣性 diag ({:.4}, {:.4}, {:.4}) kg·m² / \
+                 重心 ({:+.4}, {:+.4}, {:+.4}) m",
+                b.mass_kg,
+                b.inertia_body[(0, 0)],
+                b.inertia_body[(1, 1)],
+                b.inertia_body[(2, 2)],
+                b.com_body.x,
+                b.com_body.y,
+                b.com_body.z,
+            );
+        }
+    }
+    // **実機のトルク制御は単位が食い違う構成がある。** 通電する前に言う。
+    if let Some(why) = cfg.torque_unit_mismatch() {
+        if cfg.wbc.enabled && cfg.wbc.output == crate::config::WbcOutput::Torque {
+            println!("**実機ではトルク制御を使えません**（run は起動しません）: {why}");
+        } else {
+            println!("トルク制御: 使えません（{why}）");
+        }
+    }
     // **接地センサが無い機体では、転倒に近づいたことを知る手がかりが
     // 姿勢角しかない。** 有効かどうかを実機の前に見せる。
     if cfg.max_tilt_rad() > 0.0 {

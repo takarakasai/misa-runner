@@ -67,6 +67,26 @@ pub struct ControlOutput {
     /// 脚関節へ与える制御モード。`Relaxed` の間は `Idle`。
     pub leg_mode: JointMode,
     pub state: State,
+    /// 立脚フラグ（FL, FR, RL, RR）。**歩容が計画した接地**であって観測では
+    /// ない（足裏センサが無い）。WBC の接触制約と接地力の配分に使う。
+    ///
+    /// 歩容を回していない状態（遷移中・ポーズ再生中）は最後に分かった値の
+    /// まま。そのあいだ WBC は回さないので影響しない。
+    pub stance: [bool; 4],
+    /// 歩容が計画している世界ヨー角 [rad]。速度指令の積分値で、IMU とは
+    /// **原点が違う**。WBC のヨー保持の目標に使う。
+    pub planned_yaw_rad: f64,
+    /// MPC 歩容が出した参照。CHAMP / LinearCrawl では `None`。
+    ///
+    /// **WBC の参照がこれで変わる**（[`crate::wbc::MpcReference`]）。
+    pub mpc: Option<crate::wbc::MpcReference>,
+    /// ランプ後の胴体速度指令 `[vx, vy, wz]`（胴体座標系、m/s と rad/s）。
+    ///
+    /// **WBC にとっては「胴体がいま動いている速さ」の唯一の手がかり。**
+    /// オドメトリが無いので実測はできず、指令をそのまま推定値として使う。
+    /// これを 0 と置くと、WBC は静止した胴体を支える解しか出さず、
+    /// 立脚が胴体を送る動きを一切許さない（実際に転倒した）。
+    pub body_velocity: [f64; 3],
 }
 
 /// 状態機械 + 歩容 + ポーズ再生。
@@ -115,6 +135,15 @@ pub struct Controller {
     /// 停止指令を受けてから全脚接地を待っている時間 [s]。
     /// 待ちが終わらないまま歩き続けないための保険。
     settling_s: f64,
+    /// 直近の周期で MPC が出した参照。歩容が MPC 系でなければ `None`。
+    ///
+    /// `tick_active` でだけ更新する。**歩容が回っていない相では捨てる**
+    /// （古い接地力の予測を WBC の参照にすると、接地していない足を押す）。
+    mpc: Option<crate::wbc::MpcReference>,
+    /// 脚オドメトリで測った胴体の速度と角速度（世界座標系）。
+    /// [`Self::observe_body`] が入れ、MPC の参照を作るのに使う。
+    observed_v_world: nalgebra::Vector3<f64>,
+    observed_omega_world: nalgebra::Vector3<f64>,
     /// 直近の歩容出力から取った胴体姿勢と接地。可視化にだけ使う。
     ///
     /// 歩容を回していない状態（遷移中・ポーズ再生中）でも姿勢を描きたいので、
@@ -133,7 +162,7 @@ impl Controller {
     /// （`misa_hal::arm::ArmServo::is_app_driven`）。
     pub fn with_arm(robot: Robot, cfg: AppConfig, arm_app_driven: bool) -> Self {
         let gait_select = GaitSelect::Crawl;
-        let gait = robot.build_gait(&cfg.gait, gait_select);
+        let gait = robot.build_gait(&cfg.gait, &cfg.wbc, gait_select);
         let chicken = ChickenHead::new(&cfg.poses);
         Self {
             robot,
@@ -154,6 +183,9 @@ impl Controller {
             tilt_rad: [0.0; 3],
             warned_tilt_reach: false,
             alt_pose_requested: false,
+            mpc: None,
+            observed_v_world: nalgebra::Vector3::zeros(),
+            observed_omega_world: nalgebra::Vector3::zeros(),
             body_view: BodyView::default(),
         }
     }
@@ -174,6 +206,23 @@ impl Controller {
     /// 直前の [`Self::tick`] で状態が変わったか。
     pub fn state_changed(&self) -> bool {
         self.just_changed
+    }
+
+    /// 脚オドメトリで測った胴体の状態を歩容へ渡す。**次の
+    /// [`Self::tick`] で使われる。**
+    ///
+    /// **受け取るのは MPC 系の歩容だけ**（`AnyGaitController` の既定実装が
+    /// 捨てる）。CHAMP と LinearCrawl は開ループで、観測を見ない。
+    ///
+    /// 位置（`set_body_pose_observed`）は渡さない。**脚オドメトリからは
+    /// 絶対位置が出ない**（積分するしかなく滑りのぶんが溜まる）ので、
+    /// 渡すと歩容が溜まった位置を「正しい」と信じて追いに行く。
+    pub fn observe_body(&mut self, body: &crate::estimator::BodyState) {
+        // **角速度は接地に依らず入る。** 空中相でも姿勢は測れている。
+        self.observed_omega_world = body.angular_velocity_world;
+        let Some(v) = body.velocity_world else { return };
+        self.observed_v_world = v;
+        self.gait.set_body_state_observed(v, body.angular_velocity_world);
     }
 
     /// 可視化用の胴体姿勢と接地フラグ。
@@ -212,6 +261,10 @@ impl Controller {
             self.set_gait(cmd.gait);
         }
 
+        // **歩容が回っていない相では MPC の参照を捨てる。** 立脚フラグと
+        // 同じ理由で、古い接地力の予測は「もう接地していない足を押せ」に
+        // なる。`tick_active` が毎周期入れ直す。
+        self.mpc = None;
         match self.state {
             State::Relaxed => self.tick_relaxed(cmd, measured),
             State::GoingToStart => self.tick_going_to_start(cmd, dt),
@@ -235,6 +288,10 @@ impl Controller {
                 JointMode::Position
             },
             state: self.state,
+            stance: self.body_view.stance,
+            planned_yaw_rad: self.body_view.yaw,
+            mpc: self.mpc,
+            body_velocity: self.ramped_v,
         }
     }
 
@@ -387,10 +444,7 @@ impl Controller {
             .set_body_height_m(self.cfg.gait.stance_height_m + cmd.height_offset_m);
         if cmd.height_offset_m != 0.0
             && !self.warned_body_height
-            && !crate::robot::gait_supports_body_height(crate::robot::gait_mode_of(
-                self.gait_select,
-                self.cfg.gait.crawl_use_linear,
-            ))
+            && !crate::robot::gait_supports_body_height(crate::robot::gait_mode_of(self.gait_select, &self.cfg.gait))
         {
             log::warn!(
                 "歩容 {} は実行中の胴体高さ変更を受け付けません（CH3 は効きません）。\
@@ -414,6 +468,7 @@ impl Controller {
         if !out.all_reachable() {
             log::warn!("IK が届かない脚があります（姿勢がクランプされました）");
         }
+        self.mpc = self.mpc_reference(&out, attitude_rad);
         let arm = self.arm_target(cmd, attitude_rad[1], dt);
         self.tilt_toward(cmd.body_attitude_rad, dt);
         self.body_view = BodyView {
@@ -447,6 +502,66 @@ impl Controller {
         if reachable {
             self.warned_tilt_reach = false;
         }
+    }
+
+    /// MPC が解いた接地力から、WBC の参照を作る。MPC 系でなければ `None`。
+    ///
+    /// # 何を計算しているか
+    ///
+    /// 接地力そのものは `predicted_grfs()` がそのまま出す。胴体加速度は
+    /// `quadruped_gait` の Newton–Euler（`predicted_base_accel_world`）に
+    /// 通して作る — **MPC が「この力を出す」と決めた結果として胴体がどう
+    /// 動くはずか**であり、WBC がそれを追えば MPC と WBC が同じ運動を
+    /// 前提にできる。
+    ///
+    /// # 位置は 0 でよい
+    ///
+    /// 使うのは `r_i − p_胴体`（重心から足へのモーメント腕）だけなので、
+    /// 胴体を原点に置いて足の位置を胴体座標系のまま渡せば辻褄が合う。
+    /// **絶対位置は脚オドメトリからは出ない**ので、そもそも入れられない。
+    fn mpc_reference(
+        &self,
+        out: &quadruped_gait::ControllerOutput,
+        attitude_rad: [f64; 3],
+    ) -> Option<crate::wbc::MpcReference> {
+        let sol = self.gait.predicted_grfs()?;
+        let grf_world = sol.grfs_first_step;
+        let [roll, pitch, yaw] = attitude_rad;
+        let quat = nalgebra::UnitQuaternion::from_euler_angles(roll, pitch, yaw);
+        // 足の位置は歩容の**計画**（`foot_body`）。実測との差は小さく、
+        // モーメント腕としてはどちらでも変わらない。
+        let mut foot_world = [nalgebra::Vector3::zeros(); 4];
+        for slot in 0..4 {
+            foot_world[slot] = quat * out.legs[slot].foot_body;
+        }
+        let (accel_lin_world, accel_ang_world) =
+            if let Some(cfg) = self.gait.centroidal_mpc_config() {
+                quadruped_gait::predicted_base_accel_world_centroidal(
+                    cfg,
+                    nalgebra::Vector3::zeros(),
+                    quat,
+                    self.observed_omega_world,
+                    &grf_world,
+                    &foot_world,
+                )
+            } else {
+                let cfg = self.gait.srbd_mpc_config()?;
+                let state = quadruped_gait::SrbdState {
+                    orientation_rpy: nalgebra::Vector3::new(roll, pitch, yaw),
+                    position: nalgebra::Vector3::zeros(),
+                    // **SrbdState の角速度は胴体座標系**（関数の中で世界へ
+                    // 回される）。脚オドメトリが持っているのは世界なので戻す。
+                    angular_velocity: quat.inverse() * self.observed_omega_world,
+                    linear_velocity: self.observed_v_world,
+                };
+                quadruped_gait::predicted_base_accel_world(cfg, &state, &grf_world, &foot_world)
+            };
+        Some(crate::wbc::MpcReference {
+            grf_world,
+            accel_lin_world,
+            accel_ang_world,
+            solved: sol.solved,
+        })
     }
 
     /// 胴体姿勢の指令へ一次遅れで寄せる。
@@ -663,7 +778,7 @@ impl Controller {
 
     fn set_gait(&mut self, select: GaitSelect) {
         log::info!("歩容を {} に切り替えます", select.label());
-        self.gait = self.robot.build_gait(&self.cfg.gait, select);
+        self.gait = self.robot.build_gait(&self.cfg.gait, &self.cfg.wbc, select);
         self.gait_select = select;
         // **作り直したので上書きは落ちている。** 次の周期で操縦側が送って
         // くる値が入る（操縦側も歩容を替えたら基準値へ戻す約束）。

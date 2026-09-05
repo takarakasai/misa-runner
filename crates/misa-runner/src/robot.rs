@@ -14,7 +14,7 @@ use quadruped_gait::{
     DEFAULT_FOOT_LINKS,
 };
 
-use crate::config::{AppConfig, GaitTuning, KneeShape};
+use crate::config::{AppConfig, GaitControllerKind, GaitTuning, KneeShape};
 use crate::jointvec::JointVec;
 use crate::pose::PoseLibrary;
 use crate::teleop::GaitSelect;
@@ -43,6 +43,13 @@ pub struct Robot {
     /// そこで丸めるのが正しい。歩容がここを超える要求を出していたら
     /// `dump` が知らせる。
     pub rate_limits: BTreeMap<String, f64>,
+    /// モデルが宣言する定格トルク [N·m]（`[joint.limit] effort`）。宣言の
+    /// 無い関節は入らない。
+    ///
+    /// **WBC のトルク上限（優先度 0 の硬い制約）と、安全ゲートのトルク
+    /// クランプの出どころ。** 位置制御しか使っていなかった間は誰も読んで
+    /// いなかったが、トルクを出す以上は上限が要る。
+    pub effort_limits: BTreeMap<String, f64>,
     /// 胴体リンクの名前（`.misa` の `root`）。
     ///
     /// **機体ごとに違う**（namiashi は `trunk`、namiashi2 は `base_link`）。
@@ -132,6 +139,14 @@ impl Robot {
             .map(|j| (j.name.clone(), j.limit.velocity))
             .collect();
 
+        let effort_limits: BTreeMap<String, f64> = parsed
+            .file
+            .joint
+            .iter()
+            .filter(|j| j.limit.effort > 0.0)
+            .map(|j| (j.name.clone(), j.limit.effort))
+            .collect();
+
         let root_link = parsed.file.robot.root.clone();
         let poses = PoseLibrary::from_misa(&parsed.file);
         let posture = resolve_kinematics_posture(&poses, kinematics_pose);
@@ -149,29 +164,116 @@ impl Robot {
             home_q,
             limits,
             rate_limits,
+            effort_limits,
             root_link,
             bad_meshes,
         })
     }
 
     /// 歩容コントローラを組み立てる。
-    pub fn build_gait(&self, tuning: &GaitTuning, select: GaitSelect) -> AnyGaitController {
+    ///
+    /// `wbc` を見るのは MPC の摩擦係数だけ。**WBC と MPC で違う摩擦を
+    /// 仮定すると、片方が出せると思った接地力をもう片方が拒む。**
+    pub fn build_gait(
+        &self,
+        tuning: &GaitTuning,
+        wbc: &crate::config::WbcConfig,
+        select: GaitSelect,
+    ) -> AnyGaitController {
         let cfg = base_gait_config(tuning, select);
-        let mode = gait_mode_of(select, tuning.crawl_use_linear);
+        let mode = gait_mode_of(select, tuning);
         let mut ctrl =
             AnyGaitController::new(mode, cfg, self.kin_at_height(tuning.stance_height_m));
         // **膝の向きは機体ごとに違う。** 取れる向きはモデルの可動域が
         // 決めるので、`dump` / `sim` の可動域検査で確かめてから選ぶ。
-        ctrl.set_knee_pattern(match tuning.knee_pattern {
-            KneeShape::BothBack => KneePattern::BothBack,
-            KneeShape::MammalianForward => KneePattern::MammalianForward,
-            KneeShape::MammalianReverse => KneePattern::MammalianReverse,
-            KneeShape::BothForward => KneePattern::BothForward,
-        });
+        ctrl.set_knee_pattern(knee_pattern_of(tuning.knee_pattern));
         // LinearCrawl はこちらで胴体高さを持つ。CHAMP 系は
         // `nominal_foot_body` を見るので上の `kin_at_height` が効く。
         ctrl.set_body_height_m(tuning.stance_height_m);
+        self.configure_mpc(&mut ctrl, tuning, wbc, mode);
         ctrl
+    }
+
+    /// MPC 系の歩容へ、この機体の物理パラメータを入れる。
+    ///
+    /// **入れないと Cheetah 級の既定値（9 kg、慣性 0.07/0.26/0.24）で
+    /// 走る。** namiashi は 2.4 kg なので、接地力の予測が 4 倍近く過大に
+    /// なり、それを参照にした WBC が脚を跳ね上げる。
+    ///
+    /// 慣性と重心は**立ち姿勢**で測る。脚を伸ばし切った姿勢（`extend`）で
+    /// 測ると、歩いている間の姿とかけ離れる。
+    fn configure_mpc(
+        &self,
+        ctrl: &mut AnyGaitController,
+        tuning: &GaitTuning,
+        wbc: &crate::config::WbcConfig,
+        mode: GaitMode,
+    ) {
+        use quadruped_gait::GaitGenerator;
+        if !matches!(mode, GaitMode::Mpc | GaitMode::CentroidalSrbd) {
+            return;
+        }
+        let body = self.body_inertia_at(&self.stance_posture(tuning));
+
+        ctrl.set_capture_point_gain(tuning.mpc_capture_point_gain_s);
+        match mode {
+            GaitMode::Mpc => ctrl.set_srbd_mpc_config(quadruped_gait::SrbdMpcConfig {
+                horizon_steps: tuning.mpc_horizon_steps,
+                dt_per_step: tuning.mpc_dt_per_step,
+                mass_kg: body.mass_kg,
+                // **SRBD は慣性を対角しか持たない。** 非対角項は捨てる
+                // （胴体が左右対称ならもともと小さい）。
+                inertia_diag_body: body.inertia_body.diagonal(),
+                friction_mu: wbc.friction_mu,
+                ..quadruped_gait::SrbdMpcConfig::default()
+            }),
+            GaitMode::CentroidalSrbd => {
+                ctrl.set_centroidal_mpc_config(quadruped_gait::CentroidalMpcConfig {
+                    horizon_steps: tuning.mpc_horizon_steps,
+                    dt_per_step: tuning.mpc_dt_per_step,
+                    mass_kg: body.mass_kg,
+                    centroidal_inertia_body: body.inertia_body,
+                    com_offset_body: body.com_body,
+                    friction_mu: wbc.friction_mu,
+                    ..quadruped_gait::CentroidalMpcConfig::default()
+                })
+            }
+            _ => {}
+        }
+    }
+
+    /// 立ち姿勢の関節角。**MPC の慣性を測るときの姿勢。**
+    ///
+    /// 速度 0 の歩容を 1 周期だけ `dt = 0` で回して取る（位相は進まない）。
+    /// 立ち位置は `nominal_foot_body` が決めるので**コントローラの種別に
+    /// 依らない**。脚を伸ばし切った `kinematics_pose` で測ると、歩いている
+    /// 間の姿とかけ離れた慣性になる。
+    pub fn stance_posture(&self, tuning: &GaitTuning) -> JointVec {
+        use quadruped_gait::GaitGenerator;
+        let mut ctrl = AnyGaitController::new(
+            GaitMode::Champ,
+            base_gait_config(tuning, GaitSelect::Crawl),
+            self.kin_at_height(tuning.stance_height_m),
+        );
+        ctrl.set_knee_pattern(knee_pattern_of(tuning.knee_pattern));
+        ctrl.set_velocity_cmd(velocity_cmd(0.0, 0.0, 0.0));
+        let out = ctrl.tick(0.0);
+        self.output_to_joints(&out, 0.0)
+    }
+
+    /// その姿勢での質量・重心まわりの慣性・重心位置（すべて胴体座標系）。
+    ///
+    /// **胴体を水平に置いた固定ベースのモデルで測る**ので、世界座標と胴体
+    /// 座標が一致する。浮遊ベースのモデル（[`crate::wbc`]）で測っても同じ
+    /// 値になる — 慣性はベースの繋ぎ方に依らない。
+    pub fn body_inertia_at(&self, posture: &JointVec) -> BodyInertia {
+        let q = build_q(&self.model, posture);
+        let phi = misarta::centroidal::compute_centroidal_inertia(&self.model, &q);
+        BodyInertia {
+            mass_kg: self.model.inertias.iter().map(|i| i.mass).sum(),
+            inertia_body: phi.fixed_view::<3, 3>(0, 0).into_owned(),
+            com_body: misarta::centroidal::compute_com(&self.model, &q),
+        }
     }
 
     /// 立ち高さを `stance_height_m` にした運動学設定。
@@ -316,11 +418,39 @@ pub fn gait_type_of(select: GaitSelect) -> GaitType {
 /// プランナで、横移動 (vy) と旋回 (wz) の指令を受け付けない**ので、
 /// 「前後・左右・旋回をプロポで操る」という要件には合わない。直進の
 /// 安定性を追い込みたいときだけ `gait.crawl_use_linear = true` で選ぶ。
-pub fn gait_mode_of(select: GaitSelect, crawl_use_linear: bool) -> GaitMode {
-    match select {
-        GaitSelect::Crawl if crawl_use_linear => GaitMode::LinearCrawl,
-        _ => GaitMode::Champ,
+/// 設定の膝の向き → 歩容ライブラリの型。
+fn knee_pattern_of(shape: KneeShape) -> KneePattern {
+    match shape {
+        KneeShape::BothBack => KneePattern::BothBack,
+        KneeShape::MammalianForward => KneePattern::MammalianForward,
+        KneeShape::MammalianReverse => KneePattern::MammalianReverse,
+        KneeShape::BothForward => KneePattern::BothForward,
     }
+}
+
+pub fn gait_mode_of(select: GaitSelect, tuning: &GaitTuning) -> GaitMode {
+    match tuning.controller {
+        // **既定は従来どおりの解釈。** `controller` を書かない設定の挙動を
+        // 変えないため、`crawl_use_linear` をここで読む。
+        GaitControllerKind::Auto => match select {
+            GaitSelect::Crawl if tuning.crawl_use_linear => GaitMode::LinearCrawl,
+            _ => GaitMode::Champ,
+        },
+        GaitControllerKind::Champ => GaitMode::Champ,
+        GaitControllerKind::LinearCrawl => GaitMode::LinearCrawl,
+        GaitControllerKind::Mpc => GaitMode::Mpc,
+        GaitControllerKind::Centroidal => GaitMode::CentroidalSrbd,
+    }
+}
+
+/// その姿勢での質量・慣性・重心。[`Robot::body_inertia_at`] が作る。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BodyInertia {
+    pub mass_kg: f64,
+    /// 重心まわりの回転慣性 [kg·m²]（胴体座標系）。
+    pub inertia_body: nalgebra::Matrix3<f64>,
+    /// 胴体原点から見た重心 [m]（胴体座標系）。
+    pub com_body: nalgebra::Vector3<f64>,
 }
 
 /// 手振りポーズは**実際の運動学で計算して `.misa` に書いてある**。
@@ -384,6 +514,11 @@ pub fn base_gait_config(tuning: &GaitTuning, select: GaitSelect) -> GaitConfig {
         GaitConfig::for_type(gait_type_of(select)).with_swing_height(tuning.swing_height_m);
     if let Some(period) = cycle_period_of(tuning, select) {
         cfg = cfg.with_cycle_period(period);
+    }
+    // **歩幅は速度の上限を決める。** 理由は
+    // [`crate::config::GaitTuning::step_length_m`]。
+    if let Some(step) = tuning.step_length_m {
+        cfg.max_step_length_m = step;
     }
     cfg
 }
@@ -486,17 +621,91 @@ mod tests {
 
     use super::*;
 
+    fn tuning(controller: GaitControllerKind, crawl_use_linear: bool) -> GaitTuning {
+        GaitTuning {
+            controller,
+            crawl_use_linear,
+            ..GaitTuning::default()
+        }
+    }
+
     #[test]
     fn gait_selection_maps_to_the_documented_controllers() {
         assert_eq!(gait_type_of(GaitSelect::Crawl), GaitType::Crawl);
         assert_eq!(gait_type_of(GaitSelect::Walk), GaitType::Walk);
         assert_eq!(gait_type_of(GaitSelect::Trot), GaitType::Trot);
         // 既定では 3 種とも CHAMP 系。横移動と旋回を受けるのはこちらだけ。
+        let auto_off = tuning(GaitControllerKind::Auto, false);
+        let auto_on = tuning(GaitControllerKind::Auto, true);
         for select in [GaitSelect::Crawl, GaitSelect::Walk, GaitSelect::Trot] {
-            assert_eq!(gait_mode_of(select, false), GaitMode::Champ);
+            assert_eq!(gait_mode_of(select, &auto_off), GaitMode::Champ);
         }
-        assert_eq!(gait_mode_of(GaitSelect::Crawl, true), GaitMode::LinearCrawl);
-        assert_eq!(gait_mode_of(GaitSelect::Walk, true), GaitMode::Champ);
+        assert_eq!(gait_mode_of(GaitSelect::Crawl, &auto_on), GaitMode::LinearCrawl);
+        assert_eq!(gait_mode_of(GaitSelect::Walk, &auto_on), GaitMode::Champ);
+    }
+
+    /// **歩幅がその歩容の最高速度を決める。**
+    ///
+    /// `歩幅 / (周期 × 接地比)`。ライブラリの既定では crawl が 0.042 m/s
+    /// しか出せず、**同梱プロファイルの `max_vx_m_s = 0.15` は届かない**。
+    /// 進む量だけを見て制御の良し悪しを判断しないための歯止め。
+    #[test]
+    fn the_step_length_sets_the_speed_ceiling_of_each_gait() {
+        let t = GaitTuning::default();
+        let ceiling = |select| {
+            let c = base_gait_config(&t, select);
+            c.max_step_length_m / (c.cycle_period_s * c.duty_factor)
+        };
+        let crawl = ceiling(GaitSelect::Crawl);
+        assert!(
+            (crawl - 0.042).abs() < 0.002,
+            "crawl の上限が {crawl:.3} m/s（0.042 のはず）"
+        );
+        assert!(ceiling(GaitSelect::Walk) > crawl);
+        assert!(ceiling(GaitSelect::Trot) > ceiling(GaitSelect::Walk));
+        // プロファイルが宣言する最高速度に crawl が届いていない。
+        assert!(crawl < GaitTuning::default().max_vx_m_s);
+    }
+
+    /// 歩幅の指定が歩容へ届くこと。**届かないと上の天井を上げられない。**
+    #[test]
+    fn a_profile_step_length_reaches_the_gait() {
+        let t = GaitTuning {
+            step_length_m: Some(0.145),
+            ..GaitTuning::default()
+        };
+        for select in [GaitSelect::Crawl, GaitSelect::Walk, GaitSelect::Trot] {
+            assert_eq!(base_gait_config(&t, select).max_step_length_m, 0.145);
+        }
+        // 指定が無ければライブラリのプリセットのまま。
+        let d = GaitTuning::default();
+        assert_eq!(base_gait_config(&d, GaitSelect::Crawl).max_step_length_m, 0.06);
+    }
+
+    /// **`controller` を書いたら `crawl_use_linear` より優先する。**
+    /// 両方書ける以上、どちらが勝つかを試験で固定しておく。
+    #[test]
+    fn an_explicit_controller_overrides_the_legacy_flag() {
+        // 旧フラグが立っていても、明示した種別が勝つ。
+        let t = tuning(GaitControllerKind::Mpc, true);
+        for select in [GaitSelect::Crawl, GaitSelect::Walk, GaitSelect::Trot] {
+            assert_eq!(gait_mode_of(select, &t), GaitMode::Mpc);
+        }
+        let t = tuning(GaitControllerKind::Centroidal, false);
+        assert_eq!(gait_mode_of(GaitSelect::Trot, &t), GaitMode::CentroidalSrbd);
+        // **歩容の型は別の軸。** MPC でも Crawl / Walk / Trot は選べる。
+        assert_eq!(gait_type_of(GaitSelect::Trot), GaitType::Trot);
+    }
+
+    /// **MPC 系だけが接地力の予測を出す。** WBC の参照が変わる分岐が
+    /// ここに掛かっているので、種別と噛み合っていること。
+    #[test]
+    fn only_the_mpc_controllers_advertise_a_grf_prediction() {
+        assert!(GaitControllerKind::Mpc.has_mpc());
+        assert!(GaitControllerKind::Centroidal.has_mpc());
+        assert!(!GaitControllerKind::Auto.has_mpc());
+        assert!(!GaitControllerKind::Champ.has_mpc());
+        assert!(!GaitControllerKind::LinearCrawl.has_mpc());
     }
 
     /// 既定設定では CH3（胴体高さ）はどの歩容でも効かない。
@@ -512,19 +721,17 @@ mod tests {
         // CH3 はどこにも効かない。
         for select in [GaitSelect::Crawl, GaitSelect::Walk, GaitSelect::Trot] {
             assert!(
-                !gait_supports_body_height(gait_mode_of(select, false)),
+                !gait_supports_body_height(gait_mode_of(
+                    select,
+                    &tuning(GaitControllerKind::Auto, false)
+                )),
                 "{select:?} で高さ変更が効くことになっている"
             );
         }
         // crawl_use_linear = true なら Crawl だけ効く。
-        assert!(gait_supports_body_height(gait_mode_of(
-            GaitSelect::Crawl,
-            true
-        )));
-        assert!(!gait_supports_body_height(gait_mode_of(
-            GaitSelect::Trot,
-            true
-        )));
+        let on = tuning(GaitControllerKind::Auto, true);
+        assert!(gait_supports_body_height(gait_mode_of(GaitSelect::Crawl, &on)));
+        assert!(!gait_supports_body_height(gait_mode_of(GaitSelect::Trot, &on)));
     }
 
     /// **同梱プロファイルが名指しする姿勢も、モデルに在ること。**
@@ -626,7 +833,7 @@ mod tests {
             let rest = rest_pose(&cfg, &robot);
             let layout = crate::snapshot::axis_layout(&cfg).unwrap();
             let dt = 1.0 / cfg.control.rate_hz;
-            let limits = crate::snapshot::safety_config(&cfg, &layout, &model_limits, &robot.rate_limits, dt, 5.0);
+            let limits = crate::snapshot::safety_config(&cfg, &layout, &model_limits, &robot.rate_limits, &robot.effort_limits, dt, 5.0);
             for select in [GaitSelect::Crawl, GaitSelect::Walk, GaitSelect::Trot] {
                 let mut controller = crate::controller::Controller::new(robot_for(&cfg), cfg.clone());
                 let mut intent = misa_core::Intent {

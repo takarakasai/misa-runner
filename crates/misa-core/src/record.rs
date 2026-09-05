@@ -32,7 +32,10 @@ use crate::time::Time;
 // **`Intent` に `gait_tune` が増えたので 2。** postcard は自己記述では
 // ないので、版が違う記録は読み側が拒む（黙って別のフィールドとして読む
 // ほうが危ない）。
-pub const FORMAT_VERSION: u32 = 2;
+//
+// **`SafetyVerdict` に `velocity_limited` が増えたので 3。** WBC の速度出力を
+// 丸めたことを記録に残すため。
+pub const FORMAT_VERSION: u32 = 3;
 
 /// 記録の先頭に 1 度だけ置く見出し。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

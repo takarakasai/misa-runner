@@ -50,6 +50,25 @@ pub struct SimOptions {
     /// 追従と比べるときは必ず併せて記録すること。
     pub actuator_kp: f64,
     pub actuator_kv: f64,
+    /// モデルの `effort`（＝アクチュエータが出せるトルクの上限）に掛ける係数。
+    ///
+    /// **WBC の `wbc.torque_scale` と同じ値を渡すこと。** あちらは「QP が
+    /// 計画してよいトルク」、こちらは「実際に出るトルク」で、揃っていないと
+    /// QP は出ないトルクを当てにした解を出す（実測で crawl の進む量が
+    /// 0.315 → 0.242 m に落ちた）。`.misa` の `effort` は連続定格なので、
+    /// 瞬間の出力を見たいときは両方を同じだけ上げる。
+    pub torque_scale: f64,
+    /// 速度制御のゲイン [N·m/(rad/s)]。**位置制御の `actuator_kv` とは別。**
+    ///
+    /// 位置制御では `kv` は減衰項（`kp` と対で効く）だが、速度制御では
+    /// `τ = kv·(q̇* − q̇)` の**唯一のゲイン**になる。位置制御向けの
+    /// 1.0 のままだと、calf の重力負荷 0.7 N·m を支えるのに 0.7 rad/s の
+    /// 速度誤差が要るほど柔らかく、**歩容ではなくこのゲインが挙動を
+    /// 決めてしまう**（MuJoCo の crawl で後ろへ 0.5 m 走った）。
+    ///
+    /// 実機の LKMTech は速度ループをドライバの中に持っていて、ここより
+    /// ずっと硬い。**シムで速度出力を見るときは必ず上げること。**
+    pub velocity_kv: f64,
     /// 胴体の初期高さ [m]。低すぎると床にめり込んだ状態から始まる。
     pub base_height_m: f64,
     /// 初期姿勢（関節名 → 角度 [rad]）。ここから物理が始まる。
@@ -81,6 +100,8 @@ impl Default for SimOptions {
             control_period_s: 0.005,
             actuator_kp: 60.0,
             actuator_kv: 1.0,
+            torque_scale: 1.0,
+            velocity_kv: 20.0,
             base_height_m: 0.30,
             home: Vec::new(),
             friction: None,
@@ -104,6 +125,10 @@ pub struct MujocoPlant {
     joint_idx: Vec<usize>,
     feet: Vec<String>,
     root_link: String,
+    /// 制御モードで切り替えるゲイン。**同じ `actuator_kv` の欄を、位置と
+    /// 速度で違う意味に使う**ので、両方を控えて毎周期入れ直す。
+    position_kv: f64,
+    velocity_kv: f64,
     /// 1 tick で進める MuJoCo のフレーム数。
     frames_per_tick: u32,
     #[cfg(feature = "render")]
@@ -152,6 +177,12 @@ impl MujocoPlant {
             j.actuator_mode = ActuatorMode::Position;
             j.actuator_kp = opts.actuator_kp;
             j.actuator_kv = opts.actuator_kv;
+            // **アクチュエータの上限もここで決まる。** `apply_controller` が
+            // `joint.effort` でトルクを頭打ちにするので、連続定格のままだと
+            // 「瞬間はもっと出る」を試せない。
+            if opts.torque_scale > 0.0 {
+                j.effort *= opts.torque_scale;
+            }
         }
         for (name, q) in &opts.home {
             let idx = *model
@@ -200,7 +231,14 @@ impl MujocoPlant {
         );
 
         let caps = PlantCaps {
-            modes: vec![ControlMode::Position],
+            // **アクチュエータは全部 `<motor>` で、PD は articara が Rust 側で
+            // 回している。** したがってモードは毎周期切り替えられる（MJCF を
+            // 書き直す必要がない）。実機と同じ 3 モードを名乗れる。
+            modes: vec![
+                ControlMode::Position,
+                ControlMode::Velocity,
+                ControlMode::Torque,
+            ],
             has_imu: true,
             // **接地は実機と違ってちゃんと分かる。** シムの取り柄の 1 つ。
             has_contacts: true,
@@ -215,6 +253,8 @@ impl MujocoPlant {
             joint_idx,
             feet: opts.feet.clone(),
             root_link: opts.root_link.clone(),
+            position_kv: opts.actuator_kv,
+            velocity_kv: opts.velocity_kv,
             frames_per_tick,
             #[cfg(feature = "render")]
             render: None,
@@ -359,13 +399,38 @@ impl Plant for MujocoPlant {
             let Some(a) = cmd.get(AxisId::new(i as u16)) else {
                 continue;
             };
+            // **モードは軸ごと・周期ごとに切り替える。** `apply_controller` は
+            // 毎周期 `joints[ji].actuator_mode` を読むので、ここを書き換える
+            // だけで制御則が変わる。MJCF の側は `<motor>` のままでよい。
             match a.mode {
                 // 位置アクチュエータに脱力は無いので、その場で保持する。
                 ControlMode::Idle => {
                     let q = self.model.joint_positions[ji];
+                    self.model.joints[ji].actuator_mode = ActuatorMode::Position;
                     self.sim.set_position_target(ji, q);
+                    self.sim.set_position_target_velocity(ji, 0.0);
+                    self.sim.set_torque_feedforward(ji, 0.0);
                 }
-                _ => self.sim.set_position_target(ji, a.position_rad),
+                ControlMode::Torque => {
+                    self.model.joints[ji].actuator_mode = ActuatorMode::Torque;
+                    self.sim.set_torque_target(ji, a.torque_ff_nm);
+                }
+                ControlMode::Velocity => {
+                    self.model.joints[ji].actuator_mode = ActuatorMode::Velocity;
+                    // **速度制御の kv は位置制御のものと別物。** 詳しくは
+                    // [`SimOptions::velocity_kv`]。
+                    self.model.joints[ji].actuator_kv = self.velocity_kv;
+                    self.sim.set_velocity_target(ji, a.velocity_rad_s);
+                }
+                // 位置と MIT。**τ は前置として足す**ので、WBC の解を位置
+                // 出力で回したときも接地力ぶんの力は出る（実機の MIT と
+                // 同じ形）。位置制御しか持たない機体では無視される値。
+                ControlMode::Position | ControlMode::Impedance => {
+                    self.model.joints[ji].actuator_mode = ActuatorMode::Position;
+                    self.model.joints[ji].actuator_kv = self.position_kv;
+                    self.sim.set_position_target(ji, a.position_rad);
+                    self.sim.set_torque_feedforward(ji, a.torque_ff_nm);
+                }
             }
         }
 
@@ -399,10 +464,18 @@ impl Plant for MujocoPlant {
                 [r, p, y]
             })
             .unwrap_or([0.0; 3]);
-        let gyro = self
+        // **ジャイロは胴体座標系で返す。** 実機の IMU はストラップダウンで
+        // 胴体に固定されているので、`Imu::gyro_rad_s` は胴体座標という約束。
+        // MuJoCo は世界座標で持っているので回してから入れる。**回さずに
+        // 入れていた（2026-09-06 まで）** — 傾きが小さいうちは差が出ないが、
+        // 姿勢を使う制御（WBC・MPC）を入れると効いてくる。
+        let gyro_world = self
             .sim
             .body_world_angular_velocity(&self.root_link)
             .unwrap_or([0.0; 3]);
+        let r_wb = nalgebra::Rotation3::from_euler_angles(rpy[0], rpy[1], rpy[2]);
+        let gyro_body = r_wb.transpose() * nalgebra::Vector3::from(gyro_world);
+        let gyro = [gyro_body.x, gyro_body.y, gyro_body.z];
         // **真の加速度計ではない。** 重力を胴体座標へ回しただけで、並進加速
         // は入っていない。姿勢しか使っていない現状では足りるが、加速度を
         // 使う制御を入れるなら、モデルに IMU サイトを足して

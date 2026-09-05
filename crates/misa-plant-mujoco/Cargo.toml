@@ -18,6 +18,8 @@ authors = ["Takara Kasai <takara.kasai@gmail.com>"]
 misa-core = { path = "../misa-core" }
 articara = { git = "https://github.com/takarakasai/articara.git", default-features = false, features = ["mujoco"] }
 mujoco = { package = "mujoco-rs", version = "4.0.1" }
+# 姿勢の回転だけに使う（IMU のジャイロを世界座標 → 胴体座標へ）。
+nalgebra = "0.34.2"
 
 log = "0.4"
 

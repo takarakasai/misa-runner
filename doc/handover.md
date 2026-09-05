@@ -247,7 +247,10 @@ sudo chrt -f 50 ./misa-run run --robot robots/namiashi.toml
 | **初期姿勢（250×350×700 mm）** | **未確定。相談したいと言われている。** `control.start_pose` が指す `.misa` のポーズ名で決まり、暫定で `constrain`（thigh 1.0 / calf −2.0）。articara でポーズを作って `.misa` に保存すれば名前を書くだけで反映される |
 | **腕サーボの品種** | 未定（追って連絡）。初期検討は受信機直結。`ArmProtocol` に variant を足して `ArmServo` を実装すれば `is_app_driven() = true` になり、チキンヘッドと挨拶の腕動作が自動で有効になる |
 | **`sign` / `zero_pose_rad` / 可動域** | 全 12 軸未校正。`calib` で確定させる |
-| **トルク制御** | `JointMode::Torque` の口は空けてあるが未使用。MPC / WBC へ進むのは位置制御で歩いてから。LKMTech の MIT はホスト側エミュレーション（`measure` + `set_torque` の 2 往復）なので通信レートが半分になる |
+| **トルク制御** | `JointMode::{Torque, Velocity}` を HAL からモータのコマンド（`0xA1` / `0xA2`）まで配線し、WBC（`crates/misa-runner/src/wbc.rs`）から出せるようにした（2026-09-06）。**MuJoCo でしか回していない。** 実機へ流す前に README の「WBC（全身制御）」を読むこと。LKMTech の MIT はホスト側エミュレーション（`measure` + `set_torque` の 2 往復）なので通信レートが半分になる |
+| **MPC 歩容** | `[gait] controller = "mpc" \| "centroidal"` で `quadruped_gait` の SRBD MPC / 重心 MPC を選べる（2026-09-06）。**質量・慣性・重心はモデルから入れる**（既定のままだと Cheetah 級の 9 kg で走る）。WBC の参照が準静的な自前のものから MPC の予測に変わる。**位置出力では効く**（既定歩容で crawl +0.436 → +0.476 m、trot +0.590 → +0.659 m、crawl のヨーのずれ 19.4° → 8.9°）が、**トルク出力は直らない**。`gait.mpc_capture_point_gain_s` は 0 に落とすこと（articara も 0）|
+| **歩容の速度上限** | `歩幅 / (周期 × 接地比)`。ライブラリ既定では crawl 0.042 / walk 0.178 / trot 0.500 m/s で、**同梱プロファイルの `max_vx_m_s = 0.15` は crawl では出ない**。`[gait] step_length_m` で上げられる（articara は 3 歩容とも 0.145 m）。**進む量だけを見て制御の良し悪しを判断しないこと** |
+| **WBC** | 既定は無効（`[wbc] enabled = false`）。有効にすると脚 12 軸が階層 QP の解に変わり、出力はトルク / 速度 / 位置から選ぶ。**実用は `output = "position"`**（位置 PD が歩容の目標を追い、WBC の τ をその上に前置として足す legged_control の hybrid joint。articara が namiashi で検証した構成と同じ）。歩容を詰めれば MuJoCo で trot 0.80 m/s を 95 %、walk 0.33 を 94 %、crawl 0.17 を 104 % で追従する。**トルク出力（位置ループを外す形）は歩けない** — WBC が出すのは加速度で位置の積分器が無く、articara も同じ理由で hybrid へ移している。位置・速度出力は 40 秒回しても崩れない。**実機のトルク制御には `torque_constant_nm_per_a` が要る**（無いと N·m が電流 A として線に乗る。`SerialPlant` が Torque を名乗らないので `run` は止まる）|
 | **CI** | 兄弟クレートは全部 `.github/workflows/ci.yml` を持っているが、ここはまだ無い。remote はできたので足せる状態 |
 
 ---

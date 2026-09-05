@@ -32,6 +32,7 @@ pub mod chicken;
 pub mod config;
 pub mod controller;
 pub mod diag;
+pub mod estimator;
 pub mod dump;
 pub mod jointvec;
 pub mod pilot;
@@ -48,6 +49,7 @@ pub mod runner;
 pub mod snapshot;
 pub mod teleop;
 pub mod viz;
+pub mod wbc;
 
 pub use config::AppConfig;
 
@@ -133,7 +135,10 @@ fn dispatch(cli: &Cli, backends: &[&dyn Backend]) -> Result<(), String> {
         _ => {}
     }
 
-    let cfg = load_config(cli)?;
+    let mut cfg = load_config(cli)?;
+    apply_gait_overrides(&mut cfg, cli)?;
+    apply_wbc_overrides(&mut cfg, cli)?;
+    let cfg = cfg;
     match command {
         "check" => diag::check(&cfg),
         // **`bridge` を持つのは Backend。** 機体固有の往復確認なので、
@@ -225,6 +230,36 @@ fn load_config(cli: &Cli) -> Result<AppConfig, String> {
             Ok(cfg)
         }
     }
+}
+
+/// `--wbc` / `--wbc-output` をプロファイルへ重ねる。
+///
+/// **設定に書くのが正規の入口**で、こちらは掃引と切り分け用。`--wbc-output`
+/// だけ渡したときも有効化する（出し方だけ指定して効かない、が一番分かり
+/// にくい）。綴り違いは [`Cli::validate_flags`] が先に弾く。
+fn apply_gait_overrides(cfg: &mut AppConfig, cli: &Cli) -> Result<(), String> {
+    let Some(name) = cli.str("gait-controller") else {
+        return Ok(());
+    };
+    cfg.gait.controller = config::GaitControllerKind::parse(name).ok_or_else(|| {
+        format!(
+            "--gait-controller {name:?} は auto / champ / linear_crawl / mpc / centroidal のどれかです"
+        )
+    })?;
+    Ok(())
+}
+
+fn apply_wbc_overrides(cfg: &mut AppConfig, cli: &Cli) -> Result<(), String> {
+    if let Some(name) = cli.str("wbc-output") {
+        cfg.wbc.output = config::WbcOutput::parse(name).ok_or_else(|| {
+            format!("--wbc-output {name:?} は torque / velocity / position のどれかです")
+        })?;
+        cfg.wbc.enabled = true;
+    }
+    if cli.flag("wbc") {
+        cfg.wbc.enabled = true;
+    }
+    cfg.wbc.validate()
 }
 
 fn write_config(cli: &Cli) -> Result<(), String> {
@@ -346,6 +381,9 @@ fn print_help() {
                             --record で毎周期を記録する（別スレッドで書く）
   sim    [--gait G] [--vx V] MuJoCo で動力学込みに回す（--features sim のビルド）
          [--secs S] [--kp K] [--kv K] [--base-height M] [--record PATH]
+         [--kv-velocity K]         **速度制御のゲイン**（既定 20）。位置制御の
+                                   --kv とは別物で、速度制御ではこれが唯一の
+                                   ゲインになる
          [--pilot keys]            **キーボードで操縦する。** --viz と併せて
                                    articara に出せば、見ながら動かせる。
                                    押しっぱなしは端末から取れないので、押す
@@ -370,6 +408,15 @@ fn print_help() {
 共通オプション:
   --robot PATH              ロボットのプロファイル TOML
                             （省略時は組み込みの既定値。--config は旧綴り）
+  --wbc                     全身制御（WBC）を有効にする（run / sim）
+                            **既定は無効。** 有効にすると脚 12 軸の指令が
+                            階層 QP の解に変わる。設定は [wbc]
+  --wbc-output MODE         WBC の解の出し方: torque | velocity | position
+                            （既定 position）。**指定すると WBC も有効になる**
+  --gait-controller KIND    歩容コントローラ: auto | champ | linear_crawl
+                            | mpc | centroidal（既定 auto = 従来どおり）
+                            **mpc / centroidal は接地力を予測する**ので、
+                            WBC の参照が準静的な自前のものから MPC に変わる
 
 dump のオプション:
   --gait crawl|walk|trot    歩容（既定 crawl）
@@ -544,11 +591,15 @@ const VALUE_FLAGS: &[&str] = &[
     "tilt-roll",
     "tilt-pitch",
     "tilt-yaw",
+    "wbc-output",
+    "gait-controller",
+    "kv-velocity",
 ];
 
 /// 値を取らないフラグ。ここに無いものは次のトークンを値として食う。
 const BOOL_FLAGS: &[&str] = &[
     "help",
+    "wbc",
     "dry-run",
     "allow-no-sbus",
     "skip-zero",

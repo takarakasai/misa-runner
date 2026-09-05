@@ -82,6 +82,12 @@ pub struct JointCommand {
     pub max_speed_rad_s: f64,
     /// トルク指令 (N·m、出力軸)。`JointMode::Torque` のときだけ使う。
     pub torque_nm: f64,
+    /// 速度指令 (rad/s、出力軸)。`JointMode::Velocity` のときだけ使う。
+    ///
+    /// **`max_speed_rad_s` とは別物。** あちらは位置制御で「何 rad/s まで
+    /// 出してよいか」の上限で、こちらは「何 rad/s で回せ」という目標。
+    /// 同じフィールドに載せると、モードを跨いだ切り替えで意味が変わる。
+    pub velocity_rad_s: f64,
 }
 
 impl Default for JointCommand {
@@ -91,6 +97,7 @@ impl Default for JointCommand {
             position_rad: 0.0,
             max_speed_rad_s: 0.0,
             torque_nm: 0.0,
+            velocity_rad_s: 0.0,
         }
     }
 }
@@ -104,6 +111,11 @@ impl Default for JointCommand {
 pub enum JointMode {
     Idle,
     Position,
+    /// 速度制御（LKMTech の `0xA2`）。`velocity_rad_s` を見る。
+    ///
+    /// **位置のフレーム確立を待たない。** 速度指令は絶対角との対応が
+    /// 付いていなくても意味を持つ（`0xA4` の位置指令とは違う）。
+    Velocity,
     Torque,
 }
 

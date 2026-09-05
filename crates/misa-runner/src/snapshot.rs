@@ -123,9 +123,37 @@ pub fn safety_config(
     layout: &AxisLayout,
     model_limits: &BTreeMap<String, (f64, f64)>,
     model_rates: &BTreeMap<String, f64>,
+    model_efforts: &BTreeMap<String, f64>,
     control_period_s: f64,
     stale_ticks: f64,
 ) -> SafetyConfig {
+    // **トルクの上限はモデルの定格 × 係数**（`wbc.torque_scale`。連続定格と
+    // 瞬間の差をここで吸収する）を、絶対値の上限で頭打ちにしたもの。
+    // どちらも無ければ 0 = 制限しない。**トルクを出す構成では必ず持たせる
+    // こと。** 上限の無いトルク指令は、モデル誤差がそのまま脚の飛び出しになる。
+    let torque_of = |id: AxisId| -> f64 {
+        let declared = layout
+            .table
+            .name(id)
+            .and_then(|n| model_efforts.get(n).copied())
+            .unwrap_or(0.0);
+        cfg.wbc.torque_ceiling(declared)
+    };
+    // **速度指令の上限はモデルの定格速度。** `max_target_rate_rad_s`
+    // （目標が動いてよい速さ）とは別で、こちらは軸そのものに要求してよい
+    // 速さ。宣言が無ければ位置制御の既定速度上限で代用する。
+    let speed_of = |id: AxisId| -> f64 {
+        let model = layout
+            .table
+            .name(id)
+            .and_then(|n| model_rates.get(n).copied())
+            .unwrap_or(0.0);
+        if model > 0.0 {
+            model
+        } else {
+            cfg.hardware.default_max_speed_rad_s()
+        }
+    };
     // **設定とモデルの定格の、厳しいほう。**
     //
     // 設定側は「目標をどれだけ穏やかに動かすか」という運用の判断で、
@@ -160,7 +188,8 @@ pub fn safety_config(
                         min_rad: m.min_rad,
                         max_rad: m.max_rad,
                         max_target_rate_rad_s: rate_of(id),
-                        max_torque_nm: 0.0,
+                        max_torque_nm: torque_of(id),
+                        max_velocity_rad_s: speed_of(id),
                     });
                 }
             }
@@ -173,7 +202,8 @@ pub fn safety_config(
                         min_rad,
                         max_rad,
                         max_target_rate_rad_s: rate_of(id),
-                        max_torque_nm: 0.0,
+                        max_torque_nm: torque_of(id),
+                        max_velocity_rad_s: speed_of(id),
                     });
                 }
             }
@@ -192,7 +222,8 @@ pub fn safety_config(
             min_rad,
             max_rad,
             max_target_rate_rad_s: rate_of(id),
-            max_torque_nm: 0.0,
+            max_torque_nm: torque_of(id),
+            max_velocity_rad_s: speed_of(id),
         });
     }
     SafetyConfig {
@@ -270,12 +301,17 @@ pub fn observation(
 ///
 /// `relaxed` が true なら**モードだけ脱力に落とし、目標角は残す**。
 /// 目標を 0 に潰すと復帰した瞬間に全軸が 0 rad へ飛ぶ。
+///
+/// `wbc` があれば**脚 12 軸だけ**その解で上書きする（モードも含めて）。
+/// 補助軸は上書きしない — 腕を動かすのはチキンヘッドの仕事で、WBC は
+/// 重力補償のためにモデルへ入れているだけ。
 pub fn command(
     layout: &AxisLayout,
     targets: &JointVec,
     max_speed_rad_s: f64,
     relaxed: bool,
     gains: Option<misa_hal::config::MitGains>,
+    wbc: Option<&crate::wbc::WbcPlan>,
 ) -> Command {
     let mut cmd = Command::idle(layout.table.len());
     let mode = if relaxed {
@@ -290,6 +326,20 @@ pub fn command(
                 mode,
                 ..AxisCommand::position(targets.legs[leg][k], max_speed_rad_s)
             };
+            // **脱力中は WBC を通さない。** モードだけ脱力に落として目標を
+            // 残す約束は WBC の解でも同じで、`relaxed` が勝つ。
+            if let (Some(plan), false) = (wbc, relaxed) {
+                let p = plan.legs[leg][k];
+                a.mode = plan.mode;
+                a.position_rad = p.position_rad;
+                a.torque_ff_nm = p.torque_nm;
+                // **位置指令の `velocity_rad_s` は速度上限のまま。**
+                // 目標速度として入れてよいのは速度・MIT のときだけ。
+                a.velocity_rad_s = match plan.mode {
+                    ControlMode::Velocity | ControlMode::Impedance => p.velocity_rad_s,
+                    _ => max_speed_rad_s,
+                };
+            }
             // **MIT の機体には kp/kd を毎周期載せる。** 無いと τ が恒等的に
             // 0 になり、位置を指令しているのに脱力したまま崩れる。
             // シリアルの機体はサーボが内部で持つので `None`。
@@ -404,7 +454,7 @@ mod tests {
             kp: [40.0, 60.0, 70.0],
             kd: [1.0, 1.5, 2.0],
         };
-        let cmd = command(&layout(), &JointVec::zeros(), 8.0, false, Some(g));
+        let cmd = command(&layout(), &JointVec::zeros(), 8.0, false, Some(g), None);
         let t = layout().table;
         for (name, kp, kd) in [
             ("FL_hip_joint", 40.0, 1.0),
@@ -416,10 +466,78 @@ mod tests {
         }
     }
 
+    fn wbc_plan(mode: ControlMode) -> crate::wbc::WbcPlan {
+        let mut legs = [[crate::wbc::AxisPlan::default(); 3]; 4];
+        for (leg, slot) in legs.iter_mut().enumerate() {
+            for (k, a) in slot.iter_mut().enumerate() {
+                let n = (leg * 3 + k) as f64;
+                *a = crate::wbc::AxisPlan {
+                    position_rad: 0.1 + n,
+                    velocity_rad_s: 0.2 + n,
+                    torque_nm: 0.3 + n,
+                };
+            }
+        }
+        crate::wbc::WbcPlan {
+            mode,
+            legs,
+            status: Default::default(),
+        }
+    }
+
+    /// **WBC の解は脚 12 軸だけを置き換える。** 補助軸（腕）はチキン
+    /// ヘッドの担当なので、モードも目標も歩容の側のまま残る。
+    #[test]
+    fn a_wbc_plan_replaces_the_legs_and_leaves_the_aux_axis_alone() {
+        let lay = layout();
+        let mut targets = JointVec::zeros();
+        targets.arm = 0.42;
+        let cmd = command(&lay, &targets, 8.0, false, None, Some(&wbc_plan(ControlMode::Torque)));
+        let a = cmd.get(AxisId::new(0)).unwrap();
+        assert_eq!(a.mode, ControlMode::Torque);
+        assert_eq!(a.torque_ff_nm, 0.3);
+        let head = cmd.get(lay.head.unwrap()).unwrap();
+        assert_eq!(head.mode, ControlMode::Position);
+        assert_eq!(head.position_rad, 0.42);
+    }
+
+    /// **速度出力のときだけ `velocity_rad_s` が目標になる。** 位置指令の
+    /// 同じ欄は速度**上限**なので、そこへ目標を書くと意味が変わる。
+    #[test]
+    fn only_the_velocity_output_puts_a_target_in_the_velocity_field() {
+        let lay = layout();
+        let q = JointVec::zeros();
+        let vel = command(&lay, &q, 8.0, false, None, Some(&wbc_plan(ControlMode::Velocity)));
+        assert_eq!(vel.get(AxisId::new(0)).unwrap().velocity_rad_s, 0.2);
+
+        let pos = command(&lay, &q, 8.0, false, None, Some(&wbc_plan(ControlMode::Position)));
+        let a = pos.get(AxisId::new(0)).unwrap();
+        assert_eq!(a.velocity_rad_s, 8.0);
+        assert_eq!(a.position_rad, 0.1);
+        // τ はどのモードでも載せる。MIT を持つ機体では前置として効く。
+        assert_eq!(a.torque_ff_nm, 0.3);
+    }
+
+    /// **脱力が勝つ。** モードだけ脱力に落として目標は残す、という約束は
+    /// WBC の解でも変わらない。
+    #[test]
+    fn relaxing_wins_over_a_wbc_plan() {
+        let lay = layout();
+        let cmd = command(
+            &lay,
+            &JointVec::zeros(),
+            8.0,
+            true,
+            None,
+            Some(&wbc_plan(ControlMode::Torque)),
+        );
+        assert_eq!(cmd.get(AxisId::new(0)).unwrap().mode, ControlMode::Idle);
+    }
+
     /// **シリアルの機体には載せない。** あちらはサーボが内部で持つ。
     #[test]
     fn a_serial_command_leaves_the_gains_alone() {
-        let cmd = command(&layout(), &JointVec::zeros(), 8.0, false, None);
+        let cmd = command(&layout(), &JointVec::zeros(), 8.0, false, None, None);
         let a = cmd.get(AxisId::new(0)).unwrap();
         assert_eq!((a.kp_nm_per_rad, a.kd_nm_s_per_rad), (0.0, 0.0));
     }
@@ -474,7 +592,7 @@ mod tests {
         let lay = wheeled_layout();
         let mut q = JointVec::zeros();
         q.legs[0][1] = 0.9;
-        let cmd = command(&lay, &q, 8.0, false, None);
+        let cmd = command(&lay, &q, 8.0, false, None, None);
 
         assert_eq!(cmd.len(), 16);
         assert_eq!(cmd.get(AxisId::new(1)).unwrap().mode, ControlMode::Position);
@@ -520,7 +638,7 @@ mod tests {
 
         let mut model = BTreeMap::new();
         model.insert("FL_thigh_joint".to_string(), (-2.5, 2.5));
-        let sc = safety_config(&cfg, &lay, &model, &Default::default(), 0.005, 5.0);
+        let sc = safety_config(&cfg, &lay, &model, &Default::default(), &Default::default(), 0.005, 5.0);
 
         let id = lay.table.id_of("FL_thigh_joint").unwrap();
         assert_eq!(sc.axes[id.index()].min_rad, -2.5);
@@ -530,6 +648,43 @@ mod tests {
         assert!(sc.axes[other.index()].min_rad.is_infinite());
     }
 
+    /// **トルクと速度の上限はモデルの定格から入る。**
+    ///
+    /// 位置制御しか使っていなかった間は 0（＝制限なし）で埋まっていた。
+    /// **上限の無いトルク指令は、モデル誤差がそのまま脚の飛び出しになる**
+    /// ので、WBC を回す前にここが埋まっていることを確かめる。
+    #[test]
+    fn the_gate_takes_its_torque_and_speed_ceilings_from_the_model() {
+        let cfg = AppConfig::default();
+        let lay = axis_layout(&cfg).unwrap();
+        let mut efforts = BTreeMap::new();
+        efforts.insert("FL_hip_joint".to_string(), 1.5);
+        let mut rates = BTreeMap::new();
+        rates.insert("FL_hip_joint".to_string(), 33.5);
+        let sc = safety_config(&cfg, &lay, &Default::default(), &rates, &efforts, 0.005, 5.0);
+        let id = lay.table.id_of("FL_hip_joint").unwrap();
+        assert_eq!(sc.axes[id.index()].max_torque_nm, 1.5);
+        assert_eq!(sc.axes[id.index()].max_velocity_rad_s, 33.5);
+        // 宣言の無い軸はトルクを制限しない。**歩容の位置制御では誰も
+        // トルクを載せないので害はないが、WBC を回すなら必ず宣言すること。**
+        let other = lay.table.id_of("FR_hip_joint").unwrap();
+        assert_eq!(sc.axes[other.index()].max_torque_nm, 0.0);
+    }
+
+    /// **設定の上限はモデルより優先する。** 実機の電流リミットをモデルの
+    /// 定格より手前へ置きたいときに使う。
+    #[test]
+    fn the_profile_can_tighten_the_torque_ceiling_below_the_model() {
+        let mut cfg = AppConfig::default();
+        cfg.wbc.max_torque_nm = 0.8;
+        let lay = axis_layout(&cfg).unwrap();
+        let mut efforts = BTreeMap::new();
+        efforts.insert("FL_hip_joint".to_string(), 1.5);
+        let sc = safety_config(&cfg, &lay, &Default::default(), &Default::default(), &efforts, 0.005, 5.0);
+        let id = lay.table.id_of("FL_hip_joint").unwrap();
+        assert_eq!(sc.axes[id.index()].max_torque_nm, 0.8);
+    }
+
     /// **実測値があるほうを優先する。** 校正で確定した値のほうが実機に近い。
     #[test]
     fn a_calibrated_axis_keeps_its_measured_range_over_the_models() {
@@ -537,7 +692,7 @@ mod tests {
         let lay = axis_layout(&cfg).unwrap();
         let mut model = BTreeMap::new();
         model.insert("FL_hip_joint".to_string(), (-9.9, 9.9));
-        let sc = safety_config(&cfg, &lay, &model, &Default::default(), 0.005, 5.0);
+        let sc = safety_config(&cfg, &lay, &model, &Default::default(), &Default::default(), 0.005, 5.0);
 
         let sh = cfg.hardware.serial().unwrap();
         let m = &sh.bus_for(LegSlot::Fl).unwrap().motors[0];
@@ -589,7 +744,7 @@ mod tests {
         let mut q = JointVec::zeros();
         q.legs[2][1] = 0.75; // RL_thigh
         q.arm = -0.25;
-        let cmd = command(&layout(), &q, 8.0, false, None);
+        let cmd = command(&layout(), &q, 8.0, false, None, None);
 
         let t = layout().table;
         let id = t.id_of("RL_thigh_joint").unwrap();
@@ -603,7 +758,7 @@ mod tests {
     fn relaxing_keeps_the_targets_it_was_holding() {
         let mut q = JointVec::zeros();
         q.legs[0][1] = 1.0;
-        let cmd = command(&layout(), &q, 8.0, true, None);
+        let cmd = command(&layout(), &q, 8.0, true, None, None);
         let a = cmd.get(AxisId::new(1)).unwrap();
         assert_eq!(a.mode, ControlMode::Idle);
         assert_eq!(a.position_rad, 1.0);
@@ -647,7 +802,7 @@ mod tests {
         .unwrap();
         let cfg = crate::config::AppConfig::from_toml(&text).unwrap();
         let lay = axis_layout(&cfg).unwrap();
-        let sc = safety_config(&cfg, &lay, &BTreeMap::new(), &Default::default(), 1.0 / cfg.control.rate_hz, 5.0);
+        let sc = safety_config(&cfg, &lay, &BTreeMap::new(), &Default::default(), &Default::default(), 1.0 / cfg.control.rate_hz, 5.0);
         assert_eq!(sc.axes.len(), lay.table.len());
 
         // FL の hip は設定の 1 本目のバスの 1 個目のモータ。

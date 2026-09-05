@@ -534,6 +534,29 @@ pub fn run(
     // Controller へ move する前に控えておく。
     let model_limits = robot.limits.clone();
     let model_rates = robot.rate_limits.clone();
+    let model_efforts = robot.effort_limits.clone();
+    // **WBC はここで組み立てる。** モデルの不備（足リンクが無い、トルクの
+    // 定格が無い）は制御ループへ入る前に落とす。無効なら `None` で、以降の
+    // 経路は従来どおり歩容の IK 出力をそのまま位置制御で流す。
+    let mut wbc = crate::wbc::WbcRunner::new(&robot, &cfg.wbc)?;
+    // **脚オドメトリは WBC の有無に依らず回す。** MPC 歩容も同じ推定を
+    // 使うので、出どころは 1 か所（[`crate::estimator`]）。
+    let estimator = crate::estimator::BodyEstimator::new(&robot);
+    // **Plant が名乗らないモードでは出さない。** 実機のトルク制御は、
+    // トルク定数を書くまで単位が食い違う（`AppConfig::torque_unit_mismatch`）。
+    // ここで止めないと、N·m が電流 (A) として 12 軸ぶん線に乗る。
+    if let Some(w) = wbc.as_ref() {
+        let want = w.control_mode();
+        if !plant.capabilities().modes.contains(&want) {
+            let _ = plant.disarm();
+            return Err(format!(
+                "この機体は {:?} 制御を扱えません（wbc.output = {:?}）。{}",
+                want,
+                cfg.wbc.output.label(),
+                cfg.torque_unit_mismatch().unwrap_or_default()
+            ));
+        }
+    }
     let mut controller = Controller::with_arm(robot, cfg.clone(), arm_app_driven);
 
     let mut warned_unread = false;
@@ -547,6 +570,7 @@ pub fn run(
     let mut measured_seen = false;
     let mut fault_hint_shown = false;
     let mut watch = Watch::new(&cfg, &model_limits);
+    let mut wbc_status: Option<(crate::config::WbcOutput, crate::wbc::WbcStatus)>;
     // 記録と、その脇で回す SafetyGate。
     //
     // **ゲートは実機へ流れる指令そのものに掛かる**（2026-09-02 に配線した。
@@ -559,6 +583,7 @@ pub fn run(
         &layout,
         &model_limits,
         &model_rates,
+        &model_efforts,
         period.as_secs_f64(),
         STALE_TICKS,
     ));
@@ -651,7 +676,26 @@ pub fn run(
         let measured = jointvec_from(&obs);
         let attitude = obs.imu.map(|i| i.rpy_rad).unwrap_or([0.0; 3]);
 
-        let out = controller.tick(&cmd, &measured, attitude, period.as_secs_f64());
+        let mut out = controller.tick(&cmd, &measured, attitude, period.as_secs_f64());
+        // **計画した立脚を実測の接地で直す。** WBC の「立脚足が滑らない」は
+        // 硬い制約なので、接地していない足を接地と信じると解が壊れる。
+        if cfg.wbc.use_measured_contact {
+            out.stance = crate::estimator::stance_with_measured_contact(out.stance, &obs);
+        }
+
+        // **胴体の状態は歩容の出力が出てから測る**（立脚フラグと計画した
+        // 関節角が要る）。測った結果は歩容へ返して**次の周期**で使わせる。
+        let measured_qd = crate::estimator::velocities_from(&obs);
+        let gyro = obs.imu.map(|i| i.gyro_rad_s).unwrap_or([0.0; 3]);
+        let body = estimator.estimate(
+            &measured,
+            &measured_qd,
+            &out.targets,
+            attitude,
+            gyro,
+            out.stance,
+        );
+        controller.observe_body(&body);
 
         // モータの投入・切断は状態が変わった瞬間だけ。毎周期投げると
         // バスの帯域を食うし、`motor_run` の連打はモータ側にも優しくない。
@@ -673,12 +717,33 @@ pub fn run(
         if out.leg_mode != JointMode::Idle {
             watch.tick(&out.targets, &measured);
         }
+        // **WBC は歩容の目標を「置き換える」のではなく「解き直す」。**
+        // 入力は同じ観測と同じ歩容の目標で、出るのは τ（と、それを積分した
+        // 位置・速度）。`None` なら従来どおり歩容の IK 出力がそのまま出る。
+        let plan = wbc
+            .as_mut()
+            .and_then(|w| {
+                w.tick(
+                    &out,
+                    &obs,
+                    &measured,
+                    &measured_qd,
+                    &body,
+                    last_tick.elapsed().as_secs_f64(),
+                )
+            });
+        // 状態行に出す用。**解いていない周期は `None`** なので、
+        // 「WBC 有効だが歩容が回っていない」と「解けている」が潰れない。
+        wbc_status = plan
+            .as_ref()
+            .and_then(|p| wbc.as_ref().map(|w| (w.output(), p.status)));
         let mut outgoing = crate::snapshot::command(
             &layout,
             &out.targets,
             cfg.hardware.default_max_speed_rad_s(),
             out.leg_mode == JointMode::Idle,
             cfg.hardware.mit_gains(),
+            plan.as_ref(),
         );
 
         // **ここが指令を書き換えてよい唯一の場所。** `dt` は実測を渡す
@@ -797,6 +862,7 @@ pub fn run(
                 worst_overrun,
                 &mut fault_hint_shown,
                 &mut watch,
+                wbc_status,
             );
             last_status = Instant::now();
             worst_overrun = Duration::ZERO;
@@ -870,6 +936,7 @@ fn log_status(
     worst_overrun: Duration,
     fault_hint_shown: &mut bool,
     watch: &mut Watch,
+    wbc: Option<(crate::config::WbcOutput, crate::wbc::WbcStatus)>,
 ) {
     log::info!(
         "[{}] {} v=({:+.3},{:+.3},{:+.3}) {} {} tick={} 遅延最大={:.1}ms 追従最大={}",
@@ -884,6 +951,19 @@ fn log_status(
         worst_overrun.as_secs_f64() * 1e3,
         watch.take(),
     );
+    // **WBC は回っていることを黙らせない。** 出力の種類が変わると
+    // 実機の挙動が根本的に変わるので、状態行に出す。接地力の合計が体重と
+    // 大きく違う、τ が上限に張り付いている、といった兆候はここに出る。
+    if let Some((output, st)) = wbc {
+        log::info!(
+            "  WBC {} 出力 / 参照 {} / 立脚 {}/4 / τ最大 {:.2} N·m / Σfz {:.1} N",
+            output.label(),
+            if st.mpc_driven { "MPC" } else { "準静的" },
+            st.stance_count,
+            st.tau_max_nm,
+            st.f_z_total_n,
+        );
+    }
     // 異常ビットは埋もれさせない。自動で脱力はしない（立っている四足を
     // 脱力させると倒れる）ので、operator がモードスイッチで判断できるよう
     // 毎回はっきり出す。

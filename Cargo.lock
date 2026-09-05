@@ -2118,6 +2118,7 @@ dependencies = [
  "log",
  "misa-core",
  "mujoco-rs",
+ "nalgebra",
 ]
 
 [[package]]

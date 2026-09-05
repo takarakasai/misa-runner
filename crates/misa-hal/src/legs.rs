@@ -824,6 +824,11 @@ impl JointMap {
     fn rate_to_model(self, v_motor: f64) -> f64 {
         self.sign * v_motor
     }
+
+    /// モデル座標の速度・トルク → モータ座標。符号だけ（逆も同じ式）。
+    fn rate_to_motor(self, v_model: f64) -> f64 {
+        self.sign * v_model
+    }
 }
 
 impl LegBus {
@@ -1173,6 +1178,14 @@ impl BusWorker {
                 // モデル座標のトルクをモータ座標へ。符号だけ。
                 self.issued[k] = None;
                 self.motors[k].set_torque(&mut self.driver, (map.sign * cmd.torque_nm) as f32)?
+            }
+            JointMode::Velocity => {
+                // **速度指令はフレーム確立を待たない。** 位置指令（0xA4）は
+                // 絶対角との対応が付くまで送れないが、速度は「いま何 rad/s で
+                // 回すか」なので原点が分からなくても意味を持つ。
+                self.issued[k] = None;
+                self.motors[k]
+                    .set_velocity(&mut self.driver, map.rate_to_motor(cmd.velocity_rad_s) as f32)?
             }
             JointMode::Idle | JointMode::Position => {
                 // 位置制御をしていない間は履歴を捨てる。次に位置制御へ入る

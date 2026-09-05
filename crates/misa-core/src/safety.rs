@@ -45,6 +45,14 @@ pub struct AxisLimits {
     pub max_target_rate_rad_s: f64,
     /// トルク指令の上限 [N·m]。`0` なら制限しない。
     pub max_torque_nm: f64,
+    /// 速度指令の上限 [rad/s]。`0` なら制限しない。
+    ///
+    /// [`max_target_rate_rad_s`](Self::max_target_rate_rad_s) とは別物。
+    /// あちらは**位置指令が動いてよい速さ**で、こちらは
+    /// [`ControlMode::Velocity`] で**軸そのものに要求する速さ**。位置制御しか
+    /// 使っていなかった間は前者しか要らなかったが、WBC の速度出力は
+    /// 軸速度を直接指令するので、丸める対象が別に要る。
+    pub max_velocity_rad_s: f64,
 }
 
 impl AxisLimits {
@@ -54,6 +62,7 @@ impl AxisLimits {
         max_rad: f64::INFINITY,
         max_target_rate_rad_s: 0.0,
         max_torque_nm: 0.0,
+        max_velocity_rad_s: 0.0,
     };
 }
 
@@ -84,6 +93,8 @@ pub struct SafetyVerdict {
     pub rate_limited: Vec<AxisId>,
     /// トルク指令を丸めた軸。
     pub torque_limited: Vec<AxisId>,
+    /// 速度指令を丸めた軸。
+    pub velocity_limited: Vec<AxisId>,
     /// 観測が古すぎて目標を進めなかったか。
     pub held_for_stale_observation: bool,
     /// 異常ビットが立っている軸。**指令には触っていない。**
@@ -106,6 +117,7 @@ impl SafetyVerdict {
         self.clamped.is_empty()
             && self.rate_limited.is_empty()
             && self.torque_limited.is_empty()
+            && self.velocity_limited.is_empty()
             && !self.held_for_stale_observation
             && self.faulted.is_empty()
     }
@@ -119,12 +131,23 @@ pub struct SafetyGate {
     /// 脱力に落ちたら `None` に戻す。前回の目標を覚えたままだと、
     /// **脱力中に手で動かされた分をいきなり戻しに行く**。
     issued: Vec<Option<f64>>,
+    /// 直近に通したトルク。観測が古いときに出し続ける値。
+    ///
+    /// 位置の `issued` と同じ役割だが、**古いときの振る舞いが違う**。
+    /// 位置は「進めない」、トルクは「前回のまま出し続ける」。トルクを 0 に
+    /// 落とすのは脱力と同じで、荷重のかかった四足では崩れる。
+    issued_torque: Vec<Option<f64>>,
 }
 
 impl SafetyGate {
     pub fn new(cfg: SafetyConfig) -> Self {
         let issued = vec![None; cfg.axes.len()];
-        Self { cfg, issued }
+        let issued_torque = vec![None; cfg.axes.len()];
+        Self {
+            cfg,
+            issued,
+            issued_torque,
+        }
     }
 
     pub fn limits(&self) -> &[AxisLimits] {
@@ -134,6 +157,9 @@ impl SafetyGate {
     /// 直近に通した目標を忘れる。次の位置指令は実測から出発する。
     pub fn forget(&mut self) {
         for s in &mut self.issued {
+            *s = None;
+        }
+        for s in &mut self.issued_torque {
             *s = None;
         }
     }
@@ -173,12 +199,58 @@ impl SafetyGate {
             if a.mode == ControlMode::Idle {
                 // 脱力中は何も丸めない。目標は残すが、通した記録は捨てる。
                 self.issued[i] = None;
+                self.issued_torque[i] = None;
                 continue;
             }
 
             if lim.max_torque_nm > 0.0 && a.torque_ff_nm.abs() > lim.max_torque_nm {
                 a.torque_ff_nm = a.torque_ff_nm.clamp(-lim.max_torque_nm, lim.max_torque_nm);
                 v.torque_limited.push(id);
+            }
+
+            // **速度指令の上限。** [`ControlMode::Position`] の
+            // `velocity_rad_s` は速度**上限**であって目標ではないので、
+            // ここでは触らない（丸めると「もっとゆっくり動け」を
+            // 「その速さで動け」に読み替えることになる）。
+            if matches!(a.mode, ControlMode::Velocity | ControlMode::Impedance)
+                && lim.max_velocity_rad_s > 0.0
+                && a.velocity_rad_s.abs() > lim.max_velocity_rad_s
+            {
+                a.velocity_rad_s =
+                    a.velocity_rad_s.clamp(-lim.max_velocity_rad_s, lim.max_velocity_rad_s);
+                v.velocity_limited.push(id);
+            }
+
+            // **モードごとに「観測が古いときの現状維持」の意味が違う。**
+            //
+            // 位置なら「目標を進めない」、トルクなら「前回のトルクを出し
+            // 続ける」、速度なら「止まる」。トルクを 0 に落とさないのは、
+            // 荷重のかかった四足を脱力させると崩れるため（module の冒頭）。
+            // 逆に速度を保持すると、見えていない相手に対して脚が走り続ける。
+            match a.mode {
+                ControlMode::Torque => {
+                    if stale {
+                        if let Some(prev) = self.issued_torque[i] {
+                            a.torque_ff_nm = prev;
+                        }
+                    }
+                    self.issued_torque[i] = Some(a.torque_ff_nm);
+                    // 位置は誰も見ないので、次に位置制御へ入るときに
+                    // 「今いるところ」から出発できるよう履歴を捨てる。
+                    self.issued[i] = None;
+                    continue;
+                }
+                ControlMode::Velocity => {
+                    if stale {
+                        a.velocity_rad_s = 0.0;
+                    }
+                    self.issued_torque[i] = Some(a.torque_ff_nm);
+                    self.issued[i] = None;
+                    continue;
+                }
+                _ => {
+                    self.issued_torque[i] = Some(a.torque_ff_nm);
+                }
             }
 
             // **可動域を先に、スルーレートを後に。**
@@ -412,12 +484,128 @@ mod tests {
                 max_rad: 1.0,
                 max_target_rate_rad_s: 100.0,
                 max_torque_nm: 10.0,
+                max_velocity_rad_s: 20.0,
             },
             2,
         );
         let mut cmd = position_cmd(2, 0.1);
         let v = g.apply(&mut cmd, &fresh_obs(2, 0.1), DT);
         assert!(v.is_clean(), "{v:?}");
+    }
+
+    fn mode_cmd(n: usize, mode: ControlMode) -> Command {
+        let mut c = Command::idle(n);
+        for i in 0..n {
+            let a = c.get_mut(AxisId::new(i as u16)).unwrap();
+            a.mode = mode;
+        }
+        c
+    }
+
+    fn stale_obs(n: usize, position_rad: f64) -> Observation {
+        let mut o = fresh_obs(n, position_rad);
+        for i in 0..n {
+            o.get_mut(AxisId::new(i as u16)).unwrap().health.age = Duration::from_millis(500);
+        }
+        o
+    }
+
+    #[test]
+    fn a_torque_command_is_clamped_to_the_axis_limit() {
+        let mut g = gate(
+            AxisLimits {
+                max_torque_nm: 1.5,
+                ..AxisLimits::UNLIMITED
+            },
+            1,
+        );
+        let mut cmd = mode_cmd(1, ControlMode::Torque);
+        cmd.get_mut(AxisId::new(0)).unwrap().torque_ff_nm = 9.0;
+        let v = g.apply(&mut cmd, &fresh_obs(1, 0.0), DT);
+        assert_eq!(cmd.get(AxisId::new(0)).unwrap().torque_ff_nm, 1.5);
+        assert_eq!(v.torque_limited, vec![AxisId::new(0)]);
+    }
+
+    /// **トルク制御では位置に触らない。** 位置指令のスルーレート制限を
+    /// 掛けると、誰も見ていない値が記録にだけ残って読み手を惑わせる。
+    #[test]
+    fn torque_mode_leaves_the_position_field_alone() {
+        let mut g = gate(
+            AxisLimits {
+                min_rad: -0.1,
+                max_rad: 0.1,
+                max_target_rate_rad_s: 0.001,
+                ..AxisLimits::UNLIMITED
+            },
+            1,
+        );
+        let mut cmd = mode_cmd(1, ControlMode::Torque);
+        cmd.get_mut(AxisId::new(0)).unwrap().position_rad = 5.0;
+        let v = g.apply(&mut cmd, &fresh_obs(1, 0.0), DT);
+        assert_eq!(cmd.get(AxisId::new(0)).unwrap().position_rad, 5.0);
+        assert!(v.clamped.is_empty());
+        assert!(v.rate_limited.is_empty());
+    }
+
+    /// **観測が古くなってもトルクは 0 に落とさない。** 落とすのは脱力と
+    /// 同じで、荷重のかかった四足は崩れる。前回のトルクを出し続ける。
+    #[test]
+    fn a_stale_observation_holds_the_last_torque() {
+        let mut g = gate(AxisLimits::UNLIMITED, 1);
+        let mut cmd = mode_cmd(1, ControlMode::Torque);
+        cmd.get_mut(AxisId::new(0)).unwrap().torque_ff_nm = 0.8;
+        g.apply(&mut cmd, &fresh_obs(1, 0.0), DT);
+
+        let mut next = mode_cmd(1, ControlMode::Torque);
+        next.get_mut(AxisId::new(0)).unwrap().torque_ff_nm = 4.0;
+        let v = g.apply(&mut next, &stale_obs(1, 0.0), DT);
+        assert!(v.held_for_stale_observation);
+        assert_eq!(next.get(AxisId::new(0)).unwrap().torque_ff_nm, 0.8);
+    }
+
+    /// **速度制御では逆に止める。** 見えていない相手に対して速度を保持
+    /// すると、脚が走り続ける（位置制御の「進めない」に対応するのは 0）。
+    #[test]
+    fn a_stale_observation_stops_a_velocity_command() {
+        let mut g = gate(AxisLimits::UNLIMITED, 1);
+        let mut cmd = mode_cmd(1, ControlMode::Velocity);
+        cmd.get_mut(AxisId::new(0)).unwrap().velocity_rad_s = 3.0;
+        let v = g.apply(&mut cmd, &stale_obs(1, 0.0), DT);
+        assert!(v.held_for_stale_observation);
+        assert_eq!(cmd.get(AxisId::new(0)).unwrap().velocity_rad_s, 0.0);
+    }
+
+    #[test]
+    fn a_velocity_command_is_clamped_to_the_axis_limit() {
+        let mut g = gate(
+            AxisLimits {
+                max_velocity_rad_s: 2.0,
+                ..AxisLimits::UNLIMITED
+            },
+            1,
+        );
+        let mut cmd = mode_cmd(1, ControlMode::Velocity);
+        cmd.get_mut(AxisId::new(0)).unwrap().velocity_rad_s = -7.0;
+        let v = g.apply(&mut cmd, &fresh_obs(1, 0.0), DT);
+        assert_eq!(cmd.get(AxisId::new(0)).unwrap().velocity_rad_s, -2.0);
+        assert_eq!(v.velocity_limited, vec![AxisId::new(0)]);
+    }
+
+    /// **位置制御の `velocity_rad_s` は速度上限であって目標ではない。**
+    /// ここを丸めると「もっとゆっくり動け」が「その速さで動け」になる。
+    #[test]
+    fn the_speed_ceiling_of_a_position_command_is_not_treated_as_a_target() {
+        let mut g = gate(
+            AxisLimits {
+                max_velocity_rad_s: 2.0,
+                ..AxisLimits::UNLIMITED
+            },
+            1,
+        );
+        let mut cmd = position_cmd(1, 0.0);
+        let v = g.apply(&mut cmd, &fresh_obs(1, 0.0), DT);
+        assert_eq!(cmd.get(AxisId::new(0)).unwrap().velocity_rad_s, 8.0);
+        assert!(v.velocity_limited.is_empty());
     }
 
     /// **傾きを報告しても指令は 1 ビットも変わらない。**

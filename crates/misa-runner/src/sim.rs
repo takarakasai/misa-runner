@@ -138,6 +138,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     }
     let model_limits = robot.limits.clone();
     let model_rates = robot.rate_limits.clone();
+    let model_efforts = robot.effort_limits.clone();
     let layout = crate::snapshot::axis_layout(cfg)?;
     let dt = 1.0 / cfg.control.rate_hz;
 
@@ -162,6 +163,12 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         control_period_s: dt,
         actuator_kp: cli.f64("kp").unwrap_or(60.0),
         actuator_kv: cli.f64("kv").unwrap_or(1.0),
+        // **QP の上限とアクチュエータの上限を揃える。** 揃えないと、QP は
+        // 出ないトルクを当てにした解を出す。
+        torque_scale: cfg.wbc.torque_scale,
+        // **速度制御のゲインは位置制御のものと別。** 詳しくは
+        // `SimOptions::velocity_kv`。
+        velocity_kv: cli.f64("kv-velocity").unwrap_or(20.0),
         base_height_m: cli.f64("base-height").unwrap_or(0.20),
         timestep_s: cli.f64("timestep"),
         friction: cli.f64("friction").map(|f| [f, 0.005, 0.0001]),
@@ -210,6 +217,8 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let head_driven = layout
         .head
         .is_some_and(|id| plant.capabilities().driven.get(id.index()) == Some(&true));
+    let mut wbc = crate::wbc::WbcRunner::new(&robot, &cfg.wbc)?;
+    let estimator = crate::estimator::BodyEstimator::new(&robot);
     let mut controller = Controller::with_arm(robot, cfg.clone(), head_driven);
     // **可動域は `dump` と同じ表で、同じ関数で見る。**
     //
@@ -218,7 +227,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // ことがある (2026-09-01)。実際には後脚の膝が可動域に当たって脚の
     // 長さが変わっていただけで、歩行ではなかった。**動力学が付くと
     // それらしく動いてしまうぶん、シムのほうが誤魔化されやすい。**
-    let limits = crate::snapshot::safety_config(cfg, &layout, &model_limits, &model_rates, dt, 5.0);
+    let limits = crate::snapshot::safety_config(cfg, &layout, &model_limits, &model_rates, &model_efforts, dt, 5.0);
     let mut violations: Vec<String> = Vec::new();
     let mut shadow_gate = misa_core::SafetyGate::new(limits.clone());
     let recorder = match cli.str("record") {
@@ -301,16 +310,27 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         }
         let measured = jointvec_from(&obs);
         let attitude = obs.imu.map(|m| m.rpy_rad).unwrap_or([0.0; 3]);
-        let out = controller.tick(&cmd, &measured, attitude, dt);
+        let mut out = controller.tick(&cmd, &measured, attitude, dt);
+        if cfg.wbc.use_measured_contact {
+            out.stance = crate::estimator::stance_with_measured_contact(out.stance, &obs);
+        }
+        let measured_qd = crate::estimator::velocities_from(&obs);
+        let gyro = obs.imu.map(|m| m.gyro_rad_s).unwrap_or([0.0; 3]);
+        let body = estimator.estimate(&measured, &measured_qd, &out.targets, attitude, gyro, out.stance);
+        controller.observe_body(&body);
 
         crate::dump::check_limits(&limits, &layout, &out.targets, t, &mut violations);
 
+        let plan = wbc
+            .as_mut()
+            .and_then(|w| w.tick(&out, &obs, &measured, &measured_qd, &body, dt));
         let outgoing = crate::snapshot::command(
             &layout,
             &out.targets,
             cfg.hardware.default_max_speed_rad_s(),
             out.leg_mode == misa_hal::joint::JointMode::Idle,
             cfg.hardware.mit_gains(),
+            plan.as_ref(),
         );
         if let Some(rec) = recorder.as_ref() {
             let mut shadow = outgoing.clone();

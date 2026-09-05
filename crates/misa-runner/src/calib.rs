@@ -309,6 +309,7 @@ fn jog_once(
         position_rad: target,
         max_speed_rad_s: speed,
         torque_nm: 0.0,
+        velocity_rad_s: 0.0,
     };
     bus.set_commands(cmds);
 

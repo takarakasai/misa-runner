@@ -46,6 +46,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // Controller へ move する前に控えておく。
     let model_limits = robot.limits.clone();
     let model_rates = robot.rate_limits.clone();
+    let model_efforts = robot.effort_limits.clone();
     let rest = crate::robot::rest_pose(cfg, &robot);
     let mut controller = Controller::new(robot, cfg.clone());
     let dt = 1.0 / cfg.control.rate_hz;
@@ -112,7 +113,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // 制御ループを触る改修は「dump を録って差分する」で検証できる。
     // ゲートは `run` と同じく影で回すだけ（出力は捨てる）。
     let layout = crate::snapshot::axis_layout(cfg)?;
-    let limits = crate::snapshot::safety_config(cfg, &layout, &model_limits, &model_rates, dt, 5.0);
+    let limits = crate::snapshot::safety_config(cfg, &layout, &model_limits, &model_rates, &model_efforts, dt, 5.0);
     let mut shadow_gate = misa_core::SafetyGate::new(limits.clone());
     let recorder = match cli.str("record") {
         Some(path) => {
@@ -185,6 +186,9 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                 cfg.hardware.default_max_speed_rad_s(),
                 out.leg_mode == misa_hal::joint::JointMode::Idle,
                 cfg.hardware.mit_gains(),
+                // **`dump` は実機も動力学も無いので WBC は回さない。**
+                // 接触力を解いても、それが正しいかを確かめる相手がいない。
+                None,
             );
             let verdict = shadow_gate.apply(&mut shadow, &obs, period);
             rec.push(misa_core::record::Frame {

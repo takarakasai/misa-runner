@@ -45,10 +45,21 @@ impl SerialPlant {
         for id in layout.aux() {
             driven[id.index()] = layout.head == Some(id) && hw.arm.is_app_driven();
         }
+        // **配線してあるモードを名乗る。** 位置は実績があり、速度とトルクは
+        // HAL からモータのコマンド（0xA2 / 0xA1）まで通っているが、この機体で
+        // 歩かせた実績はまだない。WBC を有効にしない限り使われないので、
+        // 既定の経路は従来どおり位置だけ。
+        let mut modes = vec![ControlMode::Position, ControlMode::Velocity];
+        // **トルク定数を知らないうちは Torque を名乗らない。**
+        // `set_torque` に渡した数がそのまま電流 (A) として線に乗るので、
+        // N·m を出す上位（WBC）と単位が食い違う。理由は
+        // [`crate::config::AppConfig::torque_unit_mismatch`]。
+        match cfg.torque_unit_mismatch() {
+            None => modes.push(ControlMode::Torque),
+            Some(why) => log::warn!("トルク制御は使えません: {why}"),
+        }
         let caps = PlantCaps {
-            // トルクの口は HAL に空いているが、実機で使ったことがない。
-            // 使えると名乗るのは実際に回してから。
-            modes: vec![ControlMode::Position],
+            modes,
             has_imu: true,
             // 足裏センサが無い。歩容の立脚相からの推定は観測ではないので
             // ここでは名乗らない。
@@ -160,13 +171,23 @@ impl Plant for SerialPlant {
                     continue;
                 };
                 cmds[leg][k] = JointCommand {
+                    // **知らないモードを位置に読み替えない。** 以前は
+                    // `_ => Position` で、トルク指令を渡すと位置指令として
+                    // 出ていた（`position_rad` は WBC が狙いを載せるだけの
+                    // 値なので、そのまま出すと見当違いの角度へ飛ぶ）。
                     mode: match a.mode {
                         ControlMode::Idle => JointMode::Idle,
-                        _ => JointMode::Position,
+                        ControlMode::Position => JointMode::Position,
+                        ControlMode::Velocity => JointMode::Velocity,
+                        ControlMode::Torque => JointMode::Torque,
+                        // MIT はモータ側が持たない（ホストで PD を回す口も
+                        // まだ無い）。位置として出し、τ は前置として渡す。
+                        ControlMode::Impedance => JointMode::Position,
                     },
                     position_rad: a.position_rad,
                     max_speed_rad_s: self.max_speed_rad_s,
                     torque_nm: a.torque_ff_nm,
+                    velocity_rad_s: a.velocity_rad_s,
                 };
             }
         }

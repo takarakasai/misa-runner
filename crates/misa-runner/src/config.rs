@@ -34,6 +34,10 @@ pub struct AppConfig {
     pub poses: PoseConfig,
     #[serde(default)]
     pub hardware: HardwareConfig,
+    /// 全身制御（WBC）。**既定は無効**で、書かなければ従来どおり歩容の
+    /// IK 出力をそのまま位置制御で流す。
+    #[serde(default)]
+    pub wbc: WbcConfig,
     /// 脚以外の軸。**機体ごとに数も役割も違う。**
     ///
     /// namiashi は腕 1 軸、namiashi2 は車輪 4 軸。歩容は触らないので、ここに
@@ -83,6 +87,7 @@ impl Default for AppConfig {
             teleop: TeleopConfig::default(),
             poses: PoseConfig::default(),
             hardware: HardwareConfig::default(),
+            wbc: WbcConfig::default(),
             aux: default_aux_axes(),
         }
     }
@@ -132,6 +137,32 @@ impl AppConfig {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("{} を読めません: {e}", path.display()))?;
         Self::from_toml(&text)
+    }
+
+    /// トルク指令の単位が実機と食い違っていれば、その理由を返す。
+    ///
+    /// **`torque_constant_nm_per_a` を書いていないシリアル構成では、
+    /// `set_torque` に渡した数がそのまま電流 (A) として線に乗る**
+    /// （`lkmotor_driver::MotorConfig::current_units` が `Kt = 1/減速比` を
+    /// 選ぶため）。WBC が出すのは N·m なので、そのまま流すと 12 軸ぶんの
+    /// N·m が A に読み替えられる。namiashi の定格 1.5 N·m なら 1 軸 1.5 A、
+    /// 12 軸で 18 A — 電源の電流制限 5 A（`doc/motor_map.md`）を大きく超えて
+    /// レールが崩壊する。**復帰できても、その瞬間に 12 軸が同時に脱力する。**
+    ///
+    /// **これは実機（シリアル）だけの話。** `sim` のトルクは MuJoCo へ行く
+    /// ので単位は N·m のまま正しい。したがって設定の検証では落とさず、
+    /// 実機の [`misa_core::PlantCaps`] から `Torque` を外す形で止める
+    /// （[`crate::plant::SerialPlant`]）。ここはその理由を人に見せるため。
+    pub fn torque_unit_mismatch(&self) -> Option<String> {
+        let serial = self.hardware.serial().ok()?;
+        if serial.legs.torque_constant_nm_per_a.is_some() {
+            return None;
+        }
+        Some(
+            "[hardware.legs] に torque_constant_nm_per_a がないので、\
+             トルク指令は N·m ではなく電流 (A) として線に乗ります"
+                .into(),
+        )
     }
 
     pub fn to_toml(&self) -> Result<String, String> {
@@ -187,6 +218,7 @@ impl AppConfig {
             return Err(format!("role = \"head\" の補助軸が {heads} 本あります。1 本までです"));
         }
         self.teleop.validate()?;
+        self.wbc.validate()?;
         if self.gait.max_vx_m_s <= 0.0
             || self.gait.max_vy_m_s <= 0.0
             || self.gait.max_wz_rad_s <= 0.0
@@ -227,6 +259,377 @@ pub enum KneeShape {
     MammalianReverse,
     /// `>>` 4 脚とも前向き。
     BothForward,
+}
+
+/// WBC（全身制御）の出力の出し方。
+///
+/// **1 回の QP の解 `(q̈, f_GRF, τ)` を、どの量にして実機へ出すか**という
+/// 選択で、解そのものは 3 つとも同じ。τ をそのまま出すのが素直だが、
+/// トルク制御はモータ側の電流ループとゲインの素性が要る。位置・速度は
+/// q̈ を 1 回 / 2 回積分して参照にするので、**既存の位置制御の口をそのまま
+/// 使いながら WBC の解を通せる**（実機へ持っていくときの中間段）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WbcOutput {
+    /// τ をそのまま出す（[`misa_core::ControlMode::Torque`]）。
+    ///
+    /// **WBC 本来の出し方。** 接触力と姿勢が同じ QP の中で釣り合っている
+    /// ので、位置・速度へ積分し直したときのような時間遅れが入らない。
+    Torque,
+    /// `q̇* = q̇ + q̈·dt` を出す（[`misa_core::ControlMode::Velocity`]）。
+    Velocity,
+    /// `q* = q + q̇·dt + ½·q̈·dt²` を出す（[`misa_core::ControlMode::Position`]）。
+    ///
+    /// **既定。** 実機で唯一実績のある口で、τ は `torque_ff_nm` に載せる
+    /// だけなので、MIT を持つ機体では前置トルクとして効き、持たない機体
+    /// では無視される。
+    #[default]
+    Position,
+}
+
+impl WbcOutput {
+    pub fn label(self) -> &'static str {
+        match self {
+            WbcOutput::Torque => "トルク",
+            WbcOutput::Velocity => "速度",
+            WbcOutput::Position => "位置",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "torque" | "trq" => Some(WbcOutput::Torque),
+            "velocity" | "vel" => Some(WbcOutput::Velocity),
+            "position" | "pos" => Some(WbcOutput::Position),
+            _ => None,
+        }
+    }
+}
+
+/// WBC（階層 QP による全身制御）の設定。
+///
+/// # 何を解いているのか
+///
+/// `quadruped_gait::wbc` の 3 優先度 HoQP に、毎周期
+/// `x = [q̈ | f_GRF | τ]` を解かせる。優先度 0 は**物理の制約**（浮遊ベースの
+/// 運動方程式・摩擦錐・トルク上限・立脚足が滑らないこと）、優先度 1 が
+/// 胴体加速度と遊脚の追従、優先度 2 が接地力と重力補償トルクへの寄せ。
+///
+/// # 参照は歩容ではなくここで作る
+///
+/// **この機体の歩容（CHAMP 系）は MPC を持たない**ので、`predicted_grfs()` は
+/// 常に `None`。したがって WBC が要る `a_base_des` と `f_grf_des` は
+/// [`crate::wbc`] が自前で作る: 接地足は歩容の立脚フラグ、接地力は体重の
+/// 静的配分、胴体加速度は IMU 姿勢への PD。**準静的な参照**なので、
+/// 立位と低速の crawl では成立するが、跳ぶ・走る歩容には足りない。
+/// MPC 歩容を入れたらここを差し替える（層は分けてある）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WbcConfig {
+    /// **既定は無効。** 有効にすると脚 12 軸の指令が WBC の解に変わる。
+    /// 実機でいきなり入れるものではないので、明示的に立てさせる。
+    pub enabled: bool,
+    /// 解をどの量にして出すか。
+    pub output: WbcOutput,
+    /// 接地摩擦係数。摩擦錐（優先度 0 の硬い制約）に入る。
+    pub friction_mu: f64,
+    /// 立脚と計画した足に要求する最小垂直力 [N]。
+    ///
+    /// 0 だと「押すだけ」の錐になり、3 点接地の計画を 2 点で満たす解が
+    /// 通ってしまう。**硬い制約なので、1 脚あたりの実際の分担より十分
+    /// 小さく取る**（大きいと着地の過渡で解なしになる）。
+    pub f_min_stance_n: f64,
+    /// モデルの `[joint.limit] effort` に掛ける係数。**軸ごとの比を保つ。**
+    ///
+    /// # なぜ係数なのか
+    ///
+    /// `.misa` の `effort` は**連続定格**（namiashi は hip / thigh 1.5、
+    /// calf 2.205 N·m。減速比で割るとどちらもモータ軸 0.14〜0.15 N·m で、
+    /// 同じ 1 個の数字が比で配られているのが分かる）。モータは瞬間的には
+    /// それより出るので、WBC に連続定格を渡すと出せるはずの力を使わない。
+    ///
+    /// 絶対値で 1 本書くと軸ごとの比（calf は hip の 1.47 倍）が潰れるので、
+    /// **係数で持つ**。`2.0` なら「瞬間は連続定格の 2 倍まで」。
+    ///
+    /// **上げれば歩けるようになる、という話ではない**
+    /// （[`crate::wbc`] の「トルク定格は前進速度を縛っていない」）。
+    /// 上げるのは、飽和が原因で姿勢を戻せていないと分かったときだけ。
+    pub torque_scale: f64,
+    /// トルク上限の絶対値 [N·m]。`0` で無効。
+    ///
+    /// **モデル × [`Self::torque_scale`] より小さいときだけ効く（頭打ち）。**
+    /// 実機の電流リミットや電源の都合をモデルより手前へ置きたいときに使う。
+    /// ここを大きくしてもモデルの上には行かない — 上げるなら
+    /// `torque_scale` のほう。
+    pub max_torque_nm: f64,
+    /// 遊脚の関節空間 PD ゲイン（`q̈* = kp·(q*−q) + kd·(q̇*−q̇)`）。
+    pub swing_kp: f64,
+    pub swing_kd: f64,
+    /// 立脚の関節空間 PD ゲイン。**遊脚より弱く取る。**
+    ///
+    /// # `base_accel` と同じ自由度を取り合っていること
+    ///
+    /// 4 脚接地のとき、足が滑らないという制約（優先度 0、12 式）は脚 12
+    /// 関節と胴体 6 自由度を結び付ける。したがって**胴体の加速度を決めれば
+    /// 立脚の関節加速度も決まる**（自由度が重なっている）。立脚に関節
+    /// タスクを置くと、`base_accel` と同じ 6 自由度を別の言葉で取り合う
+    /// ことになり、勝つのは重みの大きいほう。
+    ///
+    /// **どちらか一方では足りない**（MuJoCo の LinearCrawl・16 秒・
+    /// 前進 0.05 で実測）:
+    ///
+    /// | 立脚タスク | 関節重み / 胴体重み | 進む量 |
+    /// |---|---|---|
+    /// | 無し | — / 200 | +0.078 m |
+    /// | 60 / 6 | 20 / 200 | +0.123 m |
+    /// | **60 / 6** | **200 / 50** | **+0.315 m** |
+    /// | 200 / 20 | 400 / 20 | +0.283 m（ヨーが −36°へ流れる）|
+    ///
+    /// 胴体側だけだと「支えるが進まない」（前へ送るには接地力で胴体を
+    /// 加速するしかなく、この機体のトルク定格では足りない）。関節側だけを
+    /// 強くすると姿勢を戻す力が消えてヨーが流れる。既定はその中間。
+    pub stance_kp: f64,
+    pub stance_kd: f64,
+    /// 胴体姿勢（roll / pitch）の PD ゲイン。`a_base_des` の角加速度に入る。
+    pub attitude_kp: f64,
+    pub attitude_kd: f64,
+    /// ヨーの PD ゲイン。**別に持つのは効き方が違うから**で、roll/pitch は
+    /// 転倒に直結するが yaw は向きが変わるだけ。既定は弱い。
+    pub yaw_kp: f64,
+    pub yaw_kd: f64,
+    /// 胴体高さの比例ゲイン。`a_base_des` の並進 z に入る。
+    pub height_kp: f64,
+    pub height_kd: f64,
+    /// **支持多角形に対する胴体の水平位置**の比例ゲイン。
+    ///
+    /// # なぜ水平位置に帰還が要るか
+    ///
+    /// crawl は 1 本ずつ脚を上げるので、支持は 3 点になる。倒れないため
+    /// には胴体（重心）が支持三角形の内側へ寄っている必要があり、CHAMP は
+    /// それを**足の置き場所**で作る — 位置制御なら脚が動けば胴体も付いて
+    /// くるので、それで足りる。トルク制御ではそうならない: 胴体は接地力で
+    /// しか動かず、「寄れ」と言わなければ寄らない。実際、これが無いと
+    /// MuJoCo の crawl で最初の遊脚が上がった瞬間に横へ倒れた。
+    ///
+    /// 誤差は**歩容の計画した足位置と実測の足位置の差**として測る（接地足
+    /// の平均）。世界座標の絶対位置は測れないが、支持足に対する相対位置は
+    /// 測れて、balance に効くのはそちらだけ。
+    pub position_kp: f64,
+    /// 胴体の並進速度を寄せるゲイン [1/s]。水平は速度指令へ、鉛直は 0 へ。
+    /// 速度は接地足の FK から測る（脚オドメトリ）。
+    pub velocity_kd: f64,
+    /// 機体質量 [kg]。`0` ならモデルのリンク質量の総和を使う。
+    /// 接地力の静的配分（`m·g / 立脚数`）に効く。
+    pub mass_kg: f64,
+    /// 優先度 1 の 2 つのタスクの重み。**胴体姿勢と関節追従の綱引き。**
+    ///
+    /// `base_accel` を大きくすると胴体は水平を保とうとするが、立脚が
+    /// 胴体を送る動きを渋る。`joint_track` を大きくすると歩容どおりに
+    /// 脚を運ぶが、姿勢の乱れを戻す力が弱くなる。**既定の比は
+    /// [`Self::stance_kp`] の表で選んだ**もので、両者は一緒に振ること。
+    pub weight_base_accel: f64,
+    pub weight_joint_track: f64,
+    /// 優先度 2 の重み。接地力を参照へ寄せる強さと、τ を重力補償値へ
+    /// 寄せる強さ（`τ ≈ 0` の退化解を止める錨）。
+    pub weight_contact_force: f64,
+    pub weight_tau_gravity: f64,
+    /// **参照に積む関節加速度**の頭打ち [rad/s²]。`0` で無効。
+    ///
+    /// 位置・速度出力は WBC の `q̈` を 1 周期ぶん積んで参照にする。MPC の
+    /// 参照では姿勢が崩れ始めた瞬間に `q̈` が 600 rad/s² 級になり、速度
+    /// 出力ではそれが 3 rad/s の跳びとして脚に出る。**トルク出力には
+    /// 掛からない**（あちらが出すのは τ で、q̈ は参照にしか使わない）。
+    pub max_joint_accel: f64,
+    /// `a_base_des` の頭打ち。並進 [m/s²] と角 [rad/s²]。`0` で無効。
+    ///
+    /// # なぜ要るか
+    ///
+    /// **機械が出せない加速度を要求しても、QP はほかのタスクを犠牲にする
+    /// だけ。** MPC の角加速度は `α = I⁻¹·(Σr×f − ω×Iω)` で作られるが、
+    /// namiashi の慣性は `diag(0.008, 0.034, 0.034) kg·m²` と小さいので、
+    /// 姿勢が崩れ始めると 600 rad/s² といった値がすぐ出る。それを 1 周期
+    /// 積分して速度指令にすると 3 rad/s の跳びになり、速度出力では脚が
+    /// そのまま飛ぶ（実測で MuJoCo の trot が後ろへ 1 m 走った）。
+    ///
+    /// 既定は namiashi で出せる範囲から: 並進は摩擦（μ=0.7）で 7 m/s²
+    /// 前後、角は接地力の付け替えで作れるピッチが 100 rad/s² 前後。
+    pub max_base_accel_lin: f64,
+    pub max_base_accel_ang: f64,
+    /// 実測の接地で歩容の立脚フラグを上書きするか。**既定は無効。**
+    ///
+    /// # なぜ既定で無効なのか
+    ///
+    /// 考え方は正しい — WBC の「立脚足が滑らない」は硬い制約なので、着地が
+    /// 計画より早い相を渡せないと trot は壊れる（articara の WBC 検証も
+    /// `ContactDrivenPhase` で同じことをしている）。
+    ///
+    /// **足りないのは力の閾値。** あちらは 5 N を超えたときだけ立脚へ倒すが、
+    /// [`misa_core::Observation::contacts`] は真偽値しか持たないので、遊脚が
+    /// かすっただけでも立脚に倒れる。MuJoCo の trot で実測すると、進む量が
+    /// 9.50 → 8.43 m、ヨーのずれが 29° → 61° と**悪化した**。
+    ///
+    /// **足裏に力を出せるセンサが付いたら、観測の語彙に垂直力を足して
+    /// 閾値付きで倒すこと。** そこまでは計画をそのまま使う。
+    pub use_measured_contact: bool,
+    /// MPC の接地力の予測を鈍らせる係数（`鈍 = α·新 + (1−α)·前`）。
+    /// `1.0` で鈍らせない。**MPC 歩容のときだけ効く。**
+    ///
+    /// QP は広い零空間から周期ごとに少しずつ違う最適解を拾うので、生のまま
+    /// 参照にすると接地力のタスクが震える（articara の実測で 13 → 68 →
+    /// 47 N）。鈍らせるのは**参照だけ**で、τ の前置きに使う生の値には
+    /// 触らない。
+    pub grf_smoothing: f64,
+    /// QP の warm start の重み。0 で毎周期コールドスタート。
+    ///
+    /// 解の空間が広いので、何もしないと同じ姿勢でも周期ごとに違う解を
+    /// 拾って指令が震える。`1e-3` 付近から。
+    pub prox_weight: f64,
+    /// 速度出力で位置誤差を潰す比例ゲイン [1/s]。
+    ///
+    /// **速度指令だけでは関節位置が漂う。** 速度制御は位置のループを
+    /// 持たないので、モデル誤差と外乱のぶんだけ積分されて歩容の目標から
+    /// 離れていく。`q̇* = q̇_計画 + q̈·dt + kp·(q_計画 − q_実測)` の kp。
+    /// 位置・トルク出力では使わない。
+    pub velocity_track_kp: f64,
+}
+
+impl Default for WbcConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            output: WbcOutput::default(),
+            friction_mu: 0.7,
+            f_min_stance_n: 0.5,
+            torque_scale: 1.0,
+            max_torque_nm: 0.0,
+            swing_kp: 100.0,
+            swing_kd: 10.0,
+            stance_kp: 60.0,
+            stance_kd: 6.0,
+            attitude_kp: 60.0,
+            attitude_kd: 8.0,
+            yaw_kp: 10.0,
+            yaw_kd: 2.0,
+            height_kp: 100.0,
+            height_kd: 20.0,
+            position_kp: 100.0,
+            velocity_kd: 10.0,
+            mass_kg: 0.0,
+            weight_base_accel: 50.0,
+            weight_joint_track: 200.0,
+            weight_contact_force: 5.0,
+            weight_tau_gravity: 5.0,
+            max_joint_accel: 200.0,
+            max_base_accel_lin: 10.0,
+            max_base_accel_ang: 100.0,
+            use_measured_contact: false,
+            grf_smoothing: 0.3,
+            prox_weight: 1e-3,
+            velocity_track_kp: 20.0,
+        }
+    }
+}
+
+impl WbcConfig {
+    /// その軸のトルク上限 [N·m]。`declared` はモデルの `effort`。
+    ///
+    /// **モデル × 係数を、絶対値の上限で頭打ちにする。** どちらも無ければ
+    /// `0`（＝制限しない）で、[`crate::wbc::WbcLayer::new`] はそれを拒む。
+    pub fn torque_ceiling(&self, declared: f64) -> f64 {
+        let scaled = declared * self.torque_scale;
+        match (scaled > 0.0, self.max_torque_nm > 0.0) {
+            (true, true) => scaled.min(self.max_torque_nm),
+            (true, false) => scaled,
+            (false, true) => self.max_torque_nm,
+            (false, false) => 0.0,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.friction_mu <= 0.0 {
+            return Err("wbc.friction_mu は正の値が必要です".into());
+        }
+        if self.f_min_stance_n < 0.0 {
+            return Err("wbc.f_min_stance_n は 0 以上が必要です".into());
+        }
+        if self.max_joint_accel < 0.0 {
+            return Err("wbc.max_joint_accel は 0 以上が必要です".into());
+        }
+        if self.max_base_accel_lin < 0.0 || self.max_base_accel_ang < 0.0 {
+            return Err("wbc.max_base_accel_* は 0 以上が必要です".into());
+        }
+        if !(0.0..=1.0).contains(&self.grf_smoothing) {
+            return Err("wbc.grf_smoothing は 0〜1 が必要です".into());
+        }
+        if self.torque_scale <= 0.0 {
+            return Err("wbc.torque_scale は正の値が必要です".into());
+        }
+        if self.mass_kg < 0.0 {
+            return Err("wbc.mass_kg は 0 以上が必要です（0 ならモデルから取ります）".into());
+        }
+        if self.velocity_track_kp < 0.0 {
+            return Err("wbc.velocity_track_kp は 0 以上が必要です".into());
+        }
+        Ok(())
+    }
+}
+
+/// どの歩容コントローラを使うか。**歩容の型（Crawl / Walk / Trot、＝踏み
+/// 替えの並び）とは別の軸**で、そちらはプロポの CH6 が選ぶ。
+///
+/// | | 接地力の予測 | 観測 | 備考 |
+/// |---|---|---|---|
+/// | `champ` | 無し | 見ない | 既定。開ループの運動学 |
+/// | `linear_crawl` | 無し | 見ない | 胴体を +X 直線に載せる。**横移動と旋回を受け付けない** |
+/// | `mpc` | SRBD | 速度 | 胴体を 1 剛体と見た MPC |
+/// | `centroidal` | 重心 SRBD | 速度 | 重心のずれと慣性を持つ版 |
+///
+/// **MPC 系は `predicted_grfs()` を出す**ので、WBC の参照が準静的な自前の
+/// ものから MPC の予測に変わる（[`crate::wbc`]）。そこが入る唯一の効き目で、
+/// WBC を無効にしたまま MPC を選んでも、接地力の予測は前置トルクにしか
+/// 使われない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GaitControllerKind {
+    /// **既定。** `crawl_use_linear` の従来どおりの解釈（Crawl だけ
+    /// `LinearCrawl`、ほかは CHAMP）。
+    #[default]
+    Auto,
+    Champ,
+    LinearCrawl,
+    Mpc,
+    Centroidal,
+}
+
+impl GaitControllerKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            GaitControllerKind::Auto => "自動",
+            GaitControllerKind::Champ => "CHAMP",
+            GaitControllerKind::LinearCrawl => "LinearCrawl",
+            GaitControllerKind::Mpc => "MPC (SRBD)",
+            GaitControllerKind::Centroidal => "MPC (重心)",
+        }
+    }
+
+    /// 接地力の予測を出すか。**WBC の参照がこれで変わる。**
+    pub fn has_mpc(self) -> bool {
+        matches!(self, GaitControllerKind::Mpc | GaitControllerKind::Centroidal)
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "auto" => Some(GaitControllerKind::Auto),
+            "champ" => Some(GaitControllerKind::Champ),
+            "linear_crawl" | "linear" => Some(GaitControllerKind::LinearCrawl),
+            "mpc" | "srbd" => Some(GaitControllerKind::Mpc),
+            "centroidal" => Some(GaitControllerKind::Centroidal),
+            _ => None,
+        }
+    }
 }
 
 /// 制御ループ全体の設定。
@@ -407,6 +810,25 @@ pub struct GaitTuning {
     /// どちらかを選ぶことになる。** trot は roll 1.4° で問題ない。
     #[serde(default)]
     pub crawl_use_linear: bool,
+    /// 歩容コントローラの種別。**既定の `auto` は `crawl_use_linear` の
+    /// 従来どおりの解釈**なので、書かなければ挙動は変わらない。
+    #[serde(default)]
+    pub controller: GaitControllerKind,
+    /// MPC の予測ホライズン（段数）。`horizon_steps * mpc_dt_per_step` が
+    /// 予測窓で、Di Carlo 2018 は 300 ms 前後を使う。
+    #[serde(default = "default_mpc_horizon_steps")]
+    pub mpc_horizon_steps: usize,
+    /// MPC の 1 段の時間 [s]。**制御周期ではない**（MPC は制御周期より
+    /// 粗い刻みで先を見る）。
+    #[serde(default = "default_mpc_dt_per_step")]
+    pub mpc_dt_per_step: f64,
+    /// 接地点の捕捉点フィードバックのゲイン [s]。`0` で無効。
+    ///
+    /// **硬い PD（kp ≥ 100 / kv ≤ 1.2）では正帰還になることが
+    /// `quadruped_gait` 側で報告されている**（追従の雑音を増幅する）。
+    /// 既定は quadruped-gait の既定値と同じ 0.05。切り分けるときは 0 に。
+    #[serde(default = "default_mpc_capture_point_gain_s")]
+    pub mpc_capture_point_gain_s: f64,
     /// 速度指令を 0 から最大まで振り切るのにかける時間 [s]。0 でランプ無し。
     ///
     /// **歩容はスティックが動いた瞬間に出力を階段状に飛ばす。** 実測で
@@ -459,6 +881,30 @@ pub struct GaitTuning {
     pub walk_cycle_s: Option<f64>,
     #[serde(default)]
     pub trot_cycle_s: Option<f64>,
+    /// 1 歩の最大歩幅 [m]。指定が無ければ `quadruped-gait` のプリセット値
+    /// （crawl 0.06 / walk 0.08 / trot 0.10）。
+    ///
+    /// # ここが速度の上限を決める
+    ///
+    /// 歩容が出せる速度は `歩幅 / (周期 × 接地比)` で頭打ちになる。
+    /// プリセットのままだと、この機体（脚長 0.306 m）では
+    ///
+    /// | | 歩幅 | 周期 | 接地比 | 上限 |
+    /// |---|---|---|---|---|
+    /// | crawl | 0.06 | 1.667 | 0.85 | **0.042 m/s** |
+    /// | walk | 0.08 | 0.600 | 0.75 | 0.178 m/s |
+    /// | trot | 0.10 | 0.400 | 0.50 | 0.500 m/s |
+    ///
+    /// **crawl は 0.042 m/s しか出ない。** プロファイルの `max_vx_m_s`
+    /// (0.15) を指令しても届かず、追従率だけが落ちる。それはコントローラの
+    /// 失敗ではなく算術で、**歩幅を上げないと直らない**（articara が
+    /// namiashi の WBC を詰めたとき、いちばん効いたのがこれ）。
+    ///
+    /// articara の詰めた値は 3 歩容とも **0.145 m**（脚長の 47 %）。
+    /// **上げると遊脚の擦りが出る**ので `swing_height_m` も一緒に上げること
+    /// （crawl は 0.005 → 0.040 で追従率 74 % → 104 %）。
+    #[serde(default)]
+    pub step_length_m: Option<f64>,
 }
 
 fn default_stance_height() -> f64 {
@@ -477,6 +923,20 @@ fn default_max_vy() -> f64 {
 fn default_max_wz() -> f64 {
     0.6
 }
+/// quadruped-gait の `SrbdMpcConfig::default()` と同じ。
+fn default_mpc_horizon_steps() -> usize {
+    10
+}
+
+fn default_mpc_dt_per_step() -> f64 {
+    0.030
+}
+
+/// `quadruped_gait::mpc_controller::DEFAULT_CAPTURE_POINT_GAIN_S`。
+fn default_mpc_capture_point_gain_s() -> f64 {
+    0.05
+}
+
 fn default_velocity_ramp_s() -> f64 {
     0.5
 }
@@ -508,6 +968,10 @@ impl Default for GaitTuning {
             max_wz_rad_s: default_max_wz(),
             height_range_m: default_height_range(),
             crawl_use_linear: false,
+            controller: GaitControllerKind::default(),
+            mpc_horizon_steps: default_mpc_horizon_steps(),
+            mpc_dt_per_step: default_mpc_dt_per_step(),
+            mpc_capture_point_gain_s: default_mpc_capture_point_gain_s(),
             velocity_ramp_s: default_velocity_ramp_s(),
             velocity_ramp_stop_s: default_velocity_ramp_stop_s(),
             stop_settle_s: default_stop_settle_s(),
@@ -518,6 +982,7 @@ impl Default for GaitTuning {
             crawl_cycle_s: None,
             walk_cycle_s: None,
             trot_cycle_s: None,
+            step_length_m: None,
         }
     }
 }
