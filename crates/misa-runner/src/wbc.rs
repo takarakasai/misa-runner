@@ -46,30 +46,46 @@
 //! 同じ解を出すが、**実機に効く経路は同じではない**。
 //!
 //! - **位置**（既定・推奨）— `q* = q_計画 + ½·q̈·dt²` と `torque_nm`。
-//!   関節の位置 PD が歩容の目標を追い、WBC の τ はその上に**前置として
-//!   足される**。これは legged_control の hybrid joint と同じ形で、
-//!   **articara が namiashi の WBC を検証したときの構成でもある**
+//!   関節の位置 PD が歩容の目標を追い、WBC の τ はその上に前置として
+//!   足される。articara が namiashi の WBC を検証したときの構成
 //!   （`articara/tests/wbc_walk.rs`）。
 //! - **速度** — `q̇* = q̇_計画 + q̈·dt + kp·(q_計画 − q_実測)` と `torque_nm`。
-//! - **トルク** — τ だけ。位置のループを完全に外す。
+//! - **トルク** — `τ_WBC + kp·(q*−q) + kd·(q̇*−q̇)` を 1 本のトルクにして出す。
 //!
-//! # なぜ位置が推奨なのか（トルクではなく）
+//! # トルク出力も純粋な τ ではない
 //!
+//! legged_control は `setCommand(pos_des, vel_des, kp=5, kd=3, torque)` で、
+//! **トルクに弱い関節 PD を添えて**出す（hybrid joint、
+//! `ref/legged_control/legged_controllers/src/legged_controller.cpp`）。
 //! **WBC が出すのは加速度であって位置ではなく、位置の誤差を戻す積分器が
-//! どこにも無い。** τ だけで駆動すると、モデル誤差のぶん関節がゆっくり
-//! ずれ続ける — 静止立位で高さが 0.6 mm/s 沈むのがそれで、歩けば脚が
-//! 畳まれていく。位置 PD を残せばそれが積分器の役をする。
+//! どこにも無い**ので、τ だけだとモデル誤差のぶん関節がずれ続ける。
+//! この PD がその錨になる。
 //!
-//! articara も同じ結論に至っていて、当初の `set_wbc_torques`（PD を完全に
-//! 外す経路）から hybrid へ移している。**この crate の `torque` 出力は
-//! その外した側**で、残してあるのは τ を直接出せる機体で比べられるように
-//! するため。
+//! LKMTech は MIT を持たないので**ホスト側で足して 1 本のトルクにしてから
+//! 出す**（[`crate::config::WbcConfig::joint_kp`]）。両方 0 にすれば純粋な
+//! トルクになる。**MuJoCo で実測すると、この PD を入れるだけで trot の
+//! 進む量が +0.28 → +2.3 m になった**（MPC と併せて +4.1 m）。
 //!
-//! 参照を自由に積分して位置・速度の参照を作る形も試したが、遊脚 PD の
-//! 加速度を二重積分すると参照が実測から離れ、離れたぶんだけ加速度が増える
-//! 正の帰還になって発散した（MuJoCo の crawl で追従誤差 7.5 rad、
-//! t=5.7 s で転倒）。**積むのは 1 周期ぶんだけ**で、錨は毎周期歩容の
-//! 目標へ戻す。
+//! 参照を自由に積分して位置・速度の参照を作る形も試したが、遊脚の加速度を
+//! 二重積分すると参照が実測から離れ、離れたぶんだけ加速度が増える正の
+//! 帰還になって発散した（MuJoCo の crawl で追従誤差 7.5 rad、t=5.7 s で
+//! 転倒）。**積むのは 1 周期ぶんだけ**で、錨は毎周期歩容の目標へ戻す。
+//!
+//! # 遊脚は直交空間で解く
+//!
+//! legged_control の `formulateSwingLegTask` と同じ形:
+//!
+//! ```text
+//!   J_足 · q̈ = kp·(p* − p) + kd·(ṗ* − ṗ) − J̇·v
+//! ```
+//!
+//! **`quadruped_gait::wbc::tasks::swing_leg` は関節空間**（アクチュエータ
+//! ごとの `q̈*`）なので使っていない。関節空間の PD は同じゲインでも脚の
+//! 姿勢で効きが変わる — ヤコビアンが姿勢に依るので、伸び切った脚では足先が
+//! ほとんど動かない。足先で一定にしたいなら足先で書く。
+//!
+//! そのために優先度の積み方も自前で持っている（[`WbcLayer::solve_stack`]）。
+//! 優先度 0 と 2 のタスクは `quadruped_gait` のものをそのまま使う。
 //!
 //! # どこまで動くか（2026-09-06、MuJoCo・同梱の namiashi・16 s）
 //!
@@ -80,41 +96,39 @@
 //! walk 0.500 / crawl 0.800、`swing_height_m = 0.04`、
 //! `mpc_capture_point_gain_s = 0`）で:
 //!
-//! | 歩容 | 指令 | WBC 無効 | 位置 | 位置 + MPC | トルク |
-//! |---|---|---|---|---|---|
-//! | trot | 0.80 m/s | +9.302 m | +9.469 m | **+9.498 m** (95 %) | +0.284 m |
-//! | walk | 0.33 m/s | +3.830 m | +3.882 m | **+3.890 m** (94 %) | +0.290 m |
-//! | crawl | 0.17 m/s | +2.017 m | +2.204 m | **+2.209 m** (104 %) | +0.230 m |
+//! | 歩容 | 指令 | WBC 無効 | 位置 | 位置 + MPC | トルク | トルク + MPC |
+//! |---|---|---|---|---|---|---|
+//! | trot | 0.80 m/s | +9.302 m | +9.794 m | **+10.349 m** | +2.321 m | **+4.070 m** |
+//! | walk | 0.33 m/s | +3.830 m | +3.894 m | **+4.036 m** | +0.648 m | **+1.048 m** |
+//! | crawl | 0.17 m/s | +2.017 m | +2.231 m | +2.180 m | +0.729 m | +0.150 m |
 //!
-//! （括弧は指令に対する追従率。転倒はどれも無し。）
+//! 位置 + MPC の追従率は trot 103 % / walk 98 % / crawl 103 %。転倒なし。
 //!
-//! 同じ機体を**歩容の既定値のまま**（歩幅 0.06/0.08/0.10 m）0.05 m/s で
-//! 走らせると:
+//! - **位置出力が一番よい。** 素の歩容より進み、横のずれとヨーが減る
+//!   （trot でヨー 39° → 14°）。
+//! - **トルク出力は歩けるようになったが位置には届かない**（trot で 41 %、
+//!   walk 25 %）。legged_control 由来の 2 点 — 直交空間の遊脚タスクと
+//!   hybrid joint の弱い PD — を入れる前は +0.28 m しか進まなかった。
+//! - **MPC はトルク出力で効く。** trot +2.3 → +4.1 m、ヨー 106° → 43°、
+//!   walk +0.65 → +1.05 m、ヨー 114° → 8°。crawl だけは逆に落ちる。
 //!
-//! | 歩容 | WBC 無効 | 位置 | 位置 + MPC | トルク |
-//! |---|---|---|---|---|
-//! | crawl | +0.388 m | +0.436 m | +0.476 m | +0.221 m |
-//! | trot | +0.496 m | +0.590 m | +0.659 m | 4.5 s で転倒 |
+//! 歩容を**既定値のまま**（歩幅 0.06/0.08/0.10 m）0.05 m/s で走らせた
+//! ときの数字は README にある。crawl の既定は
+//! `歩幅 / (周期 × 接地比)` = 0.042 m/s しか出せないので、0.05 m/s の
+//! 指令はそもそも届かない。
 //!
-//! crawl の既定は `歩幅 / (周期 × 接地比)` = 0.042 m/s しか出せないので、
-//! **0.05 m/s の指令はそもそも届かない**。
-//!
-//! - **位置出力は素の歩容より良い。** 詰めた設定でも +0.2〜9 %、既定でも
-//!   +12〜19 %。
-//! - **MPC は位置出力をさらに少し良くする。** 詰めた設定では差が小さいが、
-//!   既定の crawl ではヨーのずれが 19.4° → 8.9° と目に見えて減る。
-//! - **トルク出力は歩けない。** 詰めた設定でも 2〜13 % しか進まない
-//!   （転びはしない）。理由は上の「なぜ位置が推奨なのか」。
-//! - **速度出力は詰め切れていない。** シムのアクチュエータのゲイン
-//!   （`--kv-velocity`）に強く依る。
+//! **これはすべて 2.4 kg のモデルでの話。** 実機は 3.3 kg で脚に 73 %
+//! （`articara/tests/fixtures/namiashi/` に補正版がある）。ゲインは
+//! そこで採り直すこと。
 //!
 //! # 調べ方
 //!
 //! `MISA_WBC_DEBUG=1` を付けると毎周期 1 行出る（参照の出どころ・接地・
 //! 脚オドメトリの高さと位置誤差・姿勢・角速度・`a_base_des`・解の胴体
 //! 加速度・接地力の合計、それとトルクが定格の 9 割を超えた軸）。
-//! **要求した胴体加速度と解の胴体加速度が一致していれば QP は仕事をして
-//! いる**ので、そこが合っていて実機が付いてこないならモデルか飽和を疑う。
+//! `MISA_WBC_NULLSPACE=1` で優先度ごとの零空間の次元が出る — **下の
+//! 優先度に自由度が残っているか**はこれで分かる（0 なら、そこより下の
+//! タスクは何を言っても解を動かせない）。
 
 use std::collections::BTreeMap;
 
@@ -122,7 +136,7 @@ use nalgebra as na;
 
 use misarta::joint::JointType;
 use misarta::model::{Model, ModelBuilder};
-use quadruped_gait::wbc::{self, WbcDims, WbcInputs, WbcWarmStart, WbcWeights};
+use quadruped_gait::wbc::{self, WbcDims, WbcSolution, WbcWeights};
 
 use crate::config::{WbcConfig, WbcOutput};
 use crate::jointvec::JointVec;
@@ -205,8 +219,12 @@ pub struct WbcObservation<'a> {
     pub measured_q: &'a JointVec,
     /// 実測角速度（モデル座標系）。読めない軸は 0。
     pub measured_qd: &'a JointVec,
-    /// 歩容の IK 出力（モデル座標系）。遊脚 PD の目標。
+    /// 歩容の IK 出力（モデル座標系）。位置・速度出力の参照になる。
     pub target_q: &'a JointVec,
+    /// 歩容が計画した足の位置（**胴体座標系**、FL / FR / RL / RR）。
+    /// `quadruped_gait::LegOutput::foot_body` そのもの。遊脚の直交空間
+    /// タスクの目標。
+    pub target_foot_body: [na::Vector3<f64>; 4],
     /// IMU の姿勢 `[roll, pitch, yaw]` [rad]。
     pub attitude_rad: [f64; 3],
     /// IMU の角速度 [rad/s]。**胴体座標系**。
@@ -258,8 +276,12 @@ pub struct WbcLayer {
     /// 機体質量 [kg]。接地力の静的配分に使う。
     mass_kg: f64,
     /// 前周期の歩容目標。`q̇_計画` の差分に使う。**全軸・毎周期更新。**
-    /// 遊脚タスク用の [`Self::last_swing_target`] とは更新の仕方が違う。
+    /// 遊脚タスク用の [`Self::last_swing_foot`] とは更新の仕方が違う。
     last_plan: [[f64; 3]; 4],
+    /// 前周期の「計画した足の位置」（世界向き）。遊脚タスクの `ṗ*` を
+    /// 差分で作る。**立脚中は更新しない** — 更新すると、次に遊脚へ入った
+    /// 瞬間に「立脚保持 → 遊脚開始」の跳びがそのまま `ṗ*` になる。
+    last_swing_foot: [na::Vector3<f64>; 4],
     /// 参照とヨー基準を張り直す必要があるか。
     seeded: bool,
     /// IMU のヨーと歩容のヨーの差。**原点が違う**ので、噛み合わせるのに要る。
@@ -391,6 +413,7 @@ impl WbcLayer {
             grf_seeded: false,
             mass_kg,
             last_plan: [[0.0; 3]; 4],
+            last_swing_foot: [na::Vector3::zeros(); 4],
             seeded: false,
             yaw_offset: 0.0,
             last_swing_target: [[0.0; 3]; 4],
@@ -485,11 +508,15 @@ impl WbcLayer {
         let data = misarta::fk::forward_kinematics(&self.model, &q);
         let mut j_contact = na::DMatrix::zeros(12, self.nv);
         let mut dj_v = na::DVector::zeros(12);
+        // 足先の世界位置（胴体を原点に置いた世界向き）。遊脚の直交空間
+        // タスクが「いまどこにいるか」として使う。
+        let mut foot_world = [na::Vector3::zeros(); 4];
         for slot in 0..4 {
             let mi = self.foot_joint[slot];
             let j_full =
                 misarta::jacobian::compute_joint_jacobian_from_data(&self.model, &q, &data, mi);
             let bias = misarta::jacobian::compute_jacobian_dot_times_v(&self.model, &q, &v, mi);
+            foot_world[slot] = data.oMi[mi].translation.vector;
             // misarta の空間ヤコビアンの行は [角 (0..3); 線形 (3..6)]。
             // 接触が要るのは足先の**並進**速度なので 3..6 を取る。
             for r in 0..3 {
@@ -510,39 +537,28 @@ impl WbcLayer {
         let refs = self.references(obs, &r_wb);
         let mpc_driven = obs.mpc.is_some_and(|m| m.solved);
 
-        // ── 関節空間の追従タスク（遊脚 + 立脚）────────────────
+        // ── 関節空間のタスク（立脚と補助軸）──────────────────
         //
-        // `quadruped_gait::wbc` はこれを「遊脚タスク」と呼ぶが、中身は
-        // アクチュエータごとの `q̈*` と有効フラグでしかないので、立脚にも
-        // そのまま使える。**立脚にも置くのは、足が滑らないという制約だけ
-        // では歩容の計画を通らないから**（[`crate::config::WbcConfig::stance_kp`]）。
+        // **遊脚はここではなく直交空間**（下の `swing_task`）。legged_control
+        // の `formulateSwingLegTask` と同じ形にしてある。
+        //
+        // 立脚は既定で置かない（[`crate::config::WbcConfig::stance_kp`]）。
+        // 補助軸（腕）は足ではないので直交空間のタスクが書けず、ここに残る。
         let mut joint_q_ddot = na::DVector::zeros(self.na);
         let mut joint_flag = vec![false; self.na];
-        for leg in 0..4 {
-            let (kp, kd) = if obs.stance[leg] {
-                (self.cfg.stance_kp, self.cfg.stance_kd)
-            } else {
-                (self.cfg.swing_kp, self.cfg.swing_kd)
-            };
-            if kp <= 0.0 && kd <= 0.0 {
-                continue;
-            }
-            for k in 0..3 {
-                let vi = self.leg_v_idx[leg][k];
-                let target = obs.target_q.legs[leg][k];
-                // **目標速度の差分は立脚・遊脚で分けて持つ。** まとめると、
-                // 相が変わった周期に「保持していた角 → 新しい相の角」の
-                // 跳びがそのまま `q̇*` になる。
-                let qd_target = if obs.dt > 1e-6 {
-                    (target - self.last_swing_target[leg][k]) / obs.dt
-                } else {
-                    0.0
-                };
-                self.last_swing_target[leg][k] = target;
-                let q_meas = obs.measured_q.legs[leg][k];
-                let qd_meas = obs.measured_qd.legs[leg][k];
-                joint_q_ddot[vi - 6] = kp * (target - q_meas) + kd * (qd_target - qd_meas);
-                joint_flag[vi - 6] = true;
+        if self.cfg.stance_kp > 0.0 || self.cfg.stance_kd > 0.0 {
+            for leg in 0..4 {
+                if !obs.stance[leg] {
+                    continue;
+                }
+                for k in 0..3 {
+                    let vi = self.leg_v_idx[leg][k];
+                    let target = obs.target_q.legs[leg][k];
+                    joint_q_ddot[vi - 6] = self.cfg.stance_kp
+                        * (target - obs.measured_q.legs[leg][k])
+                        + self.cfg.stance_kd * (0.0 - obs.measured_qd.legs[leg][k]);
+                    joint_flag[vi - 6] = true;
+                }
             }
         }
         // 補助軸（腕）。**実機では位置で保持されている**ので、WBC にも
@@ -550,8 +566,8 @@ impl WbcLayer {
         // 見なし、胴体のピッチを腕の反力で作る解を選ぶ。実際にはサーボが
         // 位置を保つのでその反力は出ず、その差がピッチのずれとして残る。
         if let Some(vi) = self.aux_v_idx {
-            joint_q_ddot[vi - 6] = self.cfg.swing_kp * (obs.target_q.arm - obs.measured_q.arm)
-                + self.cfg.swing_kd * (0.0 - obs.measured_qd.arm);
+            joint_q_ddot[vi - 6] = self.cfg.aux_kp * (obs.target_q.arm - obs.measured_q.arm)
+                + self.cfg.aux_kd * (0.0 - obs.measured_qd.arm);
             joint_flag[vi - 6] = true;
         }
 
@@ -568,27 +584,20 @@ impl WbcLayer {
             nc: 4,
             na: self.na,
         };
-        let inputs = WbcInputs {
+        let swing = self.swing_task(dims, &j_contact, &dj_v, &v, &foot_world, obs, &r_wb);
+        let sol = self.solve_stack(
             dims,
-            mass: &mass,
-            nle: &nle,
-            j_contact: &j_contact,
-            dj_v: &dj_v,
-            contact_flag: obs.stance,
-            friction_mu: self.cfg.friction_mu,
-            f_min_stance_n: self.cfg.f_min_stance_n,
-            torque_max: &self.torque_max,
-            a_base_des: &refs.a_base_des,
-            swing_q_ddot_des: &joint_q_ddot,
-            swing_actuator_flag: &joint_flag,
-            f_grf_des: &refs.f_grf_des,
-            tau_gravity: &tau_gravity,
-        };
-        let warm = WbcWarmStart {
-            x_prev: self.x_prev.as_ref(),
-            prox_weight: self.cfg.prox_weight,
-        };
-        let sol = wbc::solve_warm_with_weights(&inputs, &warm, &self.weights);
+            &mass,
+            &nle,
+            &j_contact,
+            &dj_v,
+            obs.stance,
+            &refs,
+            swing,
+            &joint_q_ddot,
+            &joint_flag,
+            &tau_gravity,
+        );
         self.x_prev = Some(sol.x_full.clone());
 
         // **NaN を実機へ出さない。** QP が壊れた周期は前回の解を捨てて
@@ -688,11 +697,28 @@ impl WbcLayer {
                 self.last_plan[leg][k] = q_plan;
 
                 let q_meas = obs.measured_q.legs[leg][k];
+                let qd_meas = obs.measured_qd.legs[leg][k];
                 // **参照に積む q̈ は頭打ちにする。** MPC の参照では姿勢が
                 // 崩れ始めた瞬間に 600 rad/s² が出る（慣性が小さいため）。
                 // 速度出力ではそれが 1 周期ぶんそのまま指令の跳びになり、
                 // 脚が飛ぶ。
                 let a = q_ddot.clamp(-accel_cap, accel_cap);
+                // **トルク出力は τ だけではない。** legged_control は
+                // `setCommand(pos_des, vel_des, kp=5, kd=3, torque)` で、
+                // トルクに弱い関節 PD を添えて出す（hybrid joint）。WBC が
+                // 出すのは加速度で、位置の誤差を戻す積分器がどこにも無い
+                // ので、τ だけだとモデル誤差のぶん関節がずれ続ける。
+                // **LKMTech は MIT を持たないのでホスト側で足す。**
+                // 両方 0 にすれば純粋なトルクになる。
+                let tau_out = match self.cfg.output {
+                    WbcOutput::Torque => {
+                        tau + self.cfg.joint_kp * (q_plan - q_meas)
+                            + self.cfg.joint_kd * (qd_plan - qd_meas)
+                    }
+                    // 位置・速度出力では関節のループを Plant 側が持って
+                    // いるので、ここで足すと二重になる。
+                    _ => tau,
+                };
                 legs[leg][k] = AxisPlan {
                     // 計画から 1 周期ぶん積む。dt が小さいので寄与は小さい
                     // （q̈ = 100 rad/s², dt = 5 ms で 1.3e-3 rad）。
@@ -702,7 +728,7 @@ impl WbcLayer {
                     velocity_rad_s: qd_plan
                         + a * obs.dt
                         + self.cfg.velocity_track_kp * (q_plan - q_meas),
-                    torque_nm: tau,
+                    torque_nm: tau_out,
                 };
             }
         }
@@ -715,6 +741,155 @@ impl WbcLayer {
             },
             legs,
             status,
+        }
+    }
+
+    /// 遊脚の**直交空間**加速度タスク。legged_control の
+    /// `formulateSwingLegTask` と同じ形。
+    ///
+    /// ```text
+    ///   J_足 · q̈ = kp·(p* − p) + kd·(ṗ* − ṗ) − J̇·v
+    /// ```
+    ///
+    /// 行は遊脚 1 本につき 3 本。**立脚には置かない** — あちらは
+    /// `no_contact_motion`（優先度 0）が「動くな」と言っている。
+    ///
+    /// # 関節空間ではなく直交空間で書く理由
+    ///
+    /// 関節空間の PD（`q̈* = kp(q*−q)`）は同じゲインでも脚の姿勢で効きが
+    /// 変わる — ヤコビアンが姿勢に依るので、伸び切った脚では足先がほとんど
+    /// 動かない。足先で一定にしたいなら足先で書く。**quadruped_gait の
+    /// `tasks::swing_leg` は関節空間**なので、そちらは使わずここで組む。
+    #[allow(clippy::too_many_arguments)]
+    fn swing_task(
+        &mut self,
+        dims: WbcDims,
+        j_contact: &na::DMatrix<f64>,
+        dj_v: &na::DVector<f64>,
+        v: &[f64],
+        foot_world: &[na::Vector3<f64>; 4],
+        obs: &WbcObservation,
+        r_wb: &na::Rotation3<f64>,
+    ) -> Option<wbc::Task> {
+        let swing: Vec<usize> = (0..4).filter(|i| !obs.stance[*i]).collect();
+        // **計画した足の位置は毎周期覚える。** 立脚の周期も含めて更新する
+        // と、次に遊脚へ入った瞬間の差分が「立脚保持 → 遊脚開始」の跳びに
+        // なる。遊脚の周期だけ更新して、前回の遊脚の終わりから繋ぐ。
+        let mut target_world = [na::Vector3::zeros(); 4];
+        for slot in 0..4 {
+            target_world[slot] = r_wb * obs.target_foot_body[slot];
+        }
+        if swing.is_empty() {
+            return None;
+        }
+        let v_vec = na::DVector::from_column_slice(v);
+        let n = dims.n_decision();
+        let mut a = na::DMatrix::zeros(3 * swing.len(), n);
+        let mut b = na::DVector::zeros(3 * swing.len());
+        for (row, &slot) in swing.iter().enumerate() {
+            let p_des = target_world[slot];
+            let v_des = if obs.dt > 1e-6 {
+                (p_des - self.last_swing_foot[slot]) / obs.dt
+            } else {
+                na::Vector3::zeros()
+            };
+            self.last_swing_foot[slot] = p_des;
+
+            // 実測の足先速度は `J_足 · v`（接触ヤコビアンの線形行そのもの）。
+            let j_rows = j_contact.rows(3 * slot, 3);
+            let v_meas = &j_rows * &v_vec;
+            for r in 0..3 {
+                let accel = self.cfg.swing_kp * (p_des[r] - foot_world[slot][r])
+                    + self.cfg.swing_kd * (v_des[r] - v_meas[r]);
+                for c in 0..dims.nv {
+                    a[(3 * row + r, dims.q_offset() + c)] = j_contact[(3 * slot + r, c)];
+                }
+                b[3 * row + r] = accel - dj_v[3 * slot + r];
+            }
+        }
+        Some(wbc::Task::equality(a, b))
+    }
+
+    /// 3 優先度の階層 QP を組んで解く。
+    ///
+    /// ```text
+    ///   優先度 0（硬い）  浮遊ベースの運動方程式 + 摩擦錐 + トルク上限
+    ///                     + 立脚足が滑らないこと
+    ///   優先度 1（柔らか）胴体加速度 + 遊脚（直交空間）+ 関節タスク
+    ///   優先度 2（柔らか）接地力の配分 + 重力補償トルクへの寄せ
+    /// ```
+    ///
+    /// **`quadruped_gait::wbc::solve_warm_with_weights` を呼ばずに自分で
+    /// 組んでいる**のは、遊脚だけ直交空間のタスクに差し替えたいため
+    /// （あちらは関節空間で固定）。優先度 0 と 2 のタスクはあちらのものを
+    /// そのまま使う。
+    #[allow(clippy::too_many_arguments)]
+    fn solve_stack(
+        &mut self,
+        dims: WbcDims,
+        mass: &na::DMatrix<f64>,
+        nle: &na::DVector<f64>,
+        j_contact: &na::DMatrix<f64>,
+        dj_v: &na::DVector<f64>,
+        stance: [bool; 4],
+        refs: &References,
+        swing: Option<wbc::Task>,
+        joint_q_ddot: &na::DVector<f64>,
+        joint_flag: &[bool],
+        tau_gravity: &na::DVector<f64>,
+    ) -> WbcSolution {
+        use quadruped_gait::wbc::tasks;
+        let w = &self.weights;
+
+        let task_0 = tasks::floating_base_eom::formulate(dims, mass, nle, j_contact)
+            .weight(w.floating_base_eom)
+            + tasks::torque_limits::formulate(dims, &self.torque_max)
+            + tasks::friction_cone::formulate(
+                dims,
+                stance,
+                self.cfg.friction_mu,
+                self.cfg.f_min_stance_n,
+            )
+            + tasks::no_contact_motion::formulate(dims, j_contact, dj_v, stance)
+                .weight(w.no_contact_motion);
+
+        let mut task_1 =
+            tasks::base_accel::formulate(dims, &refs.a_base_des).weight(w.base_accel);
+        if let Some(t) = swing {
+            task_1 = task_1 + t.weight(w.swing_leg);
+        }
+        if joint_flag.iter().any(|f| *f) {
+            task_1 = task_1
+                + tasks::swing_leg::formulate(dims, joint_q_ddot, joint_flag)
+                    .weight(w.swing_leg);
+        }
+
+        let task_2 = tasks::contact_force::formulate(dims, &refs.f_grf_des)
+            .weight(w.contact_force)
+            + tasks::tau_gravity::formulate(dims, tau_gravity).weight(w.tau_gravity);
+
+        let warm = wbc::WarmStart {
+            x_prev: self.x_prev.as_ref(),
+            prox_weight: self.cfg.prox_weight,
+        };
+        let l0 = wbc::HoQp::new_with_higher_warm(task_0, None, &warm);
+        let l1 = wbc::HoQp::new_with_higher_warm(task_1, Some(&l0), &warm);
+        let l2 = wbc::HoQp::new_with_higher_warm(task_2, Some(&l1), &warm);
+        if std::env::var_os("MISA_WBC_NULLSPACE").is_some() {
+            eprintln!(
+                "[hqp] n={} dim_z0={} dim_z1={} dim_z2={}",
+                l0.null_space().nrows(),
+                l0.null_space().ncols(),
+                l1.null_space().ncols(),
+                l2.null_space().ncols()
+            );
+        }
+        let x = l2.solution();
+        WbcSolution {
+            q_ddot: x.rows(dims.q_offset(), dims.nv).into_owned(),
+            f_grf: x.rows(dims.f_offset(), 3 * dims.nc).into_owned(),
+            tau: x.rows(dims.tau_offset(), dims.na).into_owned(),
+            x_full: x.clone(),
         }
     }
 
@@ -776,6 +951,13 @@ impl WbcLayer {
         let [roll, pitch, _yaw] = obs.attitude_rad;
         let w = obs.gyro_rad_s;
 
+        // **接地力の参照は「寄せ」でしかない。** 優先度 2 に置いてあり、
+        // 4 脚接地では上位の制約が f をほぼ決めてしまうので、目標を変えて
+        // も解が動かないことがある（同梱モデルの立位で実測。`quadruped_gait`
+        // の `solve_warm_with_weights` を通しても同じ）。**MPC が効くのは
+        // `a_base_des` の側**で、legged_control もそこを主役にしている
+        // （あちらの `formulateContactForceTask` も正則化と書いてある）。
+        //
         // **接地力の予測は周期ごとに震える。** clarabel は広い零空間から
         // 少しずつ違う最適解を拾う（articara の実測で 13 → 68 → 47 N）。
         // 参照だけを鈍らせる — τ の前置きに使う生の値は歩容側が持っている。
@@ -979,6 +1161,7 @@ impl WbcRunner {
             measured_q,
             measured_qd,
             target_q: &out.targets,
+            target_foot_body: out.target_foot_body,
             attitude_rad: imu.map(|i| i.rpy_rad).unwrap_or([0.0; 3]),
             gyro_rad_s: imu.map(|i| i.gyro_rad_s).unwrap_or([0.0; 3]),
             planned_yaw_rad: out.planned_yaw_rad,
@@ -1137,6 +1320,7 @@ mod tests {
             measured_q: &stand,
             measured_qd: &zero,
             target_q: &stand,
+            target_foot_body: [na::Vector3::zeros(); 4],
             attitude_rad: [0.0; 3],
             gyro_rad_s: [0.0; 3],
             planned_yaw_rad: 0.0,
@@ -1156,9 +1340,13 @@ mod tests {
         );
     }
 
-    /// **MPC の参照があればそちらを使う。** 準静的な参照と同じ観測でも、
-    /// 接地力の参照が違えば解も違う。ここが繋がっていないと、MPC 歩容を
-    /// 選んでも WBC には何も届かない（実際そこが唯一の効き目）。
+    /// **MPC の参照があればそちらを使う。**
+    ///
+    /// 見るのは `a_base_des` の側。**接地力の参照（優先度 2）は 4 脚接地
+    /// では解を動かさない** — 上位の制約が f をほぼ決めてしまう（実測。
+    /// `quadruped_gait` の既定の解き方でも同じ）。legged_control も
+    /// `formulateContactForceTask` を正則化と位置づけていて、MPC は
+    /// 重心運動量の変化率から作った胴体加速度で効かせている。
     #[test]
     fn an_mpc_reference_replaces_the_quasi_static_one() {
         let r = robot();
@@ -1179,6 +1367,7 @@ mod tests {
                 measured_q: &stand,
                 measured_qd: &zero,
                 target_q: &stand,
+                target_foot_body: [na::Vector3::zeros(); 4],
                 attitude_rad: [0.0; 3],
                 gyro_rad_s: [0.0; 3],
                 planned_yaw_rad: 0.0,
@@ -1189,16 +1378,12 @@ mod tests {
                 dt: 0.005,
             })
         };
-        // **前脚だけで支える**という、静的配分とは明確に違う参照。
+        // **胴体を持ち上げろ**という、準静的な参照（姿勢が水平で誤差も
+        // 0 なら ≈ 0）とは明確に違う参照。
         let weight = 2.4 * G;
         let mpc = MpcReference {
-            grf_world: [
-                na::Vector3::new(0.0, 0.0, weight / 2.0),
-                na::Vector3::new(0.0, 0.0, weight / 2.0),
-                na::Vector3::zeros(),
-                na::Vector3::zeros(),
-            ],
-            accel_lin_world: na::Vector3::zeros(),
+            grf_world: [na::Vector3::new(0.0, 0.0, weight / 4.0); 4],
+            accel_lin_world: na::Vector3::new(0.0, 0.0, 5.0),
             accel_ang_world: na::Vector3::zeros(),
             solved: true,
         };
@@ -1207,11 +1392,11 @@ mod tests {
         assert!(!quasi.status.mpc_driven);
         let driven = solve(Some(mpc));
         assert!(driven.status.mpc_driven);
-        // 前脚に寄せた参照なので、前脚の τ が静的配分より大きくなる。
-        let fl = driven.legs[0][2].torque_nm.abs();
-        let fl_quasi = quasi.legs[0][2].torque_nm.abs();
+        // 上へ加速しろと言われたぶん、脚を伸ばす向きの τ が増える。
+        let fl = driven.legs[0][2].torque_nm;
+        let fl_quasi = quasi.legs[0][2].torque_nm;
         assert!(
-            fl > fl_quasi,
+            (fl - fl_quasi).abs() > 0.01,
             "MPC の参照が効いていない: FL calf τ {fl} vs 静的 {fl_quasi}"
         );
     }
@@ -1232,6 +1417,7 @@ mod tests {
             measured_q: &stand,
             measured_qd: &zero,
             target_q: &stand,
+            target_foot_body: [na::Vector3::zeros(); 4],
             attitude_rad: [0.0; 3],
             gyro_rad_s: [0.0; 3],
             planned_yaw_rad: 0.0,
@@ -1273,6 +1459,7 @@ mod tests {
                 measured_q: &stand,
                 measured_qd: &zero,
                 target_q: &stand,
+                target_foot_body: [na::Vector3::zeros(); 4],
                 attitude_rad: [0.0; 3],
                 gyro_rad_s: [0.0; 3],
                 planned_yaw_rad: 0.0,
@@ -1320,6 +1507,7 @@ mod tests {
             measured_q: &stand,
             measured_qd: &zero,
             target_q: &stand,
+            target_foot_body: [na::Vector3::zeros(); 4],
             attitude_rad: [0.1, -0.1, 0.0],
             gyro_rad_s: [0.0; 3],
             planned_yaw_rad: 0.0,
@@ -1362,6 +1550,7 @@ mod tests {
                 measured_q: q,
                 measured_qd: zero,
                 target_q: q,
+                target_foot_body: [na::Vector3::zeros(); 4],
                 attitude_rad: [0.0; 3],
                 gyro_rad_s: [0.0; 3],
                 planned_yaw_rad: 0.0,

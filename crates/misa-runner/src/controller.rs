@@ -76,6 +76,9 @@ pub struct ControlOutput {
     /// 歩容が計画している世界ヨー角 [rad]。速度指令の積分値で、IMU とは
     /// **原点が違う**。WBC のヨー保持の目標に使う。
     pub planned_yaw_rad: f64,
+    /// 歩容が計画した足の位置（胴体座標系、FL / FR / RL / RR）。
+    /// WBC の遊脚タスク（直交空間）の目標。
+    pub target_foot_body: [nalgebra::Vector3<f64>; 4],
     /// MPC 歩容が出した参照。CHAMP / LinearCrawl では `None`。
     ///
     /// **WBC の参照がこれで変わる**（[`crate::wbc::MpcReference`]）。
@@ -135,6 +138,9 @@ pub struct Controller {
     /// 停止指令を受けてから全脚接地を待っている時間 [s]。
     /// 待ちが終わらないまま歩き続けないための保険。
     settling_s: f64,
+    /// 直近の歩容出力の足位置（胴体座標系）。遷移中・ポーズ再生中は最後に
+    /// 分かった値のまま（そのあいだ WBC は回さないので影響しない）。
+    target_foot_body: [nalgebra::Vector3<f64>; 4],
     /// 直近の周期で MPC が出した参照。歩容が MPC 系でなければ `None`。
     ///
     /// `tick_active` でだけ更新する。**歩容が回っていない相では捨てる**
@@ -183,6 +189,7 @@ impl Controller {
             tilt_rad: [0.0; 3],
             warned_tilt_reach: false,
             alt_pose_requested: false,
+            target_foot_body: [nalgebra::Vector3::zeros(); 4],
             mpc: None,
             observed_v_world: nalgebra::Vector3::zeros(),
             observed_omega_world: nalgebra::Vector3::zeros(),
@@ -290,6 +297,7 @@ impl Controller {
             state: self.state,
             stance: self.body_view.stance,
             planned_yaw_rad: self.body_view.yaw,
+            target_foot_body: self.target_foot_body,
             mpc: self.mpc,
             body_velocity: self.ramped_v,
         }
@@ -469,6 +477,9 @@ impl Controller {
             log::warn!("IK が届かない脚があります（姿勢がクランプされました）");
         }
         self.mpc = self.mpc_reference(&out, attitude_rad);
+        for slot in 0..4 {
+            self.target_foot_body[slot] = out.legs[slot].foot_body;
+        }
         let arm = self.arm_target(cmd, attitude_rad[1], dt);
         self.tilt_toward(cmd.body_attitude_rad, dt);
         self.body_view = BodyView {
