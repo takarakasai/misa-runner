@@ -38,6 +38,8 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let vx = cli.f64("vx").unwrap_or(0.0);
     let vy = cli.f64("vy").unwrap_or(0.0);
     let wz = cli.f64("wz").unwrap_or(0.0);
+    // 台本の胴体高さ（立ち高さからの差 [m]）。高さ変更が全歩容で効くかを見る用。
+    let height_offset = cli.f64("height-offset").unwrap_or(0.0);
     let seconds = cli.f64("secs").unwrap_or(6.0);
     let every = cli.usize("every").unwrap_or(200).max(1);
     let viz_cfg = crate::viz_config(cli);
@@ -330,6 +332,9 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         let mut cmd = pilot.poll(obs.time);
         if scripted {
             cmd.velocity = script_velocity;
+            if controller.state() == State::Active {
+                cmd.height_offset_m = height_offset;
+            }
         }
         let measured = jointvec_from(&obs);
         let attitude = obs.imu.map(|m| m.rpy_rad).unwrap_or([0.0; 3]);
@@ -540,15 +545,17 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         // **planned（指令）と measured（MuJoCo の実測）を両方流す。**
         // 受け側はゴーストで重ねて描くので、追従できていない軸が目で分かる。
         if let Some(p) = publisher.as_mut() {
-            let body = controller.body_view();
+            let view = controller.body_view();
+            // 実測側の高さは脚オドメトリ（接地足が無い周期は計画のまま）。
             let measured_body = viz::BodyView {
                 rp: [att[0], att[1]],
-                ..body
+                z: body.height_m.unwrap_or(view.z),
+                ..view
             };
             let planned = out.targets;
             p.maybe_publish(|seq| {
                 viz::Frames::both(
-                    viz::frame(seq, t, &planned, &body),
+                    viz::frame(seq, t, &planned, &view),
                     viz::frame(seq, t, &measured, &measured_body),
                 )
             });

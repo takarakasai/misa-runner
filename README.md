@@ -516,7 +516,7 @@ ERROR を毎回はっきり出したうえで、止めるかどうかは operato
 | CH | 役割 |
 |---|---|
 | CH1 / CH2 / CH4 | 左右 (vy) / 前後 (vx) / 旋回 (wz) |
-| CH3 | 高さ（**歩容側が未対応で効かない**） |
+| CH3 | 胴体高さ（立ち高さ ± `gait.height_range_m`。全歩容で効く） |
 | CH5 | 脱力 / 初期姿勢 / 歩容 |
 | CH6 | 歩容種別 (Crawl / Walk / Trot) |
 | **CH7** | **腕（観測のみ。アプリからは駆動しない）** |
@@ -637,10 +637,16 @@ q_model = sign *  q_motor + zero_pose_rad
 
 ### 立ち高さは `nominal_foot_body` に書き込む
 
-`quadruped-gait` の `set_body_height_m` は `LinearCrawl` 専用で、CHAMP 系は
-`LegKinematics::nominal_foot_body` を見る。`gait.stance_height_m` をどの歩容
-でも効かせるため、コントローラを組むたびにこの Z を書き換えている
-（`robot::Robot::kin_at_height`）。
+`quadruped-gait` の `set_body_height_m` は `LinearCrawl` 専用で、CHAMP 系も
+MPC も `LegKinematics::nominal_foot_body` を見る。`gait.stance_height_m` を
+どの歩容でも効かせるため、コントローラを組むときにこの Z を書き換えている
+（`robot::Robot::kin_at_height`）。**実行中の高さ変更（CH3 / キーの `r` `f` /
+`sim --height-offset`）も同じ道**で、変わった周期に `set_kinematics` で差し替える
+（位相も MPC の状態も保たれる。MPC の参照高さもここから取る）。2026-09-06 まで
+は `set_body_height_m` だけを呼んでいて MPC / CHAMP では何も起きず、可視化の
+胴体だけが上下して**足が胴体と一緒に浮いて見えた**。直した後は MuJoCo で
+−0.04 / +0.03 m の指令に胴体が 0.216 → 0.176 / 0.246 m と応える（トルク出力・
+位置出力とも）。
 
 ### CHAMP の crawl は静的歩容になっていない
 

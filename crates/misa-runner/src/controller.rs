@@ -116,9 +116,9 @@ pub struct Controller {
     /// チキンヘッドが効かないことを 1 度だけ警告するためのフラグ。
     /// 毎周期出すとログが埋まる。
     warned_chicken_head: bool,
-    /// 胴体高さ変更が効かないことを 1 度だけ警告するためのフラグ。
-    /// 歩容を切り替えたら出し直す。
-    warned_body_height: bool,
+    /// いま歩容に入れてある胴体高さ [m]（`nominal_foot_body.z` の符号違い）。
+    /// 変わったときだけ `set_kinematics` を呼ぶ。
+    applied_height_m: f64,
     /// ランプ後の速度指令 `[vx, vy, wz]`。歩容へ渡すのはこちら。
     ///
     /// **スティックの値を直接渡すと歩容の出力が階段状に飛ぶ**（実測で
@@ -167,6 +167,7 @@ impl Controller {
     /// `arm_app_driven` はアプリが腕サーボを駆動できるか
     /// （`misa_hal::arm::ArmServo::is_app_driven`）。
     pub fn with_arm(robot: Robot, cfg: AppConfig, arm_app_driven: bool) -> Self {
+        let stance_height_m = cfg.gait.stance_height_m;
         let gait_select = GaitSelect::Crawl;
         let gait = robot.build_gait(&cfg.gait, &cfg.wbc, gait_select);
         let chicken = ChickenHead::new(&cfg.poses);
@@ -183,7 +184,7 @@ impl Controller {
             cfg,
             just_changed: false,
             warned_chicken_head: false,
-            warned_body_height: false,
+            applied_height_m: stance_height_m,
             ramped_v: [0.0; 3],
             settling_s: 0.0,
             tilt_rad: [0.0; 3],
@@ -463,25 +464,10 @@ impl Controller {
             self.begin_start_pose_transition();
             return;
         }
-        // 胴体高さはスティックで上下できる。歩容の立ち位置そのものを動かす。
-        // **ただし受け付けるのは LinearCrawl だけ**（`gait_supports_body_height`）。
-        // 他の歩容では `set_body_height_m` が黙って捨てるので、動かしても
-        // 何も起きない。黙って無視すると「配線かプロポの故障」に見えるので、
-        // 実際にスティックが動いたときに 1 度だけ言う。
-        self.gait
-            .set_body_height_m(self.cfg.gait.stance_height_m + cmd.height_offset_m);
-        if cmd.height_offset_m != 0.0
-            && !self.warned_body_height
-            && !crate::robot::gait_supports_body_height(crate::robot::gait_mode_of(self.gait_select, &self.cfg.gait))
-        {
-            log::warn!(
-                "歩容 {} は実行中の胴体高さ変更を受け付けません（CH3 は効きません）。\
-                 受け付けるのは LinearCrawl のみで、そちらは横移動と旋回を受け付けません。\
-                 高さを変えるなら設定の gait.stance_height_m を変えて起動し直してください",
-                self.gait_select.label()
-            );
-            self.warned_body_height = true;
-        }
+        // 胴体高さはスティックで上下できる。歩容の立ち位置そのものを動かす
+        // （全歩容。[`Self::apply_body_height`]）。
+        let h = self.clamp_body_height(self.cfg.gait.stance_height_m + cmd.height_offset_m);
+        self.apply_body_height(h);
         let want = match cmd.mode {
             ModeRequest::Walk => [cmd.velocity.vx_m_s, cmd.velocity.vy_m_s, cmd.velocity.wz_rad_s],
             // 起立中は歩容を止める（速度ゼロ = 接地したまま）。
@@ -512,7 +498,7 @@ impl Controller {
                 out.body_state.world_position.y,
             ],
             yaw: out.body_state.world_yaw,
-            z: self.cfg.gait.stance_height_m + cmd.height_offset_m,
+            z: self.applied_height_m,
             // 歩容は水平計画なので planned の roll/pitch は常に 0。
             // 姿勢を計画する制御（MPC 等）を入れたらここに載せる。
             rp: [0.0, 0.0],
@@ -699,9 +685,33 @@ impl Controller {
         self.tilt_rad = [0.0; 3];
     }
 
+    /// 胴体高さを歩容へ入れる。**全歩容で効く。**
+    ///
+    /// `AnyGaitController::set_body_height_m` は LinearCrawl しか見ない
+    /// （他は黙って捨てる）。立ち位置は `nominal_foot_body` が決めるので、
+    /// 高さを変えた運動学設定を `set_kinematics` で差し替える（位相も MPC の
+    /// 状態も保たれる。quadruped-gait はこの用途を想定している）。MPC の参照
+    /// 高さもここから取るので、MPC + WBC でも胴体が実際に上下する。
+    /// 2026-09-06 までは `set_body_height_m` だけで、MPC / CHAMP では何も
+    /// 起きないのに可視化の胴体だけが上下していた。
+    fn apply_body_height(&mut self, h: f64) {
+        if (h - self.applied_height_m).abs() < 1e-6 {
+            return;
+        }
+        self.gait.set_kinematics(self.robot.kin_at_height(h));
+        self.gait.set_body_height_m(h);
+        self.applied_height_m = h;
+    }
+
+    /// 脚が届く範囲に丸める。伸び切り（脚長）の 95 % を上限、30 % を下限に。
+    fn clamp_body_height(&self, h: f64) -> f64 {
+        let leg = self.robot.kin.fl.upper_leg_m + self.robot.kin.fl.lower_leg_m;
+        h.clamp(0.3 * leg, 0.95 * leg)
+    }
+
     /// 歩容が「今この設定で立つ」姿勢。時間を進めずに取り出す。
     fn stance_targets(&mut self) -> JointVec {
-        self.gait.set_body_height_m(self.cfg.gait.stance_height_m);
+        self.apply_body_height(self.cfg.gait.stance_height_m);
         self.gait.set_velocity_cmd(velocity_cmd(0.0, 0.0, 0.0));
         let out = self.gait.tick(0.0);
         self.robot.output_to_joints(&out, self.targets.arm)
@@ -819,7 +829,6 @@ impl Controller {
         // くる値が入る（操縦側も歩容を替えたら基準値へ戻す約束）。
         self.gait_tune = misa_core::GaitTune::default();
         // 歩容ごとに可否が違うので、切り替えたら言い直す。
-        self.warned_body_height = false;
     }
 }
 
@@ -1625,6 +1634,37 @@ mod tests {
             t > 0.9,
             "CH5 上段のまま {t} s で再生が打ち切られています（シーケンスは 1.0 s）"
         );
+    }
+
+    /// **胴体高さの指令は全歩容で立ち位置を動かす。** 2026-09-06 までは
+    /// MPC / CHAMP で何も起きず、可視化の胴体だけが上下して足が浮いて見えた。
+    #[test]
+    fn the_body_height_command_moves_the_planned_feet_in_every_gait() {
+        use crate::config::GaitControllerKind;
+        for kind in [GaitControllerKind::Champ, GaitControllerKind::Mpc] {
+            let mut cfg = AppConfig::default();
+            cfg.gait.controller = kind;
+            let robot = Robot::load(&test_model_path(), &cfg.control.kinematics_pose).unwrap();
+            let mut c = Controller::new(robot, cfg.clone());
+            run_until(&mut c, &cmd(ModeRequest::Walk), State::Active, 20.0);
+            // Active になった周期は遷移の終わりで、足の目標は次の周期から出る。
+            for _ in 0..10 {
+                c.tick(&cmd(ModeRequest::Walk), &JointVec::zeros(), imu(), 0.005);
+            }
+            let z0 = c.target_foot_body[0].z;
+            assert!((z0 + cfg.gait.stance_height_m).abs() < 5e-3, "{kind:?}: 立ち高さの足 z が {z0}");
+            let mut lower = cmd(ModeRequest::Walk);
+            lower.height_offset_m = -0.03;
+            for _ in 0..40 {
+                c.tick(&lower, &JointVec::zeros(), imu(), 0.005);
+            }
+            let z1 = c.target_foot_body[0].z;
+            assert!(
+                (z1 - (z0 + 0.03)).abs() < 5e-3,
+                "{kind:?}: 3 cm 下げたのに足の z が {z0} → {z1}"
+            );
+            assert!((c.body_view().z - (cfg.gait.stance_height_m - 0.03)).abs() < 1e-9);
+        }
     }
 
     /// 前足を振る `wave_fr` / `wave_fl` も同じく最後まで通ること。

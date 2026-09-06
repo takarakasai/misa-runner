@@ -399,6 +399,7 @@ fn print_help() {
          [--timestep S]            物理の刻み [s]（既定 MuJoCo の 2 ms）
                                    **重い機体では下げないと立てない。** PD が
                                    明示的なので kv < 2·I/dt でしか安定しない
+         [--height-offset M]       胴体高さを立ち高さから M ずらす（歩容中）
          [--cycle S] [--swing M]   **歩容パラメータを上書きする。** 与えな
          [--step-length M]         かった項目はプロファイルのまま。周期は
          [--duty D]                揺れに、歩幅は速度の出方に効く
@@ -566,6 +567,7 @@ const VALUE_FLAGS: &[&str] = &[
     "secs",
     "gait",
     "vx",
+    "height-offset",
     "vy",
     "wz",
     "every",

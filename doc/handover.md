@@ -93,10 +93,12 @@ q_model = sign *  q_motor + zero_pose_rad        (sign = ±1)
 
 ### 立ち高さは `nominal_foot_body` に書き込む
 
-`quadruped-gait` の `set_body_height_m` は `LinearCrawl` 専用で、CHAMP 系は
+`quadruped-gait` の `set_body_height_m` は `LinearCrawl` 専用で、CHAMP 系も MPC も
 `LegKinematics::nominal_foot_body` を見る。`gait.stance_height_m` をどの歩容でも
-効かせるため、コントローラを組むたびに Z を書き換えている
-（`robot::Robot::kin_at_height`）。
+効かせるため、コントローラを組むときに Z を書き換えている
+（`robot::Robot::kin_at_height`）。実行中の高さ変更（CH3）も 2026-09-06 から同じ
+道で `set_kinematics` を呼ぶ（それまでは MPC / CHAMP で効かず、可視化の胴体だけが
+上下していた）。
 
 ### 既定の歩容モードは 3 種とも CHAMP 系
 

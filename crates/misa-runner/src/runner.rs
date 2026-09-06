@@ -833,21 +833,22 @@ pub fn run(
             // 受け側で「崩れ落ちたロボット」として描かれる。
             // 一度立ったら見に行かない（`all_ok` は 12 軸ぶんロックを取る）。
             // 最初の読み戻しが済んだかは観測そのものが知っている。
-            let body = controller.body_view();
+            let view = controller.body_view();
             let t = started.elapsed().as_secs_f64();
             let att = attitude;
+            let est_height = body.height_m;
             p.maybe_publish(|seq| {
-                let planned = viz::frame(seq, t, &out.targets, &body);
+                let planned = viz::frame(seq, t, &out.targets, &view);
                 if !measured_seen {
                     return viz::Frames::planned(planned);
                 }
-                // 胴体の姿勢 3 軸は IMU の実測。位置 x, y と高さはオドメトリが
-                // 無いので歩容の値のまま。**実測なのは 12 関節と姿勢だけ**で、
-                // 位置を入れたらここを差し替える。
+                // 胴体の姿勢 3 軸は IMU の実測、高さは脚オドメトリ。位置 x, y は
+                // 絶対位置が出ないので歩容の値のまま。
                 let measured_body = viz::BodyView {
                     rp: [att[0], att[1]],
                     yaw: att[2],
-                    ..body
+                    z: est_height.unwrap_or(view.z),
+                    ..view
                 };
                 viz::Frames::both(planned, viz::frame(seq, t, &measured, &measured_body))
             });

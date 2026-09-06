@@ -283,7 +283,7 @@ impl Robot {
     /// 立ち高さは基準姿勢に引きずられる。CHAMP 系のコントローラは
     /// `set_body_height_m` を見ない（あれは LinearCrawl 専用）ので、
     /// 設定した高さをどの歩容でも効かせるにはここを書き換えるしかない。
-    fn kin_at_height(&self, stance_height_m: f64) -> KinematicsConfig {
+    pub fn kin_at_height(&self, stance_height_m: f64) -> KinematicsConfig {
         let mut kin = self.kin.clone();
         for leg in [&mut kin.fl, &mut kin.fr, &mut kin.rl, &mut kin.rr] {
             leg.nominal_foot_body.z = -stance_height_m;
@@ -487,16 +487,16 @@ pub struct BodyInertia {
 /// ポーズ間で動くのは振る脚だけで、支持脚 3 本の角度は 4 ポーズとも同じ。
 /// 胴体を起こす動作はすべて `ready` への 0.8 s に入っている。
 ///
-/// その歩容が実行中の胴体高さ変更（プロポ CH3）を受け付けるか。
+/// その歩容が `AnyGaitController::set_body_height_m` を受け付けるか。
 ///
-/// **`LinearCrawl` だけが受け付ける。** `AnyGaitController::set_body_height_m`
-/// は他のモードでは `_ => {}` で**黙って捨てる**ので、上位からは成功と
-/// 区別がつかない。既定は全歩容 `Champ` なので、既定設定では CH3 は
-/// どこにも効かない。
-///
-/// 設定の `gait.stance_height_m` は別経路（構築時の `GaitConfig`）なので
-/// こちらは全歩容で効く。**「設定で高さを変えたら姿勢が変わった」ことを
-/// 「実行中の高さ変更が効く」根拠にしてはいけない**（実際に取り違えた）。
+/// **`LinearCrawl` だけ。** 他のモードでは `_ => {}` で**黙って捨てる**ので、
+/// 上位からは成功と区別がつかない。**コントローラはこれに頼らない** —
+/// 実行中の高さ変更は `set_kinematics(kin_at_height(h))` で
+/// `nominal_foot_body.z` を差し替える形にしてあり、全歩容で効く
+/// （[`crate::controller::Controller`] の `apply_body_height`）。
+/// 2026-09-06 までは `set_body_height_m` だけを呼んでいて、MPC / CHAMP では
+/// 高さが変わらないのに可視化の胴体だけが上下し、**足が胴体と一緒に浮いて
+/// 見えた**。
 pub fn gait_supports_body_height(mode: GaitMode) -> bool {
     matches!(mode, GaitMode::LinearCrawl)
 }
