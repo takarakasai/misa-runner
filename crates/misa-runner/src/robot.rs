@@ -736,7 +736,7 @@ mod tests {
 
     /// **同梱プロファイルが名指しする姿勢も、モデルに在ること。**
     ///
-    /// 既定値だけを見る上の試験は通るのに、`robots/namiashi.toml` が
+    /// 既定値だけを見る上の試験は通るのに、`robots/testquad.toml` が
     /// 存在しない姿勢名を指していた（`start_pose = "start"`。モデルにあるのは
     /// `constrain`）。無いときは警告を出して立ち姿勢へ直行するので、
     /// **CH5 中段の初期姿勢保持が黙って効かなくなる。** MuJoCo で回して
@@ -745,7 +745,7 @@ mod tests {
     fn the_shipped_profile_names_poses_that_exist_in_the_model() {
         let text = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../robots/namiashi.toml"
+            "/../../robots/testquad.toml"
         ))
         .unwrap();
         let mut cfg = AppConfig::from_toml(&text).unwrap();
@@ -886,7 +886,7 @@ mod tests {
 
     /// 同梱モデルの絶対パス（`crates/misa-runner` から見たリポジトリルート）。
     fn shipped_model_path() -> String {
-        format!("{}/../../models/namiashi/namiashi.misa", env!("CARGO_MANIFEST_DIR"))
+        format!("{}/../../models/testquad/testquad.misa", env!("CARGO_MANIFEST_DIR"))
     }
 
     #[test]

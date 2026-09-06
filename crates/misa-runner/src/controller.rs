@@ -852,7 +852,7 @@ mod tests {
 
     fn test_model_path() -> String {
         // crates/misa-runner から見たリポジトリルート。
-        format!("{}/../../models/namiashi/namiashi.misa", env!("CARGO_MANIFEST_DIR"))
+        format!("{}/../../models/testquad/testquad.misa", env!("CARGO_MANIFEST_DIR"))
     }
 
     /// 状態が `want` になるまで回す。回りすぎたら失敗。
@@ -1567,11 +1567,11 @@ mod tests {
         cfg.poses.greeting = seq.into();
         let robot = Robot::load(&test_model_path(), &cfg.control.kinematics_pose).unwrap();
         // **無いものを「入れていません」と言わない。** シーケンスはモデル側に
-        // あるので、submodule が古いと存在しない。原因が分かる形で落とす。
+        // ある（models/testquad/gen.py が書く）。原因が分かる形で落とす。
         assert!(
             robot.poses.sequence(seq).is_some() || robot.poses.pose(seq).is_some(),
-            "モデルに {:?} がありません。models/namiashi が古い可能性があります\n\
-             （`git submodule update --init` / あるポーズ {:?} / あるシーケンス {:?}）",
+            "モデルに {:?} がありません。models/testquad/gen.py を確かめてください\n\
+             （あるポーズ {:?} / あるシーケンス {:?}）",
             seq,
             robot.poses.pose_names().collect::<Vec<_>>(),
             robot.poses.sequence_names().collect::<Vec<_>>(),

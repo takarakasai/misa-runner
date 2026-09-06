@@ -485,7 +485,7 @@ run のオプション:
 articara で見る:
   1) misa-run dump --gait trot --vx 0.1 --secs 60 --realtime --viz \
        --viz-endpoint tcp/127.0.0.1:7447
-  2) 別端末で articara を起動しモデル models/namiashi/namiashi.misa を開く
+  2) 別端末で articara を起動しモデル models/testquad/testquad.misa を開く
      （cd ../articara && cargo run --release --features viz）
   3) Live gait feed パネルで同じキー / エンドポイントを入れて Start
 "#

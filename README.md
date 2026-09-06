@@ -1038,6 +1038,22 @@ elliptic）。結果が接地モデルに依っていないかを見る軸。
 言っても解を動かせない。接地力の参照（優先度 2）が 4 脚接地で効かないのは
 これで確かめた。
 
+## 同梱の汎用モデルと機体固有のリポジトリ
+
+`models/testquad/testquad.misa` は**特定の機体ではない**試験用の四脚（脚 0.15 +
+0.15 m、2.9 kg、hip roll / thigh pitch / calf pitch + 腕 1 軸。
+`models/testquad/gen.py` が丸い数字から書き出す。生成物も追跡している）。
+misa-runner のテストと `control.model` の既定はこれを見るので、**機体側の
+submodule 無しで `cargo test` が通る**。`robots/testquad.toml` はそれで動く
+シリアル直結プロファイルの書き方の例（ゼロ点はすべて 0）。MuJoCo でも歩く
+（articara の詰め値 + MPC で trot 0.80 を位置出力 90 %、トルク出力 58 % — WBC の
+ゲインは namiashi で詰めたものなので、この機体では詰め直していない）。
+
+実機の設定・モデル・立ち上げ手順は機体側のリポジトリに置く（keel は
+keel-runner、namiashi は namiashi-runner2）。このリポジトリに残っている
+`robots/namiashi.toml` / `models/namiashi`（submodule）/ `doc/` の SBC 手順は
+過渡期のもので、`tests/model_consistency.rs` だけがまだ submodule を見ている。
+
 ## 未確定・既知の制限
 
 - **初期姿勢（250×350×700 mm の直方体に収める姿勢）は未確定。**

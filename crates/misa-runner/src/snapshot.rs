@@ -797,7 +797,7 @@ mod tests {
     fn the_shipped_profile_yields_one_limit_per_axis() {
         let text = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../robots/namiashi.toml"
+            "/../../robots/testquad.toml"
         ))
         .unwrap();
         let cfg = crate::config::AppConfig::from_toml(&text).unwrap();

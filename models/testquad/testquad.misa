@@ -1,0 +1,1270 @@
+schema = "misarta/1"
+[robot]
+name = "testquad"
+root = "trunk"
+
+[[link]]
+name = "trunk"
+[link.inertial]
+mass = 1.6
+ixx = 0.003
+iyy = 0.006413333333333333
+izz = 0.007253333333333334
+ixy = 0.0
+ixz = 0.0
+iyz = 0.0
+[[link.visual]]
+[link.visual.geom.box]
+size = [0.2, 0.12, 0.09]
+[[link.collision]]
+[link.collision.geom.box]
+size = [0.2, 0.12, 0.09]
+
+[[link]]
+name = "arm"
+[link.inertial]
+mass = 0.05
+ixx = 2.733333333333333e-06
+iyy = 4.333333333333334e-05
+izz = 4.273333333333334e-05
+ixy = 0.0
+ixz = 0.0
+iyz = 0.0
+[link.inertial.origin]
+xyz = [0.05, 0.0, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[[link.visual]]
+[link.visual.origin]
+xyz = [0.05, 0.0, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[link.visual.geom.box]
+size = [0.1, 0.016, 0.02]
+[[link.collision]]
+[link.collision.origin]
+xyz = [0.05, 0.0, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[link.collision.geom.box]
+size = [0.1, 0.016, 0.02]
+
+[[joint]]
+name = "arm_pitch_joint"
+type = "revolute"
+parent = "trunk"
+child = "arm"
+axis = [0.0, 1.0, 0.0]
+[joint.origin]
+xyz = [0.1, 0.0, 0.06]
+rpy = [0.0, 0.0, 0.0]
+[joint.limit]
+lower = -2.3
+upper = 0.85
+effort = 6.865
+velocity = 8.727
+[joint.dynamics]
+armature = 0.0014
+damping = 0.1
+friction = 0.0
+
+[[link]]
+name = "FL_hip"
+[link.inertial]
+mass = 0.15
+ixx = 3.9999999999999996e-05
+iyy = 3.9999999999999996e-05
+izz = 3.9999999999999996e-05
+ixy = 0.0
+ixz = 0.0
+iyz = 0.0
+[link.inertial.origin]
+xyz = [0.0, 0.0375, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[[link.visual]]
+[link.visual.origin]
+xyz = [0.0, 0.0375, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[link.visual.geom.box]
+size = [0.04, 0.04, 0.04]
+[[link.collision]]
+[link.collision.origin]
+xyz = [0.0, 0.0375, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[link.collision.geom.box]
+size = [0.04, 0.04, 0.04]
+
+[[link]]
+name = "FL_thigh"
+[link.inertial]
+mass = 0.1
+ixx = 0.000195
+iyy = 0.00019083333333333333
+izz = 1.0833333333333334e-05
+ixy = 0.0
+ixz = 0.0
+iyz = 0.0
+[link.inertial.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[[link.visual]]
+[link.visual.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[link.visual.geom.box]
+size = [0.02, 0.03, 0.15]
+[[link.collision]]
+[link.collision.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[link.collision.geom.box]
+size = [0.02, 0.03, 0.15]
+
+[[link]]
+name = "FL_calf"
+[link.inertial]
+mass = 0.05
+ixx = 9.481666666666666e-05
+iyy = 9.481666666666666e-05
+izz = 2.1333333333333334e-06
+ixy = 0.0
+ixz = 0.0
+iyz = 0.0
+[link.inertial.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[[link.visual]]
+[link.visual.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[link.visual.geom.box]
+size = [0.016, 0.016, 0.15]
+[[link.collision]]
+[link.collision.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[link.collision.geom.box]
+size = [0.016, 0.016, 0.15]
+
+[[link]]
+name = "FL_foot"
+[link.inertial]
+mass = 0.01
+ixx = 1.024e-06
+iyy = 1.024e-06
+izz = 1.024e-06
+ixy = 0.0
+ixz = 0.0
+iyz = 0.0
+[[link.visual]]
+[link.visual.geom.sphere]
+radius = 0.016
+[[link.collision]]
+[link.collision.geom.sphere]
+radius = 0.016
+
+[[joint]]
+name = "FL_hip_joint"
+type = "revolute"
+parent = "trunk"
+child = "FL_hip"
+axis = [1.0, 0.0, 0.0]
+[joint.origin]
+xyz = [0.15, 0.035, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[joint.limit]
+lower = -1.05
+upper = 1.05
+effort = 1.5
+velocity = 33.5
+[joint.dynamics]
+armature = 0.0014
+damping = 0.1
+friction = 0.0
+
+[[joint]]
+name = "FL_thigh_joint"
+type = "revolute"
+parent = "FL_hip"
+child = "FL_thigh"
+axis = [0.0, 1.0, 0.0]
+[joint.origin]
+xyz = [0.0, 0.075, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[joint.limit]
+lower = -2.62
+upper = 2.62
+effort = 1.5
+velocity = 33.5
+[joint.dynamics]
+armature = 0.0014
+damping = 0.1
+friction = 0.0
+
+[[joint]]
+name = "FL_calf_joint"
+type = "revolute"
+parent = "FL_thigh"
+child = "FL_calf"
+axis = [0.0, 1.0, 0.0]
+[joint.origin]
+xyz = [0.0, 0.0, -0.15]
+rpy = [0.0, 0.0, 0.0]
+[joint.limit]
+lower = -2.62
+upper = 2.62
+effort = 2.2
+velocity = 33.5
+[joint.dynamics]
+armature = 0.0014
+damping = 0.1
+friction = 0.0
+
+[[joint]]
+name = "FL_foot_fixed"
+type = "fixed"
+parent = "FL_calf"
+child = "FL_foot"
+axis = [1.0, 0.0, 0.0]
+[joint.origin]
+xyz = [0.0, 0.0, -0.15]
+rpy = [0.0, 0.0, 0.0]
+
+[[link]]
+name = "FR_hip"
+[link.inertial]
+mass = 0.15
+ixx = 3.9999999999999996e-05
+iyy = 3.9999999999999996e-05
+izz = 3.9999999999999996e-05
+ixy = 0.0
+ixz = 0.0
+iyz = 0.0
+[link.inertial.origin]
+xyz = [0.0, -0.0375, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[[link.visual]]
+[link.visual.origin]
+xyz = [0.0, -0.0375, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[link.visual.geom.box]
+size = [0.04, 0.04, 0.04]
+[[link.collision]]
+[link.collision.origin]
+xyz = [0.0, -0.0375, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[link.collision.geom.box]
+size = [0.04, 0.04, 0.04]
+
+[[link]]
+name = "FR_thigh"
+[link.inertial]
+mass = 0.1
+ixx = 0.000195
+iyy = 0.00019083333333333333
+izz = 1.0833333333333334e-05
+ixy = 0.0
+ixz = 0.0
+iyz = 0.0
+[link.inertial.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[[link.visual]]
+[link.visual.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[link.visual.geom.box]
+size = [0.02, 0.03, 0.15]
+[[link.collision]]
+[link.collision.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[link.collision.geom.box]
+size = [0.02, 0.03, 0.15]
+
+[[link]]
+name = "FR_calf"
+[link.inertial]
+mass = 0.05
+ixx = 9.481666666666666e-05
+iyy = 9.481666666666666e-05
+izz = 2.1333333333333334e-06
+ixy = 0.0
+ixz = 0.0
+iyz = 0.0
+[link.inertial.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[[link.visual]]
+[link.visual.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[link.visual.geom.box]
+size = [0.016, 0.016, 0.15]
+[[link.collision]]
+[link.collision.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[link.collision.geom.box]
+size = [0.016, 0.016, 0.15]
+
+[[link]]
+name = "FR_foot"
+[link.inertial]
+mass = 0.01
+ixx = 1.024e-06
+iyy = 1.024e-06
+izz = 1.024e-06
+ixy = 0.0
+ixz = 0.0
+iyz = 0.0
+[[link.visual]]
+[link.visual.geom.sphere]
+radius = 0.016
+[[link.collision]]
+[link.collision.geom.sphere]
+radius = 0.016
+
+[[joint]]
+name = "FR_hip_joint"
+type = "revolute"
+parent = "trunk"
+child = "FR_hip"
+axis = [1.0, 0.0, 0.0]
+[joint.origin]
+xyz = [0.15, -0.035, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[joint.limit]
+lower = -1.05
+upper = 1.05
+effort = 1.5
+velocity = 33.5
+[joint.dynamics]
+armature = 0.0014
+damping = 0.1
+friction = 0.0
+
+[[joint]]
+name = "FR_thigh_joint"
+type = "revolute"
+parent = "FR_hip"
+child = "FR_thigh"
+axis = [0.0, 1.0, 0.0]
+[joint.origin]
+xyz = [0.0, -0.075, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[joint.limit]
+lower = -2.62
+upper = 2.62
+effort = 1.5
+velocity = 33.5
+[joint.dynamics]
+armature = 0.0014
+damping = 0.1
+friction = 0.0
+
+[[joint]]
+name = "FR_calf_joint"
+type = "revolute"
+parent = "FR_thigh"
+child = "FR_calf"
+axis = [0.0, 1.0, 0.0]
+[joint.origin]
+xyz = [0.0, 0.0, -0.15]
+rpy = [0.0, 0.0, 0.0]
+[joint.limit]
+lower = -2.62
+upper = 2.62
+effort = 2.2
+velocity = 33.5
+[joint.dynamics]
+armature = 0.0014
+damping = 0.1
+friction = 0.0
+
+[[joint]]
+name = "FR_foot_fixed"
+type = "fixed"
+parent = "FR_calf"
+child = "FR_foot"
+axis = [1.0, 0.0, 0.0]
+[joint.origin]
+xyz = [0.0, 0.0, -0.15]
+rpy = [0.0, 0.0, 0.0]
+
+[[link]]
+name = "RL_hip"
+[link.inertial]
+mass = 0.15
+ixx = 3.9999999999999996e-05
+iyy = 3.9999999999999996e-05
+izz = 3.9999999999999996e-05
+ixy = 0.0
+ixz = 0.0
+iyz = 0.0
+[link.inertial.origin]
+xyz = [0.0, 0.0375, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[[link.visual]]
+[link.visual.origin]
+xyz = [0.0, 0.0375, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[link.visual.geom.box]
+size = [0.04, 0.04, 0.04]
+[[link.collision]]
+[link.collision.origin]
+xyz = [0.0, 0.0375, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[link.collision.geom.box]
+size = [0.04, 0.04, 0.04]
+
+[[link]]
+name = "RL_thigh"
+[link.inertial]
+mass = 0.1
+ixx = 0.000195
+iyy = 0.00019083333333333333
+izz = 1.0833333333333334e-05
+ixy = 0.0
+ixz = 0.0
+iyz = 0.0
+[link.inertial.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[[link.visual]]
+[link.visual.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[link.visual.geom.box]
+size = [0.02, 0.03, 0.15]
+[[link.collision]]
+[link.collision.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[link.collision.geom.box]
+size = [0.02, 0.03, 0.15]
+
+[[link]]
+name = "RL_calf"
+[link.inertial]
+mass = 0.05
+ixx = 9.481666666666666e-05
+iyy = 9.481666666666666e-05
+izz = 2.1333333333333334e-06
+ixy = 0.0
+ixz = 0.0
+iyz = 0.0
+[link.inertial.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[[link.visual]]
+[link.visual.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[link.visual.geom.box]
+size = [0.016, 0.016, 0.15]
+[[link.collision]]
+[link.collision.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[link.collision.geom.box]
+size = [0.016, 0.016, 0.15]
+
+[[link]]
+name = "RL_foot"
+[link.inertial]
+mass = 0.01
+ixx = 1.024e-06
+iyy = 1.024e-06
+izz = 1.024e-06
+ixy = 0.0
+ixz = 0.0
+iyz = 0.0
+[[link.visual]]
+[link.visual.geom.sphere]
+radius = 0.016
+[[link.collision]]
+[link.collision.geom.sphere]
+radius = 0.016
+
+[[joint]]
+name = "RL_hip_joint"
+type = "revolute"
+parent = "trunk"
+child = "RL_hip"
+axis = [1.0, 0.0, 0.0]
+[joint.origin]
+xyz = [-0.15, 0.035, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[joint.limit]
+lower = -1.05
+upper = 1.05
+effort = 1.5
+velocity = 33.5
+[joint.dynamics]
+armature = 0.0014
+damping = 0.1
+friction = 0.0
+
+[[joint]]
+name = "RL_thigh_joint"
+type = "revolute"
+parent = "RL_hip"
+child = "RL_thigh"
+axis = [0.0, 1.0, 0.0]
+[joint.origin]
+xyz = [0.0, 0.075, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[joint.limit]
+lower = -2.62
+upper = 2.62
+effort = 1.5
+velocity = 33.5
+[joint.dynamics]
+armature = 0.0014
+damping = 0.1
+friction = 0.0
+
+[[joint]]
+name = "RL_calf_joint"
+type = "revolute"
+parent = "RL_thigh"
+child = "RL_calf"
+axis = [0.0, 1.0, 0.0]
+[joint.origin]
+xyz = [0.0, 0.0, -0.15]
+rpy = [0.0, 0.0, 0.0]
+[joint.limit]
+lower = -2.62
+upper = 2.62
+effort = 2.2
+velocity = 33.5
+[joint.dynamics]
+armature = 0.0014
+damping = 0.1
+friction = 0.0
+
+[[joint]]
+name = "RL_foot_fixed"
+type = "fixed"
+parent = "RL_calf"
+child = "RL_foot"
+axis = [1.0, 0.0, 0.0]
+[joint.origin]
+xyz = [0.0, 0.0, -0.15]
+rpy = [0.0, 0.0, 0.0]
+
+[[link]]
+name = "RR_hip"
+[link.inertial]
+mass = 0.15
+ixx = 3.9999999999999996e-05
+iyy = 3.9999999999999996e-05
+izz = 3.9999999999999996e-05
+ixy = 0.0
+ixz = 0.0
+iyz = 0.0
+[link.inertial.origin]
+xyz = [0.0, -0.0375, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[[link.visual]]
+[link.visual.origin]
+xyz = [0.0, -0.0375, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[link.visual.geom.box]
+size = [0.04, 0.04, 0.04]
+[[link.collision]]
+[link.collision.origin]
+xyz = [0.0, -0.0375, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[link.collision.geom.box]
+size = [0.04, 0.04, 0.04]
+
+[[link]]
+name = "RR_thigh"
+[link.inertial]
+mass = 0.1
+ixx = 0.000195
+iyy = 0.00019083333333333333
+izz = 1.0833333333333334e-05
+ixy = 0.0
+ixz = 0.0
+iyz = 0.0
+[link.inertial.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[[link.visual]]
+[link.visual.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[link.visual.geom.box]
+size = [0.02, 0.03, 0.15]
+[[link.collision]]
+[link.collision.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[link.collision.geom.box]
+size = [0.02, 0.03, 0.15]
+
+[[link]]
+name = "RR_calf"
+[link.inertial]
+mass = 0.05
+ixx = 9.481666666666666e-05
+iyy = 9.481666666666666e-05
+izz = 2.1333333333333334e-06
+ixy = 0.0
+ixz = 0.0
+iyz = 0.0
+[link.inertial.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[[link.visual]]
+[link.visual.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[link.visual.geom.box]
+size = [0.016, 0.016, 0.15]
+[[link.collision]]
+[link.collision.origin]
+xyz = [0.0, 0.0, -0.075]
+rpy = [0.0, 0.0, 0.0]
+[link.collision.geom.box]
+size = [0.016, 0.016, 0.15]
+
+[[link]]
+name = "RR_foot"
+[link.inertial]
+mass = 0.01
+ixx = 1.024e-06
+iyy = 1.024e-06
+izz = 1.024e-06
+ixy = 0.0
+ixz = 0.0
+iyz = 0.0
+[[link.visual]]
+[link.visual.geom.sphere]
+radius = 0.016
+[[link.collision]]
+[link.collision.geom.sphere]
+radius = 0.016
+
+[[joint]]
+name = "RR_hip_joint"
+type = "revolute"
+parent = "trunk"
+child = "RR_hip"
+axis = [1.0, 0.0, 0.0]
+[joint.origin]
+xyz = [-0.15, -0.035, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[joint.limit]
+lower = -1.05
+upper = 1.05
+effort = 1.5
+velocity = 33.5
+[joint.dynamics]
+armature = 0.0014
+damping = 0.1
+friction = 0.0
+
+[[joint]]
+name = "RR_thigh_joint"
+type = "revolute"
+parent = "RR_hip"
+child = "RR_thigh"
+axis = [0.0, 1.0, 0.0]
+[joint.origin]
+xyz = [0.0, -0.075, 0.0]
+rpy = [0.0, 0.0, 0.0]
+[joint.limit]
+lower = -2.62
+upper = 2.62
+effort = 1.5
+velocity = 33.5
+[joint.dynamics]
+armature = 0.0014
+damping = 0.1
+friction = 0.0
+
+[[joint]]
+name = "RR_calf_joint"
+type = "revolute"
+parent = "RR_thigh"
+child = "RR_calf"
+axis = [0.0, 1.0, 0.0]
+[joint.origin]
+xyz = [0.0, 0.0, -0.15]
+rpy = [0.0, 0.0, 0.0]
+[joint.limit]
+lower = -2.62
+upper = 2.62
+effort = 2.2
+velocity = 33.5
+[joint.dynamics]
+armature = 0.0014
+damping = 0.1
+friction = 0.0
+
+[[joint]]
+name = "RR_foot_fixed"
+type = "fixed"
+parent = "RR_calf"
+child = "RR_foot"
+axis = [1.0, 0.0, 0.0]
+[joint.origin]
+xyz = [0.0, 0.0, -0.15]
+rpy = [0.0, 0.0, 0.0]
+
+[[collision_pair]]
+link_a = "FL_hip"
+link_b = "FR_hip"
+enabled = false
+
+[[collision_pair]]
+link_a = "RL_hip"
+link_b = "RR_hip"
+enabled = false
+
+[[collision_pair]]
+link_a = "FL_hip"
+link_b = "RL_hip"
+enabled = false
+
+[[collision_pair]]
+link_a = "FR_hip"
+link_b = "RR_hip"
+enabled = false
+
+[[collision_pair]]
+link_a = "FL_hip"
+link_b = "RR_hip"
+enabled = false
+
+[[collision_pair]]
+link_a = "FR_hip"
+link_b = "RL_hip"
+enabled = false
+
+[[actuator]]
+name = "arm_pitch_joint_motor"
+mode = "Position"
+kp = 5.0
+kv = 0.5
+[[actuator.joints]]
+name = "arm_pitch_joint"
+gear = 1.0
+
+[[actuator]]
+name = "FL_hip_joint_motor"
+mode = "Position"
+kp = 100.0
+kv = 1.2
+[[actuator.joints]]
+name = "FL_hip_joint"
+gear = 1.0
+
+[[actuator]]
+name = "FL_thigh_joint_motor"
+mode = "Position"
+kp = 100.0
+kv = 1.2
+[[actuator.joints]]
+name = "FL_thigh_joint"
+gear = 1.0
+
+[[actuator]]
+name = "FL_calf_joint_motor"
+mode = "Position"
+kp = 100.0
+kv = 1.2
+[[actuator.joints]]
+name = "FL_calf_joint"
+gear = 1.0
+
+[[actuator]]
+name = "FR_hip_joint_motor"
+mode = "Position"
+kp = 100.0
+kv = 1.2
+[[actuator.joints]]
+name = "FR_hip_joint"
+gear = 1.0
+
+[[actuator]]
+name = "FR_thigh_joint_motor"
+mode = "Position"
+kp = 100.0
+kv = 1.2
+[[actuator.joints]]
+name = "FR_thigh_joint"
+gear = 1.0
+
+[[actuator]]
+name = "FR_calf_joint_motor"
+mode = "Position"
+kp = 100.0
+kv = 1.2
+[[actuator.joints]]
+name = "FR_calf_joint"
+gear = 1.0
+
+[[actuator]]
+name = "RL_hip_joint_motor"
+mode = "Position"
+kp = 100.0
+kv = 1.2
+[[actuator.joints]]
+name = "RL_hip_joint"
+gear = 1.0
+
+[[actuator]]
+name = "RL_thigh_joint_motor"
+mode = "Position"
+kp = 100.0
+kv = 1.2
+[[actuator.joints]]
+name = "RL_thigh_joint"
+gear = 1.0
+
+[[actuator]]
+name = "RL_calf_joint_motor"
+mode = "Position"
+kp = 100.0
+kv = 1.2
+[[actuator.joints]]
+name = "RL_calf_joint"
+gear = 1.0
+
+[[actuator]]
+name = "RR_hip_joint_motor"
+mode = "Position"
+kp = 100.0
+kv = 1.2
+[[actuator.joints]]
+name = "RR_hip_joint"
+gear = 1.0
+
+[[actuator]]
+name = "RR_thigh_joint_motor"
+mode = "Position"
+kp = 100.0
+kv = 1.2
+[[actuator.joints]]
+name = "RR_thigh_joint"
+gear = 1.0
+
+[[actuator]]
+name = "RR_calf_joint_motor"
+mode = "Position"
+kp = 100.0
+kv = 1.2
+[[actuator.joints]]
+name = "RR_calf_joint"
+gear = 1.0
+
+[[pose]]
+name = "extend_full"
+duration = 0.2
+kind = "QuinticSmooth"
+[pose.angles]
+FL_calf_joint = 0.0
+FL_hip_joint = 0.0
+FL_thigh_joint = 0.0
+FR_calf_joint = 0.0
+FR_hip_joint = 0.0
+FR_thigh_joint = 0.0
+RL_calf_joint = 0.0
+RL_hip_joint = 0.0
+RL_thigh_joint = 0.0
+RR_calf_joint = 0.0
+RR_hip_joint = 0.0
+RR_thigh_joint = 0.0
+arm_pitch_joint = 0.0
+
+[[pose]]
+name = "extend"
+duration = 1.0
+kind = "QuinticSmooth"
+[pose.angles]
+FL_calf_joint = -0.6
+FL_hip_joint = 0.0
+FL_thigh_joint = 0.3
+FR_calf_joint = -0.6
+FR_hip_joint = 0.0
+FR_thigh_joint = 0.3
+RL_calf_joint = -0.6
+RL_hip_joint = 0.0
+RL_thigh_joint = 0.3
+RR_calf_joint = -0.6
+RR_hip_joint = 0.0
+RR_thigh_joint = 0.3
+arm_pitch_joint = 0.0
+
+[[pose]]
+name = "constrain"
+duration = 0.5
+kind = "QuinticSmooth"
+[pose.angles]
+FL_calf_joint = -2.0
+FL_hip_joint = 0.0
+FL_thigh_joint = 1.0
+FR_calf_joint = -2.0
+FR_hip_joint = 0.0
+FR_thigh_joint = 1.0
+RL_calf_joint = -2.0
+RL_hip_joint = 0.0
+RL_thigh_joint = 1.0
+RR_calf_joint = -2.0
+RR_hip_joint = 0.0
+RR_thigh_joint = 1.0
+arm_pitch_joint = 0.0
+
+[[pose]]
+name = "constrain_2"
+duration = 0.1
+kind = "QuinticSmooth"
+[pose.angles]
+FL_calf_joint = -2.6
+FL_hip_joint = 0.0
+FL_thigh_joint = 1.3
+FR_calf_joint = -2.6
+FR_hip_joint = 0.0
+FR_thigh_joint = 1.3
+RL_calf_joint = -2.6
+RL_hip_joint = 0.0
+RL_thigh_joint = 1.3
+RR_calf_joint = -2.6
+RR_hip_joint = 0.0
+RR_thigh_joint = 1.3
+arm_pitch_joint = 0.0
+
+[[pose]]
+name = "start"
+duration = 0.5
+kind = "QuinticSmooth"
+[pose.angles]
+FL_calf_joint = -2.52
+FL_hip_joint = 0.0
+FL_thigh_joint = 0.785
+FR_calf_joint = -2.52
+FR_hip_joint = 0.0
+FR_thigh_joint = 0.785
+RL_calf_joint = -1.309
+RL_hip_joint = 0.0
+RL_thigh_joint = 0.873
+RR_calf_joint = -1.309
+RR_hip_joint = 0.0
+RR_thigh_joint = 0.873
+arm_pitch_joint = 0.0
+
+[[pose]]
+name = "standby"
+duration = 0.5
+kind = "QuinticSmooth"
+[pose.angles]
+FL_calf_joint = -1.571
+FL_hip_joint = 0.0
+FL_thigh_joint = 0.785
+FR_calf_joint = -1.571
+FR_hip_joint = 0.0
+FR_thigh_joint = 0.785
+RL_calf_joint = -1.571
+RL_hip_joint = 0.0
+RL_thigh_joint = 0.785
+RR_calf_joint = -1.571
+RR_hip_joint = 0.0
+RR_thigh_joint = 0.785
+arm_pitch_joint = 0.0
+
+[[pose]]
+name = "arm_raise"
+duration = 0.4
+kind = "QuinticSmooth"
+[pose.angles]
+arm_pitch_joint = -1.2
+
+[[pose]]
+name = "arm_lower"
+duration = 0.4
+kind = "QuinticSmooth"
+[pose.angles]
+arm_pitch_joint = -0.3
+
+[[pose]]
+name = "arm_home"
+duration = 0.5
+kind = "QuinticSmooth"
+[pose.angles]
+arm_pitch_joint = 0.0
+
+[[pose]]
+name = "wave_fr_ready"
+duration = 0.4
+kind = "QuinticSmooth"
+[pose.angles]
+FL_calf_joint = -1.096
+FL_hip_joint = -0.166
+FL_thigh_joint = 0.515
+FR_calf_joint = -0.741
+FR_hip_joint = -0.158
+FR_thigh_joint = 0.34
+RL_calf_joint = -1.867
+RL_hip_joint = -0.235
+RL_thigh_joint = 0.831
+RR_calf_joint = -1.581
+RR_hip_joint = -0.214
+RR_thigh_joint = 0.704
+arm_pitch_joint = 0.0
+
+[[pose]]
+name = "wave_fr_up"
+duration = 0.4
+kind = "QuinticSmooth"
+[pose.angles]
+FL_calf_joint = -1.096
+FL_hip_joint = -0.166
+FL_thigh_joint = 0.515
+FR_calf_joint = -2.146
+FR_hip_joint = -0.187
+FR_thigh_joint = 0.459
+RL_calf_joint = -1.867
+RL_hip_joint = -0.235
+RL_thigh_joint = 0.831
+RR_calf_joint = -1.581
+RR_hip_joint = -0.214
+RR_thigh_joint = 0.704
+arm_pitch_joint = 0.0
+
+[[pose]]
+name = "wave_fr_a"
+duration = 0.4
+kind = "QuinticSmooth"
+[pose.angles]
+FL_calf_joint = -1.096
+FL_hip_joint = -0.166
+FL_thigh_joint = 0.515
+FR_calf_joint = -1.86
+FR_hip_joint = -0.522
+FR_thigh_joint = 0.452
+RL_calf_joint = -1.867
+RL_hip_joint = -0.235
+RL_thigh_joint = 0.831
+RR_calf_joint = -1.581
+RR_hip_joint = -0.214
+RR_thigh_joint = 0.704
+arm_pitch_joint = 0.0
+
+[[pose]]
+name = "wave_fr_b"
+duration = 0.4
+kind = "QuinticSmooth"
+[pose.angles]
+FL_calf_joint = -1.096
+FL_hip_joint = -0.166
+FL_thigh_joint = 0.515
+FR_calf_joint = -2.256
+FR_hip_joint = 0.041
+FR_thigh_joint = 0.43
+RL_calf_joint = -1.867
+RL_hip_joint = -0.235
+RL_thigh_joint = 0.831
+RR_calf_joint = -1.581
+RR_hip_joint = -0.214
+RR_thigh_joint = 0.704
+arm_pitch_joint = 0.0
+
+[[pose]]
+name = "wave_fl_ready"
+duration = 0.4
+kind = "QuinticSmooth"
+[pose.angles]
+FL_calf_joint = -0.741
+FL_hip_joint = 0.158
+FL_thigh_joint = 0.34
+FR_calf_joint = -1.096
+FR_hip_joint = 0.166
+FR_thigh_joint = 0.515
+RL_calf_joint = -1.867
+RL_hip_joint = 0.235
+RL_thigh_joint = 0.831
+RR_calf_joint = -1.581
+RR_hip_joint = 0.214
+RR_thigh_joint = 0.704
+arm_pitch_joint = 0.0
+
+[[pose]]
+name = "wave_fl_up"
+duration = 0.4
+kind = "QuinticSmooth"
+[pose.angles]
+FL_calf_joint = -2.146
+FL_hip_joint = 0.187
+FL_thigh_joint = 0.459
+FR_calf_joint = -1.096
+FR_hip_joint = 0.166
+FR_thigh_joint = 0.515
+RL_calf_joint = -1.867
+RL_hip_joint = 0.235
+RL_thigh_joint = 0.831
+RR_calf_joint = -1.581
+RR_hip_joint = 0.214
+RR_thigh_joint = 0.704
+arm_pitch_joint = 0.0
+
+[[pose]]
+name = "wave_fl_a"
+duration = 0.4
+kind = "QuinticSmooth"
+[pose.angles]
+FL_calf_joint = -1.86
+FL_hip_joint = 0.522
+FL_thigh_joint = 0.452
+FR_calf_joint = -1.096
+FR_hip_joint = 0.166
+FR_thigh_joint = 0.515
+RL_calf_joint = -1.867
+RL_hip_joint = 0.235
+RL_thigh_joint = 0.831
+RR_calf_joint = -1.581
+RR_hip_joint = 0.214
+RR_thigh_joint = 0.704
+arm_pitch_joint = 0.0
+
+[[pose]]
+name = "wave_fl_b"
+duration = 0.4
+kind = "QuinticSmooth"
+[pose.angles]
+FL_calf_joint = -2.256
+FL_hip_joint = -0.041
+FL_thigh_joint = 0.43
+FR_calf_joint = -1.096
+FR_hip_joint = 0.166
+FR_thigh_joint = 0.515
+RL_calf_joint = -1.867
+RL_hip_joint = 0.235
+RL_thigh_joint = 0.831
+RR_calf_joint = -1.581
+RR_hip_joint = 0.214
+RR_thigh_joint = 0.704
+arm_pitch_joint = 0.0
+
+[[sequence]]
+name = "jump"
+[[sequence.steps]]
+pose_name = "constrain_2"
+duration = 0.5
+kind = "QuinticSmooth"
+[[sequence.steps]]
+pose_name = "extend"
+duration = 0.4
+kind = "QuinticSmooth"
+[[sequence.steps]]
+pose_name = "constrain_2"
+duration = 0.1
+kind = "QuinticSmooth"
+
+[[sequence]]
+name = "greeting"
+[[sequence.steps]]
+pose_name = "arm_raise"
+duration = 0.5
+kind = "QuinticSmooth"
+[[sequence.steps]]
+pose_name = "arm_lower"
+duration = 0.35
+kind = "QuinticSmooth"
+[[sequence.steps]]
+pose_name = "arm_raise"
+duration = 0.35
+kind = "QuinticSmooth"
+[[sequence.steps]]
+pose_name = "arm_home"
+duration = 0.6
+kind = "QuinticSmooth"
+
+[[sequence]]
+name = "wave_fr"
+[[sequence.steps]]
+pose_name = "wave_fr_ready"
+duration = 0.8
+kind = "QuinticSmooth"
+[[sequence.steps]]
+pose_name = "wave_fr_up"
+duration = 0.6
+kind = "QuinticSmooth"
+[[sequence.steps]]
+pose_name = "wave_fr_a"
+duration = 0.35
+kind = "QuinticSmooth"
+[[sequence.steps]]
+pose_name = "wave_fr_b"
+duration = 0.35
+kind = "QuinticSmooth"
+[[sequence.steps]]
+pose_name = "wave_fr_a"
+duration = 0.35
+kind = "QuinticSmooth"
+[[sequence.steps]]
+pose_name = "wave_fr_b"
+duration = 0.35
+kind = "QuinticSmooth"
+[[sequence.steps]]
+pose_name = "wave_fr_up"
+duration = 0.4
+kind = "QuinticSmooth"
+[[sequence.steps]]
+pose_name = "wave_fr_ready"
+duration = 0.6
+kind = "QuinticSmooth"
+
+[[sequence]]
+name = "wave_fl"
+[[sequence.steps]]
+pose_name = "wave_fl_ready"
+duration = 0.8
+kind = "QuinticSmooth"
+[[sequence.steps]]
+pose_name = "wave_fl_up"
+duration = 0.6
+kind = "QuinticSmooth"
+[[sequence.steps]]
+pose_name = "wave_fl_a"
+duration = 0.35
+kind = "QuinticSmooth"
+[[sequence.steps]]
+pose_name = "wave_fl_b"
+duration = 0.35
+kind = "QuinticSmooth"
+[[sequence.steps]]
+pose_name = "wave_fl_a"
+duration = 0.35
+kind = "QuinticSmooth"
+[[sequence.steps]]
+pose_name = "wave_fl_b"
+duration = 0.35
+kind = "QuinticSmooth"
+[[sequence.steps]]
+pose_name = "wave_fl_up"
+duration = 0.4
+kind = "QuinticSmooth"
+[[sequence.steps]]
+pose_name = "wave_fl_ready"
+duration = 0.6
+kind = "QuinticSmooth"
+
+[home]
+base_position = [0.0, 0.0, 0.0]
+base_orientation = [0.0, 0.0, 0.0, 1.0]
+[home.joint_positions]
+arm_pitch_joint = 0.0
+FL_hip_joint = 0.0
+FL_thigh_joint = 0.0
+FL_calf_joint = 0.0
+FR_hip_joint = 0.0
+FR_thigh_joint = 0.0
+FR_calf_joint = 0.0
+RL_hip_joint = 0.0
+RL_thigh_joint = 0.0
+RL_calf_joint = 0.0
+RR_hip_joint = 0.0
+RR_thigh_joint = 0.0
+RR_calf_joint = 0.0

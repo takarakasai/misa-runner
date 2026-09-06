@@ -305,7 +305,7 @@ mod tests {
     fn robot() -> Robot {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../models/namiashi/namiashi.misa"
+            "/../../models/testquad/testquad.misa"
         );
         Robot::load(path, "extend").expect("同梱モデルが読めること")
     }

@@ -353,7 +353,7 @@ pub struct WbcConfig {
     ///
     /// **namiashi の実機（LKMTech MG4005E-i10）は 24 V で瞬時 2.5 N·m**
     /// （減速機出力。連続定格 1.5 N·m）なので **1.667**。同梱の
-    /// `robots/namiashi.toml` に書いてある。
+    /// `robots/testquad.toml` に書いてある。
     ///
     /// **上げれば歩けるようになる、という話ではない**
     /// （[`crate::wbc`] の「トルク定格は前進速度を縛っていない」）。
@@ -823,7 +823,7 @@ pub struct ControlConfig {
 }
 
 fn default_model_path() -> String {
-    "models/namiashi/namiashi.misa".into()
+    "models/testquad/testquad.misa".into()
 }
 fn default_rate_hz() -> f64 {
     200.0
@@ -1252,10 +1252,10 @@ FL_hip_joint = 0.0
 
     #[test]
     fn the_shipped_profile_names_the_robot() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../robots/namiashi.toml");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../robots/testquad.toml");
         let text = std::fs::read_to_string(path).unwrap();
         let cfg = AppConfig::from_toml(&text).unwrap();
-        assert_eq!(cfg.name, "namiashi");
+        assert_eq!(cfg.name, "testquad");
     }
 
     /// **同梱プロファイルのモデルパスが、組み込みの既定と揃っていること。**
@@ -1265,7 +1265,7 @@ FL_hip_joint = 0.0
     /// 2 か所にある以上、揃っていることを試験で押さえる。
     #[test]
     fn the_shipped_profile_points_at_the_same_model_as_the_default() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../robots/namiashi.toml");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../robots/testquad.toml");
         let text = std::fs::read_to_string(path).unwrap();
         let cfg = AppConfig::from_toml(&text).unwrap();
         assert_eq!(cfg.control.model, default_model_path());
@@ -1284,7 +1284,7 @@ FL_hip_joint = 0.0
         let text = r#"
 name = "bridged"
 [control]
-model = "models/namiashi/namiashi.misa"
+model = "models/testquad/testquad.misa"
 [hardware]
 kind = "ros2"
 namespace = "/bridged"
@@ -1376,8 +1376,8 @@ role = "wheel"
 
     #[test]
     fn the_shipped_config_still_loads() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../robots/namiashi.toml");
-        let text = std::fs::read_to_string(path).expect("robots/namiashi.toml が読めません");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../robots/testquad.toml");
+        let text = std::fs::read_to_string(path).expect("robots/testquad.toml が読めません");
         AppConfig::from_toml(&text).expect("同梱の設定が読めなくなっている");
     }
     use super::*;
