@@ -90,7 +90,7 @@ pub trait Backend {
 /// `misa-run` の中身。**Backend を差して呼ぶ。**
 ///
 /// 戻り値は終了コード。**75 は「起動条件が整っていないだけ」**で、
-/// systemd はこれだけを再起動の対象にする（`misa-run.service`）。
+/// systemd はこれだけを再起動の対象にする（機体側の unit、namiashi-runner2 の `doc/misa-run.service`）。
 /// 制御ループ中のクラッシュ（1）で自動再起動すると脚が再び動き出す。
 pub fn main_with(backends: &[&dyn Backend]) -> std::process::ExitCode {
     // 既定は info。うるさければ `RUST_LOG=warn`、追い込むときは `debug`。
@@ -106,7 +106,7 @@ pub fn main_with(backends: &[&dyn Backend]) -> std::process::ExitCode {
 
     if let Err(e) = dispatch(&cli, backends) {
         // **起動条件が整っていないだけの失敗は 75 で返す。**
-        // systemd はこれだけを再起動の対象にする（`misa-run.service`）。
+        // systemd はこれだけを再起動の対象にする（機体側の unit、namiashi-runner2 の `doc/misa-run.service`）。
         // 制御ループ中のクラッシュ（1）で自動再起動すると脚が再び動き出す。
         match e.strip_prefix(runner::RETRYABLE) {
             Some(msg) => {
@@ -184,7 +184,7 @@ fn dispatch(cli: &Cli, backends: &[&dyn Backend]) -> Result<(), String> {
 /// 打てばよく、どちらでも同じ。
 ///
 /// 0 を「無限」に割り当てるのは、U_BOOT_TIMEOUT=0 が「即起動」ではなく
-/// 「無限に待つ」で紛らわしいのと同じ形ではある（`doc/boot_config.md` の
+/// 「無限に待つ」で紛らわしいのと同じ形ではある（namiashi-runner2 `doc/boot_config.md` の
 /// U-Boot の節）。ただしこちらは**起動直後に「Ctrl-C まで」と画面に出る**ので、
 /// 意図と違えばその場で分かる。U-Boot 側は無言でハングするのが問題だった。
 pub fn secs_or_forever(cli: &Cli, default: f64) -> Option<f64> {

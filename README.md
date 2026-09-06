@@ -1,11 +1,15 @@
 # misa-runner
 
-四脚ロボット **namiashi**（LKMTech V3 モータ ×12 + 腕の RC サーボ ×1）を
-プロポ（Futaba S.BUS）で操縦する実機アプリ。
+四脚ロボットをプロポ（Futaba S.BUS）や ROS 2 で操縦する**実機アプリの
+機体に依らない部分**。歩容そのもの（`quadruped-gait`）やモデル（`misarta` /
+`.misa`）には手を入れず、**座標変換・モード遷移・操縦入力・安全ゲート・
+WBC / MPC・MuJoCo での検証**をここに持つ。
 
-`go2-gait-runner` が Unitree Go2 に対して果たしている役割の namiashi 版で、
-歩容そのもの（`quadruped-gait`）やモデル（`misarta` / `.misa`）には手を入れず、
-**実機の配線・座標変換・モード遷移・操縦入力**だけをここに持つ。
+機体ごとのもの（配線・校正値・モデル・立ち上げ手順・評価結果）は機体側の
+リポジトリが持ち、そちらの実行ファイルが `misa_runner::main_with` を呼ぶ
+（namiashi → [namiashi-runner2](https://github.com/takarakasai/namiashi-runner2)、
+keel → keel-runner）。`misa-run` 単体は同梱の汎用モデル `models/testquad` と
+`robots/testquad.toml` で動く。
 
 ## できること
 
@@ -22,21 +26,18 @@
 ※ チキンヘッドと挨拶の腕動作は、腕サーボをアプリから駆動できる構成でのみ
 有効。現状は受信機直結なので腕は**観測のみ**（[未確定・既知の制限](#未確定既知の制限)）。
 
-**引き継ぎ・設計判断・SBC 移行の手順**は [`doc/handover.md`](doc/handover.md)、
-**配線とモータ id の対応表**は [`doc/motor_map.md`](doc/motor_map.md)。
+**引き継ぎ・設計判断**は [`doc/handover.md`](doc/handover.md)。**機体ごとの
+配線・校正値・立ち上げ手順・SBC の運用は機体側のリポジトリ**にある（namiashi は
+[namiashi-runner2](https://github.com/takarakasai/namiashi-runner2)、keel は
+keel-runner）。このリポジトリは機体に依らない部分だけを持つ。
 
 ## ハードウェア
 
-`nm_board/ch348` rev2 基板（CH348L, USB-C → 8ch UART）が実機 I/F。
-UART の割り当ては `spec_rev2_0_0_asbuilt.md` §4 のとおり:
-
-| UART | 役割 | I/F |
-|---|---|---|
-| 0–3 | LEG1–4 = FL / FR / RL / RR（各 3 モータ） | RS485 |
-| 4 | ARMA（腕サーボ） | RS485 / TTL 切替 |
-| 5 | IMU（WitMotion IWT603） | TTL |
-| 6 | S.BUS（受信専用） | 反転 TTL |
-| 7 | ARMB（予備） | RS485 / TTL 切替 |
+シリアル直結の Plant（`kind = "serial"`）は `nm_board/ch348` rev2 基板
+（CH348L, USB-C → 8ch UART）を前提にする。脚 4 バス（RS485）・IMU（TTL）・
+S.BUS（反転 TTL）・腕サーボがどの UART に居るかは**機体のプロファイルの
+`[hardware]` が決める**（namiashi の as-built は namiashi-runner2 の
+`doc/motor_map.md`）。
 
 `/dev/ttyCH9344USB*` の番号は列挙順で決まるので当てにせず、ch9344 の
 `GETUARTINDEX` ioctl で**物理 UART 番号**を引いて対応付ける。
@@ -47,19 +48,10 @@ UART の割り当ては `spec_rev2_0_0_asbuilt.md` §4 のとおり:
 （SBC など）でも兄弟チェックアウトは要らない。SSH 鍵も認証情報も要らない。
 
 ```sh
-git clone --recurse-submodules https://github.com/takarakasai/misa-runner.git
+git clone https://github.com/takarakasai/misa-runner.git
 cd misa-runner
 cargo build --release      # 依存は cargo が GitHub から取ってくる
-cargo test
-```
-
-**`--recurse-submodules` を忘れないこと。** `models/namiashi/` は
-[`namiashi_description`](https://github.com/takarakasai/namiashi_description) の
-submodule で、モデル（`.misa`）と meshes がそこにある。忘れると `models/namiashi/` が
-空のままで `check` が「読み込みに失敗」になる。後から入れるなら:
-
-```sh
-git submodule update --init
+cargo test                 # 同梱の汎用モデル（models/testquad）で回る
 ```
 
 Zenoh（`--viz`）が要らない環境ではこちらのほうが軽い（20 MB / ビルドも速い）:
@@ -144,20 +136,20 @@ misa-run imu  --secs 10        # IMU 受信の確認
 misa-run sbus --secs 10        # プロポ入力と解釈結果の確認
 misa-run legs --secs 10        # 脚バスの状態と実効周期（**指令は送らない**）
 misa-run calib scan            # 応答するモータ id を数える（指令は送らない）
-misa-run run  --robot robots/namiashi.toml
-misa-run run  --robot robots/namiashi.toml --record run.rec   # 毎周期を記録
+misa-run run  --robot robots/testquad.toml
+misa-run run  --robot robots/testquad.toml --record run.rec   # 毎周期を記録
 ```
 
-設定は 1 枚の TOML（`robots/namiashi.toml`）。雛形は
-`misa-run config --out robots/namiashi.toml` で生成できる。
+設定は 1 枚の TOML（`robots/testquad.toml`）。雛形は
+`misa-run config --out robots/testquad.toml` で生成できる。
 
 ### プロポ割り当て
 
 **組み込みの既定（`--config` を付けずに起動したとき）と、同梱の
-`robots/namiashi.toml` は別物。** スイッチ 4 本の並びが違う。実機は後者で
+`robots/testquad.toml` は別物。** スイッチ 4 本の並びが違う。実機は後者で
 動かすので、迷ったら `misa-run check --robot …` の表示を正とすること。
 
-| CH | 組み込み既定 | `robots/namiashi.toml` |
+| CH | 組み込み既定 | `robots/testquad.toml` |
 |---|---|---|
 | 1 | 左右真横（エルロン、反転） | 同左（反転なし） |
 | 2 | 前後（エレベータ） | 同左 |
@@ -182,7 +174,7 @@ misa-run run  --robot robots/namiashi.toml --record run.rec   # 毎周期を記�
 
 | 機体 | 手順書 | 特徴 |
 |---|---|---|
-| namiashi | [`doc/bringup_checklist.md`](doc/bringup_checklist.md) | シリアル直結。校正（可動域・符号・ゼロ点）をこちらで採る |
+| namiashi | **namiashi-runner2 リポジトリ**の `doc/bringup_checklist.md` | シリアル直結。校正（可動域・符号・ゼロ点）は `misa-run calib` で採り、結果はあちらの `robots/testquad.toml` に書く |
 | namiashi2 | **namiashi2-runner リポジトリ**の `doc/` | STM ブリッジ越し。手順も profile も実行ファイル（`namiashi2-run`）もあちらにある |
 
 ## 校正（実機に通電したら最初にやること）
@@ -196,15 +188,15 @@ misa-run run  --robot robots/namiashi.toml --record run.rec   # 毎周期を記�
 misa-run calib scan --max-id 8
 
 # 2) 可動域を実測（脱力させ、手で端から端まで動かす）
-misa-run calib range --leg FL --joint thigh --write robots/namiashi.toml
+misa-run calib range --leg FL --joint thigh --write robots/testquad.toml
 
 # 3) 符号を確定（1 軸だけ 5° 動かし、モデルの + 方向か答える）
-misa-run calib move  --leg FL --joint thigh --write robots/namiashi.toml
+misa-run calib move  --leg FL --joint thigh --write robots/testquad.toml
 
 #    2) と 3) を 12 軸ぶん繰り返す
 
 # 4) ゼロ点（指定した姿勢で保持してからゼロ出し、その姿勢角を記録）
-misa-run calib zero --pose constrain --write robots/namiashi.toml
+misa-run calib zero --pose constrain --write robots/testquad.toml
 ```
 
 安全のための約束:
@@ -229,7 +221,7 @@ misa-run calib zero --pose constrain --write robots/namiashi.toml
 export MUJOCO_DYNAMIC_LINK_DIR=$HOME/.mujoco/mujoco-3.8.0/lib
 export LD_LIBRARY_PATH=$MUJOCO_DYNAMIC_LINK_DIR
 cargo run --release --features sim -- \
-    sim --robot robots/namiashi.toml --gait trot --vx 0.15 --secs 8
+    sim --robot robots/testquad.toml --gait trot --vx 0.15 --secs 8
 ```
 
 ### キーボードで操縦しながら歩容パラメータを詰める
@@ -292,12 +284,12 @@ misa-run dump --robot robots/keel.toml --gait trot --swing 0.10
 
 ```sh
 # 1) MuJoCo 側（プロポで操縦 + articara へ配信）
-cargo run --release --features sim -- sim --robot robots/namiashi.toml \
+cargo run --release --features sim -- sim --robot robots/testquad.toml \
     --pilot sbus --secs 0 --viz --viz-endpoint tcp/127.0.0.1:7447
 
 # 2) 別端末で articara（Live gait feed で購読）
 cd ../articara && cargo run --release --features viz -- \
-    --model ../namiashi_description/namiashi.misa
+    --model ../misa-runner/models/testquad/testquad.misa
 ```
 
 **`--viz` か `--pilot sbus` を付けると自動で実時間になる。** 付けないと
@@ -444,7 +436,7 @@ namiashi は 1.1 前後。
 **胴体を傾けて撮る**と分かる（`gait.body_attitude_max_rad > 0` が要る）。
 
 ```sh
-cargo run --release --features render -- sim --robot robots/namiashi.toml \
+cargo run --release --features render -- sim --robot robots/testquad.toml \
     --gait trot --vx 0.08 --tilt-pitch 0.35 --chicken --secs 9 \
     --cam-az 90 --cam-dist 1.1 --video /tmp/ch_on
 ```
@@ -460,7 +452,7 @@ namiashi は腕が受信機直結でアプリから駆動できないため。
 **制御周期は待たされない**（取りこぼした数は終了時に出る）。
 
 ```sh
-misa-run run  --robot robots/namiashi.toml --record before.rec
+misa-run run  --robot robots/testquad.toml --record before.rec
 misa-run replay before.rec                 # 要約（周期数・丸めが入った周期）
 misa-run replay before.rec after.rec       # 指令を差分する
 ```
@@ -473,7 +465,7 @@ misa-run replay before.rec after.rec       # 指令を差分する
 回帰試験は実機を触らずに回る:
 
 ```sh
-misa-run dump --robot robots/namiashi.toml --gait trot --vx 0.1 --secs 10 --record a.rec
+misa-run dump --robot robots/testquad.toml --gait trot --vx 0.1 --secs 10 --record a.rec
 ```
 
 記録は 200 Hz × 13 軸で約 190 KB/s（3 秒で 557 KB）。診断のために録るもので、
@@ -601,7 +593,7 @@ misa-run dump --gait trot --vx 0.1 --secs 60 --viz --viz-endpoint tcp/127.0.0.1:
 
 # 2) 受信側（別端末）
 cd ../articara && cargo run --release --features viz -- \
-    --model ../namiashi_description/namiashi.misa
+    --model ../misa-runner/models/testquad/testquad.misa
 #   → Live gait feed パネルで endpoint に tcp/127.0.0.1:7447 を入れて Start
 ```
 
@@ -685,8 +677,8 @@ CHAMP の crawl は重心を支持三角形へ寄せないので、1 本上げ�
 して出す**。解くのは 1 回で、出し方だけが変わる。
 
 ```sh
-misa-run sim --robot robots/namiashi.toml --wbc-output torque   --gait crawl --vx 0.05
-misa-run run --robot robots/namiashi.toml --wbc-output position
+misa-run sim --robot robots/testquad.toml --wbc-output torque   --gait crawl --vx 0.05
+misa-run run --robot robots/testquad.toml --wbc-output position
 ```
 
 設定に書くのが正規の入口。`--wbc` / `--wbc-output` は掃引と切り分け用で、
@@ -762,20 +754,15 @@ torque_scale  = 1.6667 # 瞬間は連続定格の 1.67 倍まで（軸ごとの�
 max_torque_nm = 0.0    # 絶対値の頭打ち。0 で無効
 ```
 
-**実機の値は 1.667。** LKMTech MG4005E-i10 の 24 V での瞬時最大トルクは
-2.5 N·m（減速機出力。連続定格 1.5 N·m）。calf は外側にさらに 1.556 の減速が
-あり、瞬時 3.89 N·m のところを 2.205 × 1.667 = 3.68 N·m で使う（少し控えめ）。
-同梱の `robots/namiashi.toml` に書いてある。**2.5 N·m は 24 V での値** —
-バッテリは 19.8 V と 25.6 V の 2 種で、25.6 V ならそのまま、**19.8 V は電圧比で
-1.6667 × 19.8 / 24 = 1.375**（まずはこれで。飽和 — `MISA_WBC_DEBUG` の「飽和」
-行 — を見ながら実測で詰める）。電流はベンチ電源の 5 A 制限がテスト用（電源
-自体は 30 A、本番バッテリは 25 A）なので、5 A で試すときだけ `max_torque_nm`
-で頭打ちにする。
+**係数は機体ごとに決める**（モータの瞬時最大トルク / 連続定格。電圧が違えば
+電圧比で下げる）。機体のプロファイルに書く — namiashi の値（MG4005E-i10 で
+1.667、19.8 V バッテリなら 1.375）と根拠は namiashi-runner2 の
+`robots/testquad.toml` と README。
 
 `sim` では**アクチュエータ側の上限も同じ係数で上がる**（揃えないと QP が
-出ないトルクを当てにする）。**2.4 kg のモデルは連続定格のままで trot 0.80 が
-歩けるが、実機の質量 3.3 kg のモデルは連続定格では歩けず、1.667 で歩く**
-（下の表）。
+出ないトルクを当てにする）。**トルクの余裕は歩けるかどうかを最初に決める量**で、
+質量が 4 割違うモデルでは連続定格では歩けず瞬時値で歩く、という結果になる
+（namiashi-runner2 の README「WBC / MPC の評価」）。
 
 ### 実機のトルク制御にはトルク定数が要る
 
@@ -783,8 +770,8 @@ max_torque_nm = 0.0    # 絶対値の頭打ち。0 で無効
 `set_torque` に渡した数が**そのまま電流 (A) として線に乗る**
 （`MotorConfig::current_units` が `Kt = 1/減速比` を選ぶため）。WBC が出すのは
 N·m なので、そのまま流すと 12 軸ぶんの N·m が A に読み替えられる。定格
-1.5 N·m なら 1 軸 1.5 A、12 軸で 18 A — 電源の電流制限 5 A
-（[`doc/motor_map.md`](doc/motor_map.md)）を大きく超えてレールが崩壊する。
+1.5 N·m なら 1 軸 1.5 A、12 軸で 18 A — ベンチ電源の電流制限を大きく超えて
+レールが崩壊する。
 
 そのため**トルク定数が無い構成では `SerialPlant` が `Torque` を名乗らず**、
 `run` は起動時に止まる（`check` も知らせる）。`sim` のトルクは MuJoCo へ行く
@@ -801,112 +788,46 @@ N·m なので、そのまま流すと 12 軸ぶんの N·m が A に読み替�
 **それ以前の sim の数字（この日の午前に書いた表を含む）はこの歪みを含む**ので、
 以下はすべて直した後の再測。
 
-### どこまで動くか（複数モデル）
+### 評価の仕方と、機体に依らずに言えること
 
-**歩容の詰め方でまるで変わる。進む量だけを見て WBC の良し悪しを判断しない
-こと。** 歩容が出せる速度は `歩幅 / (周期 × 接地比)` で頭打ちになり、
-ライブラリの既定では crawl が 0.042 m/s しか出ない（→
-[歩幅が速度の上限を決める](#歩幅が速度の上限を決める)）。
+数字は機体側のリポジトリに置く（namiashi は namiashi-runner2 の README
+「WBC / MPC の評価」— 質量 2.4 / 3.3 kg の 3 モデル × 5 走行 × 8 構成）。
+ここには**測り方**と、**モデルを替えても変わらなかった結論**だけを書く。
 
-articara が詰めた歩容の値（`step_length_m = 0.145`、周期 trot 0.320 /
-walk 0.500 / crawl 0.800、`swing_height_m = 0.04`、`mpc_capture_point_gain_s
-= 0`）、MPC 歩容、5 走行（trot 0.78 / 0.80 / 0.82、walk 0.33、crawl 0.17、
-各 16 s）を **3 つのモデル**で回した。転倒はどれも無し。
+測り方: MuJoCo で trot 0.78 / 0.80 / 0.82、walk 0.33、crawl 0.17 m/s を各 16 s。
+追従率 = 進んだ距離 / (12.5 s × 指令)。横ずれ・ヨー・転倒と、`sim` が出す
+「歩容中の前後距離 真値 / 推定器の積分」「計画と接地のずれ」「接地中の足の
+滑り（進行方向の成分）」を並べる。**進む量だけを見て良し悪しを判断しない**
+（歩幅の天井、下）。接地モデルの硬さ（`--impratio 10 --cone elliptic`）と
+質量配分（脚に比例 / hip に集中）を変えて、結論がそれに依らないかを見る。
 
-| モデル | 質量 | 脚の質量 | `torque_scale` | 位置出力 | **トルク出力** |
-|---|---|---|---|---|---|
-| 同梱 `namiashi.misa` | 2.4 kg | 36 % | 1.0（連続定格） | 1.03 / 0.99 m / 2.8° | **0.99** / 1.76 m / 2.0° |
-| `namiashi_3p3_prop`（実機の質量、脚に比例配分） | 3.3 kg | 73 % | **1.667**（MG4005 の瞬時） | 1.03 / 0.77 m / 4.2° | **1.02** / 0.31 m / 1.0° |
-| `namiashi_3p3_hip`（実機の質量、hip に集中） | 3.3 kg | 73 % | **1.667** | 1.02 / 0.12 m / 1.2° | **1.06** / 0.32 m / 1.5° |
-| `namiashi_3p3_prop` | 3.3 kg | 73 % | **1.375**（19.8 V バッテリ） | 1.03 / 0.81 m / 4.2° | **1.01** / 0.58 m / 2.5° |
-| `namiashi_3p3_prop` | 3.3 kg | 73 % | 2.0（参考） | 0.98 / 0.98 m / 4.3° | 1.02 / 0.32 m / 1.2° |
-| `namiashi_3p3_hip` | 3.3 kg | 73 % | 2.0（参考） | 1.02 / 0.06 m / 1.2° | 1.06 / 0.19 m / 0.2° |
+機体に依らずに言えること:
 
-セルは「平均追従率（進んだ距離 / (12.5 s × 指令)）/ trot 3 本の横ずれの平均
-/ trot のヨーの平均」。3.3 kg のモデル（`articara/tests/fixtures/namiashi/`）
-は **連続定格のままでは trot 0.80 が歩けない**（位置出力で −2.4 m・ヨー
-227°、トルク出力は 0.40 m/s でも 603° 回る。周期の 78〜97 % でトルクが
-上限に当たる）。**MG4005 の瞬時 2.5 N·m（= 1.667 倍）で歩ける**ので、実機の
-モータの余裕は trot 0.80 に足りている。19.8 V バッテリの電圧比 1.375 でも
-歩く（トルク 1.01、横ずれは 0.31 → 0.58 m と増える）。walk 0.33 は 3.3 kg でも定格内で歩く
-（+4.78 m、飽和 10 %）。摩擦を硬くした床（`--impratio 10 --cone elliptic`）
-でも 3.3 kg × 1.667 は trot 0.80 を位置出力 99 %・トルク出力（#3 + E 込み）
-90 % で歩く — 2.4 kg × 連続定格が歩けなかった条件。
+- **トルク出力は歩く。** 歩けなかった原因は hybrid PD の `joint_kd`（200 Hz の
+  ホスト側では 0.3 まで。1.0 で崩れる）と sim の時間軸で、制御則ではなかった。
+- **トルクの余裕が支配的。** 質量に対して連続定格が足りないと、位置出力でも
+  歩けない。係数（`torque_scale`）は機体の瞬時トルクから決める。
+- **速度の追従は閉ループで決まる。** MPC は推定速度と指令の差を埋めるので、
+  推定に偽の不足があればそのぶん速く走る。閉ループを切る
+  （`mpc_observe_velocity = false`）と横ずれ・ヨーが崩れるので、閉じたまま
+  推定の質を上げる。
+- **脚オドメトリの誤差は 2 つ。** 計画の立脚なのに浮いている足（着地・離地の
+  周期。`estimator_use_measured_contact` で消える）と、接地中の足が進行方向へ
+  流れること（運動学からも IMU からも見えない）。
+- **接地のずれを縫う**（`use_measured_contact`、`estimator_use_measured_contact`）
+  のは質量配分を変えても効く。実機で使うには接地の観測が要る — 足裏センサか、
+  実測トルクからの接地力推定（`f = −J⁻ᵀ τ`）。
+- **柔らかい接地は着地の衝撃を足の滑りとして逃がしている。** 摩擦を硬くすると
+  滑りは消え、代わりに飽和が増えて速い歩容から崩れる。実機の床が硬いなら
+  こちらの世界に近い。
+- 選べる形で入れたもの（`mpc_observe_pose` 既定 true、`estimator = "kalman"`、
+  `use_measured_contact`、`swing_accel_integral_k`、`mpc_observe_velocity`）の
+  採用可否は機体側の表で判断する。見送ったもの: 着地時の足の鉛直速度
+  （`centroidal` の parity 経路だけが見る）、接地力の変調（HoQP では接地力が
+  一意に決まる）、重み付き単一 QP（ライブラリに無い）。
 
-### 取り込んだ改善と採用可否（複数モデル）
-
-legged_control と文献（Sleiman 2021、Grandia 2022、Bellicoso 2016）から
-1 つずつ入れ、上と同じ 3 モデル × 5 走行で測った。基準は `joint_kd = 0.3`・
-MPC・トルク出力（上の表の「トルク出力」の列）。セルは「平均追従率 /
-|追従率 − 1| / trot 横ずれ m / trot ヨー °」。
-
-| # | 項目 | 設定 | 2.4 kg | 3.3 kg prop | 3.3 kg hip | 採用 |
-|---|---|---|---|---|---|---|
-| — | 基準（トルク、kd 0.3） | | 0.99 / 0.03 / 1.76 / 2.0 | 1.02 / 0.03 / 0.32 / 1.2 | 1.06 / 0.06 / 0.19 / 0.2 | |
-| — | 位置出力（参考） | `output = "position"` | 1.03 / 0.03 / 0.99 / 2.8 | 0.98 / 0.03 / 0.98 / 4.3 | 1.02 / 0.02 / 0.06 / 1.2 | |
-| 0 | hybrid PD の kd | `[wbc] joint_kd = 0`（比較） | 1.10 / 0.10 / 0.90 / 2.8 | 1.09 / 0.09 / 0.33 / 1.0 | 1.08 / 0.08 / 0.57 / 1.6 | **既定 0.3**。0 は 3 モデルとも 8〜10 % 速すぎ、1.0 は崩れる（trot 0.80 で +2.3 m・ヨー −33°）|
-| 1 | MPC に高さ・姿勢の観測 | `[gait] mpc_observe_pose = false`（比較） | 0.97 / 0.06 / 2.37 / 9.7 | 1.00 / 0.02 / 0.37 / 1.5 | 1.03 / 0.03 / 0.38 / 1.8 | **既定 true**。2.4 kg では切ると横ずれ・ヨーが悪化。3.3 kg は同等 |
-| 2 | 18 状態 LKF | `[gait] estimator = "kalman"` | 1.04 / 0.04 / 1.21 / 10.8 | 1.04 / 0.04 / **0.08** / 1.5 | 1.08 / 0.08 / 0.12 / 0.4 | **選択可**（既定 leg_odometry）。3.3 kg では横ずれ最小、2.4 kg ではヨーが増える。MuJoCo の加速度計は胴体速度の差分 |
-| 3 | 実測の接地（5 N）を WBC の立脚に | `[wbc] use_measured_contact = true` | 1.03 / 0.03 / **0.59** / **1.2** | 1.03 / 0.03 / 0.28 / 0.7 | 1.04 / 0.04 / 0.35 / 1.8 | **選択可・推奨**（既定 false）。3 モデルとも横ずれが減る唯一の項目。実機は接地を測れないので効かない（`None` → 計画） |
-| A | 遊脚の加速度誤差積分（Grandia） | `[wbc] swing_accel_integral_k = 0.3`, `_sat_nm = 0.15` | 0.98 / **0.02** / 0.74 / **0.7** | 1.00 / **0.01** / 0.22 / **0.4** | 1.00 / **0.01** / 0.65 / 9.2 | **選択可**（既定 0）。速度の追従は 3 モデルとも最良、hip 集中モデルではヨーが出る |
-| V | MPC の速度を開ループに | `[gait] mpc_observe_velocity = false` | 0.95 / 0.05 / 1.26 / 1.5 | 0.93 / 0.07 / 1.07 / 10.4 | 0.97 / 0.03 / 0.86 / 7.4 | **不採用**（選択は残す）。速度の閉ループを切ると横ずれ・ヨーが悪化する — MPC の v_y / ω_z のフィードバックがまっすぐ歩かせている |
-| E | 推定器の立脚に実測の接地 | `[gait] estimator_use_measured_contact = true` | 推定速度が真値の 74 % → 86 %（位置出力、trot 0.80） | | | **選択可・推奨**。浮いている足を「止まっている」と信じる誤差を消す。残りは足の前滑り |
-| 7 | 着地時の足の鉛直速度 | — | | | | 見送り。quadruped-gait では `centroidal` の parity 経路だけが見る |
-| C | 接地力の変調（Bellicoso） | — | | | | 見送り。接地力タスクは 4 脚接地で解を動かせず、2 脚接地では力が一意 |
-| D | 重み付き単一 QP（Grandia） | — | | | | 見送り。ライブラリに無い。HoQP で足りている |
-
-### 指令通りに動くために分かったこと
-
-`sim` が出す **「歩容中の前後距離 真値 / 推定器の積分」** と **「計画と接地の
-ずれ」**、**「接地中の足の滑り（進行方向の成分）」** がこの節の根拠。
-
-1. **速度の追従は閉ループで決まっている。** MPC は推定した速度と指令の差を
-   埋めるので、推定が偽の不足を出せばそのぶん速く走る（sim の時間軸が
-   歪んでいたとき +18 %）。速度の閉ループを切る（V）と横ずれ・ヨーが崩れる
-   ので、**閉じたまま推定の質を上げる**のが筋。
-2. **脚オドメトリの誤差は 2 つ。** (a) 計画の立脚なのに浮いている足（着地・
-   離地で各足 3〜12 % の周期）— E で消える。(b) **接地中の足が進行方向へ
-   流れる**（trot 0.80 で前足 +0.2 m/s、後足 +0.1 m/s）— 運動学からは見えず、
-   IMU でも定常の速度差は観測できない。摩擦を硬くすると（`--impratio 10
-   --cone elliptic`）流れは消えるが、代わりに着地の衝撃をそのまま受けて
-   トルクが飽和し、trot 0.80 は 2.4 kg でも歩けなくなる（0.19 m/s。0.50 なら
-   95 % で歩く。`torque_scale = 2` で 0.66 m/s）。**足の滑りは「摩擦の柔らかさ
-   に頼って着地の衝撃を逃がしている」ことの裏返し**で、実機の床が硬いなら
-   こちらの世界に近い。
-3. **トルクの余裕が支配的。** 3.3 kg は連続定格では歩けず、MG4005 の瞬時
-   2.5 N·m（1.667 倍）で歩く。2.4 kg × 連続定格でも trot 0.80 で周期の
-   35〜40 % は上限に当たっている。実機のトルク上限は `torque_scale = 1.6667`
-   として `robots/namiashi.toml` に入れた。
-4. **接地のずれを縫う（#3, E）のは 3 モデルで一貫して効く。** 実機で使うには
-   足裏の接地を測る手段が要る — センサを付けるか、**実測トルクから
-   `f = −J⁻ᵀ τ` で接地力を推定する**（legged_control は推定接地力 > 40 N で
-   接地と見なす。この機体は 5 N 程度）。トルク（電流）は今のドライバから
-   読めるので、次に足すべきはこれ。
-
-歩容を**既定値のまま**（歩幅 0.06/0.08/0.10 m）0.05 m/s で走らせると:
-
-| 歩容 | コントローラ | WBC 無効 | 位置 | 速度 | トルク |
-|---|---|---|---|---|---|
-| crawl | champ（既定） | +0.388 m | +0.436 m | +0.029 m | +0.221 m |
-| crawl | **mpc** | +0.403 m | **+0.476 m** | −0.874 m | 9.5 s で転倒 |
-| trot | champ（既定） | +0.496 m | +0.590 m | +0.108 m | 4.5 s で転倒 |
-| trot | **mpc** | +0.154 m | **+0.659 m** | +0.603 m | 4.0 s で転倒 |
-
-- **位置出力は素の歩容より良い。** 詰めた設定で +0.2〜9 %、既定で +12〜19 %。
-- **MPC は位置出力をさらに少し良くする。** 詰めた設定では差が小さいが、
-  既定の crawl ではヨーのずれが 19.4° → 8.9° と目に見えて減る。
-- **MPC 単体（WBC 無効）は trot を悪くする**（既定設定で +0.496 → +0.154 m）。
-  接地点の捕捉点フィードバックが、追従の悪い相手に対して正帰還になる。
-  `gait.mpc_capture_point_gain_s = 0` で消える（articara も 0 に落として
-  いる）。
-- **この表のトルク列は `joint_kd = 3` のもので無効**（上の「`joint_kd` に
-  legged_control の 3 をそのまま使ってはいけない」）。詰めた設定での再測は
-  上の表。
-- **ゲインはすべて 2.4 kg のモデルで詰めたもの。** 実機は 3.3 kg で脚に
-  73 %（補正モデルは `articara/tests/fixtures/namiashi/`）。実機へ持って
-  いく前に採り直すこと。
-- **速度出力は詰め切れていない。** シムのアクチュエータのゲイン
-  （`--kv-velocity`、既定 20）に強く依る。位置を先に見ること。
+歩容を**既定値のまま**（歩幅 0.06/0.08/0.10 m）0.05 m/s で走らせたときの
+古い表と、位置出力・MPC の比較も機体側へ移した。
 
 ### 歩幅が速度の上限を決める
 
@@ -918,12 +839,11 @@ MPC・トルク出力（上の表の「トルク出力」の列）。セルは�
 | walk | 0.08 | 0.600 | 0.75 | 0.178 m/s |
 | trot | 0.10 | 0.400 | 0.50 | 0.500 m/s |
 
-**同梱の `robots/namiashi.toml` は `max_vx_m_s = 0.15` を宣言しているが、
-crawl では 0.042 m/s しか出ない。** 追従率だけが落ちる。歩幅を上げれば直る
-（`[gait] step_length_m`。articara は 3 歩容とも 0.145 m ＝ 脚長 0.306 m の
-47 % に置いている）。**上げると遊脚が擦る**ので `swing_height_m` も一緒に
-上げること。同梱プロファイルはまだ既定のままにしてある — 実機の可動域と
-一緒に決める話なので。
+**プロファイルが `max_vx_m_s = 0.15` を宣言していても、crawl では 0.042 m/s
+しか出ない。** 追従率だけが落ちる。歩幅を上げれば直る（`[gait] step_length_m`。
+articara は namiashi の 3 歩容とも 0.145 m ＝ 脚長の 47 % に置いている）。
+**上げると遊脚が擦る**ので `swing_height_m` も一緒に上げること。歩幅は実機の
+可動域と一緒に決める話なので、機体のプロファイルで書く。
 
 ### 歩容コントローラ（MPC）
 
@@ -936,7 +856,7 @@ controller = "mpc"    # auto | champ | linear_crawl | mpc | centroidal
 ```
 
 ```sh
-misa-run sim --robot robots/namiashi.toml --gait-controller mpc --wbc-output position
+misa-run sim --robot robots/testquad.toml --gait-controller mpc --wbc-output position
 ```
 
 | | 接地力の予測 | 観測 | |
@@ -1049,45 +969,34 @@ submodule 無しで `cargo test` が通る**。`robots/testquad.toml` はそれ�
 （articara の詰め値 + MPC で trot 0.80 を位置出力 90 %、トルク出力 58 % — WBC の
 ゲインは namiashi で詰めたものなので、この機体では詰め直していない）。
 
-実機の設定・モデル・立ち上げ手順は機体側のリポジトリに置く（keel は
-keel-runner、namiashi は namiashi-runner2）。このリポジトリに残っている
-`robots/namiashi.toml` / `models/namiashi`（submodule）/ `doc/` の SBC 手順は
-過渡期のもので、`tests/model_consistency.rs` だけがまだ submodule を見ている。
+実機の設定・モデル・立ち上げ手順・評価結果は機体側のリポジトリに置く（keel は
+keel-runner、namiashi は namiashi-runner2）。namiashi のもの（`robots/testquad.toml`、
+`models/namiashi` の submodule、SBC の運用手順、`.misa` と URDF の整合試験）は
+2026-09-06 に namiashi-runner2 へ移した。
 
 ## 未確定・既知の制限
 
-- **初期姿勢（250×350×700 mm の直方体に収める姿勢）は未確定。**
-  `control.start_pose` が指す `.misa` のポーズ名で決まる。暫定で
-  モデルに入っている `constrain`（thigh 1.0 / calf −2.0）を指している。
-- **腕は受信機直結で、アプリからは駆動しない**（`[hardware.arm].protocol =
-  "receiver_direct"`）。したがって**チキンヘッドと挨拶の腕動作は現状無効**。
-  `teleop.arm` のチャンネル（既定 CH9）から角度を**観測**して、ログ・可視化・
-  モデル状態には実際の角度を入れている。サーボの品種が決まったら
-  `ArmProtocol` に variant を足し、`misa_hal::arm::ArmServo` の実装を
-  差し込めば `is_app_driven() = true` になり、両方が自動的に有効になる。
+機体固有のもの（初期姿勢、腕サーボの駆動、プロファイルの歩幅）は機体側の
+リポジトリの README に書く。ここに残るのは機体に依らないもの。
+
 - **無応答モータ 1 台あたり約 20 ms 待つ。** `lkmotor_driver::Rs485Driver` が
   シリアルの read タイムアウトを固定 20 ms で開き、締切判定を read の後に
   行うため、`response_timeout_ms` を 5 と書いても効かない。実測で 3 台無応答の
   バスは 16 Hz まで落ちる。生きているモータしかいなければ影響しないが、
   1 台落ちたときの縮退性能はこれで決まる。直すなら misa-actuator 側。
-- **同梱プロファイルの歩幅はライブラリ既定のまま。** `max_vx_m_s = 0.15` を
-  宣言しているが crawl は 0.042 m/s しか出ない（`歩幅 / (周期 × 接地比)`）。
-  歩幅を上げれば直るが、遊脚の擦りと可動域は実機で確かめてから決めること。
-  詳しくは [歩幅が速度の上限を決める](#歩幅が速度の上限を決める)。
-- **WBC のトルク出力（位置ループを外す形）は歩けない。** 詰めた歩容でも
-  指令の 2〜13 % しか進まない。**WBC が出すのは加速度で、位置の誤差を戻す
-  積分器がどこにも無い**のが理由で、articara も同じ結論で hybrid（＝この
-  crate の位置出力）へ移している。実用は `output = "position"`。
 - **WBC の速度出力は詰め切れていない。** シムのアクチュエータのゲイン
   （`--kv-velocity`）に強く依り、MPC 歩容と組むと後ろへ走る。
-- **MPC 歩容は位置出力と組むこと。** WBC 無効のまま MPC を選ぶと、接地点の
-  捕捉点フィードバックが追従の悪い相手に対して正帰還になり、trot が
-  +0.496 → +0.154 m に落ちる（`gait.mpc_capture_point_gain_s = 0` で消える）。
+- **MPC 歩容は WBC と組むこと。** WBC 無効のまま MPC を選ぶと、接地点の
+  捕捉点フィードバックが追従の悪い相手に対して正帰還になる
+  （`gait.mpc_capture_point_gain_s = 0` で消える）。
 - **WBC のトルク・速度出力は実機で回したことがない。** HAL からモータの
-  コマンド（`0xA1` / `0xA2`）まで配線して MuJoCo で確かめてあるが、
-  namiashi の実機に流したことはまだない。LKMTech の MIT は
-  ホスト側エミュレーション（`measure` + `set_torque` の 2 往復）なので、
-  通信レートが半分になる点にも注意。
+  コマンド（`0xA1` / `0xA2`）まで配線して MuJoCo で確かめてあるだけ。
+  LKMTech の MIT はホスト側エミュレーション（`measure` + `set_torque` の
+  2 往復）なので、通信レートが半分になる点にも注意。
+- **腕サーボは `[hardware.arm].protocol = "receiver_direct"` だと観測のみ。**
+  チキンヘッドと挨拶の腕動作はサーボをアプリから駆動できる構成でだけ有効。
+  品種が決まったら `ArmProtocol` に variant を足し、`misa_hal::arm::ArmServo`
+  の実装を差し込めば `is_app_driven() = true` になる。
 
 ## 構成
 

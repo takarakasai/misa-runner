@@ -2,8 +2,12 @@
 
 2026-08-17〜19 に PC 環境で作った内容の引き継ぎ。**コードが語れないこと**
 （なぜそうしたか、何が確かめてあって何が未確認か、次に何をするか）をここに置く。
-使い方そのものは [`README.md`](../README.md)、配線表は
-[`doc/motor_map.md`](motor_map.md)。
+使い方そのものは [`README.md`](../README.md)。**namiashi 固有のもの**（配線表
+`motor_map.md`、立ち上げチェックリスト、SBC の運用手順、`robots/namiashi.toml`、
+モデルの submodule、WBC / MPC の評価結果）は 2026-09-06 に
+[namiashi-runner2](https://github.com/takarakasai/namiashi-runner2) へ移した。
+§5 の SBC 手順はその時点までの記録で、clone するのは今は namiashi-runner2
+（misa-runner は cargo が取る）。
 
 ---
 
@@ -172,9 +176,9 @@ PC に ROS 2 で繋ぐ構成で前提が違うので、そちらは
 ### 5.2 移行手順
 
 ```sh
-# SBC 側。これだけ。--recurse-submodules を忘れると models/namiashi/ が空になる。
-git clone --recurse-submodules https://github.com/takarakasai/misa-runner.git
-cd misa-runner
+# SBC 側（2026-09-06 以降）。モデルは namiashi-runner2 の submodule。
+git clone --recurse-submodules https://github.com/takarakasai/namiashi-runner2.git
+cd namiashi-runner2
 cargo build --release --no-default-features     # viz 不要なら軽いほう
 
 # 実機に触れない順に確認
@@ -226,7 +230,7 @@ git 依存に切り替えた副作用として、**ローカルの兄弟チェ�
 問題になるなら起動側で:
 
 ```sh
-sudo chrt -f 50 ./misa-run run --robot robots/namiashi.toml
+sudo chrt -f 50 ./namiashi-run run --robot robots/namiashi.toml
 # CPU ガバナも performance に
 ```
 
