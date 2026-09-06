@@ -10,6 +10,16 @@
 //! してあり、止めるのはスペース。プロポのスティックのように「離したら中立」
 //! にはならないので、**目を離すなら先に止めること。**
 //!
+//! # 実機でも使える（`run --pilot keys`）— ただしデッドマン付き
+//!
+//! 「離しても止まらない」は実機では危ないので、`run` では **一定時間キーが
+//! 来なければ速度を 0 に落とす**（既定 0.5 s。`cmd_vel` の 300 ms タイムアウト
+//! と同じ考え方）。歩き続けるには方向キーを**押し続ける**（端末のオート
+//! リピートがキーを送り続ける）。押し続けているあいだのリピートは「1 段足す」
+//! ではなく**生存確認**として扱う（`REPEAT_WINDOW` より短い間隔の同じキー）ので、
+//! 押し続けても速度は上がらない。タップすれば 1 段足す。sim も同じ扱い
+//! （デッドマンだけが無い）。
+//!
 //! # 端末の設定を必ず戻す
 //!
 //! raw モードにしたまま落ちると、そのシェルはエコーも改行も効かなくなる
@@ -19,7 +29,7 @@
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use misa_core::{GaitControllerRequest, GaitSelect, GaitTune, Intent, ModeRequest, Pilot, Time, Velocity, WbcRequest};
 
@@ -399,26 +409,90 @@ impl Drop for RawMode {
     }
 }
 
+/// 同じ方向キーがこれより短い間隔で来たらオートリピート（押し続け）と見なす。
+/// 端末のリピートは 30 ms 前後、人が叩き直すのは 150 ms より遅い。
+const REPEAT_WINDOW: Duration = Duration::from_millis(120);
+
 /// 共有される操縦の意図。
 struct Shared {
     intent: Intent,
     quit: bool,
     last_key: Option<Instant>,
+    /// 直前の方向キーとその時刻。押し続け（リピート）の判定に使う。
+    last_dir_key: Option<(Key, Instant)>,
+    /// デッドマンで速度を落としたことを 1 度だけ言うためのフラグ。
+    deadman_tripped: bool,
+}
+
+/// 1 キーを共有状態へ反映する。**読み取りスレッドからも試験からも呼ぶ**ので
+/// 純粋に書いてある。
+fn on_key(l: &mut Shared, key: Key, now: Instant, limits: &Limits) {
+    l.last_key = Some(now);
+    l.deadman_tripped = false;
+    let is_dir = matches!(
+        key,
+        Key::Forward | Key::Back | Key::Left | Key::Right | Key::TurnLeft | Key::TurnRight
+    );
+    if is_dir {
+        let repeat = matches!(l.last_dir_key, Some((k, t)) if k == key && now.duration_since(t) < REPEAT_WINDOW);
+        l.last_dir_key = Some((key, now));
+        if repeat {
+            // 押し続け: 生存確認だけ。1 段足すのはタップのとき。
+            return;
+        }
+    }
+    match key {
+        Key::Quit => l.quit = true,
+        Key::Help => {
+            let g = l.intent.gait;
+            print!("\r{}", help(limits, g))
+        }
+        other => apply(&mut l.intent, other, limits),
+    }
+}
+
+/// デッドマン: `deadman` のあいだキーが来なければ速度を 0 に落とす。
+/// 落としたら true（呼び出し側が 1 度だけログを出す）。
+fn deadman_check(l: &mut Shared, now: Instant, deadman: Duration) -> bool {
+    let Some(last) = l.last_key else { return false };
+    if now.duration_since(last) < deadman || l.intent.velocity == Velocity::ZERO {
+        return false;
+    }
+    l.intent.velocity = Velocity::ZERO;
+    if l.deadman_tripped {
+        return false;
+    }
+    l.deadman_tripped = true;
+    true
 }
 
 pub struct KeyPilot {
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
     limits: Limits,
+    /// キーがこれだけ来なければ速度を 0 に落とす。`None` で落とさない（sim）。
+    deadman: Option<Duration>,
     /// **持っているあいだだけ raw モード。** 落ちても `Drop` で戻る。
     _raw: RawMode,
 }
 
 impl KeyPilot {
+    /// sim 用。デッドマン無し。
     pub fn open(cfg: &AppConfig, gait: GaitSelect) -> Result<Self, String> {
+        Self::open_with(cfg, gait, None)
+    }
+
+    /// `deadman` を付けて開く。**実機（`run --pilot keys`）はこちら。**
+    pub fn open_with(cfg: &AppConfig, gait: GaitSelect, deadman: Option<Duration>) -> Result<Self, String> {
         let limits = Limits::from(cfg);
         let raw = RawMode::enter()?;
         print!("{}", help(&limits, gait));
+        if let Some(d) = deadman {
+            print!(
+                "\r　**デッドマン {:.1} s**: キーが来なければ速度 0。歩き続けるには方向キーを押し続ける\n\r\n",
+                d.as_secs_f64()
+            );
+        }
 
         let shared = Arc::new(Mutex::new(Shared {
             intent: Intent {
@@ -434,6 +508,8 @@ impl KeyPilot {
             },
             quit: false,
             last_key: None,
+            last_dir_key: None,
+            deadman_tripped: false,
         }));
         let stop = Arc::new(AtomicBool::new(false));
 
@@ -451,15 +527,7 @@ impl KeyPilot {
                         Ok(1) => {
                             let Some(key) = decode(buf[0]) else { continue };
                             let mut l = s.lock().unwrap_or_else(|e| e.into_inner());
-                            l.last_key = Some(Instant::now());
-                            match key {
-                                Key::Quit => l.quit = true,
-                                Key::Help => {
-                                    let g = l.intent.gait;
-                                    print!("\r{}", help(&limits, g))
-                                }
-                                other => apply(&mut l.intent, other, &limits),
-                            }
+                            on_key(&mut l, key, Instant::now(), &limits);
                         }
                         Ok(_) => {}
                         Err(_) => break,
@@ -472,6 +540,7 @@ impl KeyPilot {
             shared,
             stop,
             limits,
+            deadman,
             _raw: raw,
         })
     }
@@ -492,11 +561,13 @@ impl Pilot for KeyPilot {
     }
 
     fn poll(&mut self, _now: Time) -> Intent {
-        self.shared
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .intent
-            .clone()
+        let mut l = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(d) = self.deadman {
+            if deadman_check(&mut l, Instant::now(), d) {
+                log::warn!("キー入力が {:.1} s 無いので速度を 0 にしました（押し続ければ歩き続けます）", d.as_secs_f64());
+            }
+        }
+        l.intent.clone()
     }
 
     fn status_line(&self) -> String {
@@ -545,6 +616,55 @@ mod tests {
             wbc_initial: WbcRequest::Off,
             controller_initial: GaitControllerRequest::Champ,
         }
+    }
+
+    fn shared() -> Shared {
+        Shared {
+            intent: Intent { gait_tune: lim().base_of(GaitSelect::Crawl), ..Intent::default() },
+            quit: false,
+            last_key: None,
+            last_dir_key: None,
+            deadman_tripped: false,
+        }
+    }
+
+    /// **タップは 1 段、押し続け（リピート）は生存確認。**
+    #[test]
+    fn a_held_key_keeps_the_speed_instead_of_ramping_it() {
+        let l = lim();
+        let mut s = shared();
+        let t0 = Instant::now();
+        on_key(&mut s, Key::Forward, t0, &l);
+        let one_step = s.intent.velocity.vx_m_s;
+        assert!(one_step > 0.0);
+        // 30 ms 間隔のリピートが 10 回来ても速度は変わらない。
+        for i in 1..=10 {
+            on_key(&mut s, Key::Forward, t0 + Duration::from_millis(30 * i), &l);
+        }
+        assert_eq!(s.intent.velocity.vx_m_s, one_step);
+        // 300 ms 空けて叩き直せば 1 段足す。
+        on_key(&mut s, Key::Forward, t0 + Duration::from_millis(700), &l);
+        assert!(s.intent.velocity.vx_m_s > one_step);
+    }
+
+    /// **デッドマンはキーが途切れたら速度だけ 0 にし、モードは触らない。**
+    #[test]
+    fn the_deadman_zeroes_the_velocity_when_keys_stop() {
+        let l = lim();
+        let mut s = shared();
+        let t0 = Instant::now();
+        on_key(&mut s, Key::Mode(ModeRequest::Walk), t0, &l);
+        on_key(&mut s, Key::Forward, t0, &l);
+        let d = Duration::from_millis(500);
+        assert!(!deadman_check(&mut s, t0 + Duration::from_millis(400), d));
+        assert!(s.intent.velocity.vx_m_s > 0.0);
+        assert!(deadman_check(&mut s, t0 + Duration::from_millis(600), d), "1 回目は true（ログ用）");
+        assert_eq!(s.intent.velocity, Velocity::ZERO);
+        assert_eq!(s.intent.mode, ModeRequest::Walk, "モードは変えない");
+        assert!(!deadman_check(&mut s, t0 + Duration::from_millis(700), d), "2 回目は黙る");
+        // 次のタップで復帰する（0 から 1 段）。
+        on_key(&mut s, Key::Forward, t0 + Duration::from_secs(2), &l);
+        assert!(s.intent.velocity.vx_m_s > 0.0);
     }
 
     /// `o` は OFF → 位置 → トルク → OFF と巡回し、`p` は MPC ↔ CHAMP。

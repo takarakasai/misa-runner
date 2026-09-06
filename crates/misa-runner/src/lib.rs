@@ -162,8 +162,18 @@ fn dispatch(cli: &Cli, backends: &[&dyn Backend]) -> Result<(), String> {
         "legs" => diag::legs(&cfg, secs_or_forever(cli, 10.0), &viz_config(cli)),
         "run" => {
             let robot = robot::load_from_config(&cfg)?;
+            let pilot_keys = match cli.str("pilot") {
+                None => false,
+                Some("keys") => true,
+                Some(other) => {
+                    return Err(format!(
+                        "run の --pilot は keys だけです（{other:?}。S.BUS / ROS 2 はプロファイルの kind で決まります）"
+                    ))
+                }
+            };
             let opts = runner::RunOptions {
                 allow_no_sbus: cli.flag("allow-no-sbus"),
+                pilot_keys,
                 skip_zero: cli.flag("skip-zero"),
                 status_interval_s: cli.f64("status").unwrap_or(1.0),
                 viz: viz_config(cli),
@@ -379,6 +389,10 @@ fn print_help() {
   calib  <sub>              符号・ゼロ点・可動域を実機で確定して設定に書き戻す
   run    [--record PATH]    制御ループ（プロポ操縦）
                             --record で毎周期を記録する（別スレッドで書く）
+         [--pilot keys]            **キーボードで操縦する（実機）。** 受信機は待たない。
+                                   デッドマン 0.5 s: キーが来なければ速度 0。歩き続ける
+                                   には方向キーを押し続ける（タップで 1 段、押し続けは
+                                   生存確認）。Esc / Ctrl-C で脱力して抜ける
   sim    [--gait G] [--vx V] MuJoCo で動力学込みに回す（--features sim のビルド）
          [--secs S] [--kp K] [--kv K] [--base-height M] [--record PATH]
          [--kv-velocity K]         **速度制御のゲイン**（既定 20）。位置制御の

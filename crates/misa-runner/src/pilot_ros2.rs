@@ -230,6 +230,10 @@ impl Pilot for Ros2Pilot {
             // 実機で替えて良いかの判断が要る（周期を詰めると要求レートが
             // 上がり、ゲートが歩容を鈍らせる）。いまはシムのキーボード専用。
             gait_tune: misa_core::GaitTune::default(),
+            // WBC / 歩容コントローラの切り替えも ROS からは触れない（サービスを
+            // 足すなら実機で替えて良いかの判断が先）。
+            wbc: None,
+            gait_controller: None,
         }
     }
 }

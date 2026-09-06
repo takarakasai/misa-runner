@@ -354,12 +354,19 @@ pub struct RunOptions {
     /// 書き込みは別スレッドで、詰まったら**捨てて数える**。制御周期は
     /// 待たせない（[`crate::record`]）。
     pub record: Option<String>,
+    /// 操縦をキーボード（端末）にする（`--pilot keys`）。
+    ///
+    /// S.BUS / ROS 2 の操縦の代わりに [`crate::pilot_keys::KeyPilot`] を差す。
+    /// **デッドマン付き**（キーが 0.5 s 来なければ速度 0）。シリアルの機体では
+    /// 受信機を待たない（`allow_no_sbus` を含意する）。
+    pub pilot_keys: bool,
 }
 
 impl Default for RunOptions {
     fn default() -> Self {
         Self {
             allow_no_sbus: false,
+            pilot_keys: false,
             skip_zero: false,
             status_interval_s: 1.0,
             viz: VizConfig::default(),
@@ -486,6 +493,11 @@ pub fn run(
     opts: RunOptions,
     backends: &[&dyn crate::Backend],
 ) -> Result<(), String> {
+    // キーボード操縦なら操縦者は端末に居るので、受信機は待たない。
+    let opts = RunOptions {
+        allow_no_sbus: opts.allow_no_sbus || opts.pilot_keys,
+        ..opts
+    };
     // **繋ぎ方はプロファイルの `kind` が決める。** ここから下は Plant と
     // Pilot のトレイト越しにしか触らないので、実機でもブリッジ越しでも
     // 同じループが回る。
@@ -518,6 +530,18 @@ pub fn run(
                 }
             }
         };
+
+    // **キーボード操縦は繋いだ後で差し替える。** 立ち上げ手順（受信機の確認、
+    // ゼロ点、伏せ姿勢の照合）は機体の Plant / Pilot で済ませ、操縦だけを
+    // 端末に替える。実機なのでデッドマン付き。
+    if opts.pilot_keys {
+        pilot = Box::new(crate::pilot_keys::KeyPilot::open_with(
+            &cfg,
+            misa_core::GaitSelect::Crawl,
+            Some(Duration::from_millis(500)),
+        )?);
+        log::info!("操縦はキーボード（デッドマン 0.5 s）。Esc / Ctrl-C で脱力して抜けます");
+    }
 
     let stop = install_signal_handler();
     let period = Duration::from_secs_f64(1.0 / cfg.control.rate_hz);
@@ -640,7 +664,9 @@ pub fn run(
         .exchange(&misa_core::Command::idle(layout.table.len()), &mut obs)
         .map_err(|e| format!("実機の初回読み出しに失敗: {e}"))?;
 
-    while !stop.load(Ordering::Relaxed) {
+    // **キーボードの Esc / Ctrl-C は `quit_requested` でしか見えない**（raw
+    // モードでは SIGINT が出ない）。抜けた先は SIGINT と同じ脱力の道。
+    while !stop.load(Ordering::Relaxed) && !pilot.quit_requested() {
 
         // **受信が無いときの扱いは 2 通りあり、混ぜてはいけない。**
         // その判断は `SbusPilot` が持つ（受信断は活動度を上げない、
