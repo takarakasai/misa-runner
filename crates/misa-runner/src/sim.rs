@@ -39,7 +39,26 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let vy = cli.f64("vy").unwrap_or(0.0);
     let wz = cli.f64("wz").unwrap_or(0.0);
     // 台本の胴体高さ（立ち高さからの差 [m]）。高さ変更が全歩容で効くかを見る用。
+    // `--height-script "4:-0.04,7:0.03,10:0"` で時刻ごとに替える（歩容中の
+    // 経過秒 : 差）。`--height-offset` は最初から一定。
     let height_offset = cli.f64("height-offset").unwrap_or(0.0);
+    let height_script: Vec<(f64, f64)> = match cli.str("height-script") {
+        None => Vec::new(),
+        Some(text) => {
+            let mut v = Vec::new();
+            for item in text.split(',') {
+                let (at, off) = item
+                    .split_once(':')
+                    .ok_or_else(|| format!("--height-script の項 {item:?} は 秒:差 の形で"))?;
+                let at: f64 = at.trim().parse().map_err(|e| format!("--height-script の秒 {at:?}: {e}"))?;
+                let off: f64 = off.trim().parse().map_err(|e| format!("--height-script の差 {off:?}: {e}"))?;
+                v.push((at, off));
+            }
+            v.sort_by(|a, b| a.0.total_cmp(&b.0));
+            v
+        }
+    };
+    let mut active_since: Option<f64> = None;
     let seconds = cli.f64("secs").unwrap_or(6.0);
     let every = cli.usize("every").unwrap_or(200).max(1);
     let viz_cfg = crate::viz_config(cli);
@@ -333,7 +352,14 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         if scripted {
             cmd.velocity = script_velocity;
             if controller.state() == State::Active {
-                cmd.height_offset_m = height_offset;
+                let since = *active_since.get_or_insert(t);
+                let elapsed = t - since;
+                cmd.height_offset_m = height_script
+                    .iter()
+                    .filter(|(at, _)| *at <= elapsed)
+                    .last()
+                    .map(|(_, off)| *off)
+                    .unwrap_or(height_offset);
             }
         }
         let measured = jointvec_from(&obs);
