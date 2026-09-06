@@ -402,6 +402,8 @@ fn print_help() {
          [--height-offset M]       胴体高さを立ち高さから M ずらす（歩容中）
          [--height-script S]       時刻ごとに替える。"4:-0.04,7:0.03,10:0"
                                    （歩容が始まってからの秒 : 差 [m]）
+         [--wbc-script S]          WBC の出力を時刻ごとに替える。
+                                   "4:position,8:torque,12:off"
          [--cycle S] [--swing M]   **歩容パラメータを上書きする。** 与えな
          [--step-length M]         かった項目はプロファイルのまま。周期は
          [--duty D]                揺れに、歩幅は速度の出方に効く
@@ -571,6 +573,7 @@ const VALUE_FLAGS: &[&str] = &[
     "vx",
     "height-offset",
     "height-script",
+    "wbc-script",
     "vy",
     "wz",
     "every",

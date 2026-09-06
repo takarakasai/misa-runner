@@ -58,6 +58,29 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             v
         }
     };
+    // `--wbc-script "4:position,8:torque,12:off"` — 歩容中の経過秒で WBC の出力を
+    // 替える台本。切り替えの連続性（跳ばないか）を実機なしで見る用。
+    let wbc_script: Vec<(f64, misa_core::WbcRequest)> = match cli.str("wbc-script") {
+        None => Vec::new(),
+        Some(text) => {
+            let mut v = Vec::new();
+            for item in text.split(',') {
+                let (at, what) = item
+                    .split_once(':')
+                    .ok_or_else(|| format!("--wbc-script の項 {item:?} は 秒:off|position|torque の形で"))?;
+                let at: f64 = at.trim().parse().map_err(|e| format!("--wbc-script の秒 {at:?}: {e}"))?;
+                let req = match what.trim() {
+                    "off" => misa_core::WbcRequest::Off,
+                    "position" => misa_core::WbcRequest::Position,
+                    "torque" => misa_core::WbcRequest::Torque,
+                    other => return Err(format!("--wbc-script の出力 {other:?}（off|position|torque）")),
+                };
+                v.push((at, req));
+            }
+            v.sort_by(|a, b| a.0.total_cmp(&b.0));
+            v
+        }
+    };
     let mut active_since: Option<f64> = None;
     let seconds = cli.f64("secs").unwrap_or(6.0);
     let every = cli.usize("every").unwrap_or(200).max(1);
@@ -241,7 +264,11 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let head_driven = layout
         .head
         .is_some_and(|id| plant.capabilities().driven.get(id.index()) == Some(&true));
-    let mut wbc = crate::wbc::WbcRunner::new(&robot, &cfg.wbc)?;
+    // 設定で無効でも組み立てておく（キーの `o` で実行中に有効化できる）。
+    let mut wbc = match crate::wbc::WbcRunner::new(&robot, &cfg.wbc)? {
+        Some(w) => Some(w),
+        None => crate::wbc::WbcRunner::new_dormant(&robot, &cfg.wbc),
+    };
     let mut estimator = crate::estimator::BodyEstimator::new(&robot, cfg.gait.estimator);
     let mut controller = Controller::with_arm(robot, cfg.clone(), head_driven);
     // **可動域は `dump` と同じ表で、同じ関数で見る。**
@@ -360,7 +387,17 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                     .last()
                     .map(|(_, off)| *off)
                     .unwrap_or(height_offset);
+                cmd.wbc = wbc_script
+                    .iter()
+                    .filter(|(at, _)| *at <= elapsed)
+                    .last()
+                    .map(|(_, req)| *req);
             }
+        }
+        // 操縦（キー）か台本からの WBC の切り替え要求。台本が `cmd.wbc` を
+        // 書いた**後**で見る。
+        if let Some(w) = wbc.as_mut() {
+            w.apply_request(cmd.wbc, &plant.capabilities().modes);
         }
         let measured = jointvec_from(&obs);
         let attitude = obs.imu.map(|m| m.rpy_rad).unwrap_or([0.0; 3]);
@@ -623,7 +660,15 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                 att[1],
                 att[2],
                 if show_pilot {
-                    format!("  {}", pilot.status_line())
+                    format!(
+                        "  {}  [{} / WBC {}]",
+                        pilot.status_line(),
+                        controller.controller_kind().label(),
+                        match wbc.as_ref() {
+                            Some(w) if w.is_active() => w.output().label(),
+                            _ => "OFF",
+                        }
+                    )
                 } else {
                     String::new()
                 }

@@ -538,14 +538,19 @@ pub fn run(
     // **WBC はここで組み立てる。** モデルの不備（足リンクが無い、トルクの
     // 定格が無い）は制御ループへ入る前に落とす。無効なら `None` で、以降の
     // 経路は従来どおり歩容の IK 出力をそのまま位置制御で流す。
-    let mut wbc = crate::wbc::WbcRunner::new(&robot, &cfg.wbc)?;
+    // 設定で無効でも組み立てておく（操縦側の要求で実行中に有効化できる。
+    // Plant が扱えない出力は `apply_request` が拒否する）。
+    let mut wbc = match crate::wbc::WbcRunner::new(&robot, &cfg.wbc)? {
+        Some(w) => Some(w),
+        None => crate::wbc::WbcRunner::new_dormant(&robot, &cfg.wbc),
+    };
     // **脚オドメトリは WBC の有無に依らず回す。** MPC 歩容も同じ推定を
     // 使うので、出どころは 1 か所（[`crate::estimator`]）。
     let mut estimator = crate::estimator::BodyEstimator::new(&robot, cfg.gait.estimator);
     // **Plant が名乗らないモードでは出さない。** 実機のトルク制御は、
     // トルク定数を書くまで単位が食い違う（`AppConfig::torque_unit_mismatch`）。
     // ここで止めないと、N·m が電流 (A) として 12 軸ぶん線に乗る。
-    if let Some(w) = wbc.as_ref() {
+    if let Some(w) = wbc.as_ref().filter(|w| w.is_active()) {
         let want = w.control_mode();
         if !plant.capabilities().modes.contains(&want) {
             let _ = plant.disarm();
@@ -641,6 +646,9 @@ pub fn run(
         // その判断は `SbusPilot` が持つ（受信断は活動度を上げない、
         // `--allow-no-sbus` のベンチは起立させたい）。
         let mut cmd = pilot.poll(obs.time);
+        if let Some(w) = wbc.as_mut() {
+            w.apply_request(cmd.wbc, &plant.capabilities().modes);
+        }
         // **まだ 1 軸でも読めていないうちは立ち上がらせない。**
         //
         // 読めていない軸の観測は 0 のままで、`measured` はそれをそのまま
@@ -745,7 +753,7 @@ pub fn run(
         // 「WBC 有効だが歩容が回っていない」と「解けている」が潰れない。
         wbc_status = plan
             .as_ref()
-            .and_then(|p| wbc.as_ref().map(|w| (w.output(), p.status)));
+            .and_then(|p| wbc.as_ref().filter(|w| w.is_active()).map(|w| (w.output(), p.status)));
         let mut outgoing = crate::snapshot::command(
             &layout,
             &out.targets,

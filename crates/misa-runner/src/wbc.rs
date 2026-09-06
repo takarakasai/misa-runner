@@ -432,6 +432,14 @@ impl WbcLayer {
         self.cfg.output
     }
 
+    /// 出力の種類を替える。参照は捨てる（出力ごとに積み方が違う）。
+    pub fn set_output(&mut self, output: WbcOutput) {
+        if self.cfg.output != output {
+            self.cfg.output = output;
+            self.reset();
+        }
+    }
+
     pub fn mass_kg(&self) -> f64 {
         self.mass_kg
     }
@@ -1126,6 +1134,11 @@ pub struct WbcRunner {
     layer: WbcLayer,
     /// 直前の周期で解いたか。**抜けた瞬間に参照を捨てる**ため。
     was_active: bool,
+    /// 使うか。false なら `tick` は `None`（歩容の IK 出力がそのまま通る）。
+    /// 実行中に [`misa_core::WbcRequest`] で替わる。
+    active: bool,
+    /// Plant が扱えない出力を要求されたことを 1 度だけ言うためのフラグ。
+    warned_unsupported: Option<WbcOutput>,
 }
 
 impl WbcRunner {
@@ -1147,7 +1160,77 @@ impl WbcRunner {
         Ok(Some(Self {
             layer,
             was_active: false,
+            active: true,
+            warned_unsupported: None,
         }))
+    }
+
+    /// 設定では無効だが、**実行中に有効化できるように組み立てておく**。
+    /// モデルが WBC に足りなければ諦めて `None`（起動は止めない）。
+    pub fn new_dormant(robot: &Robot, cfg: &WbcConfig) -> Option<Self> {
+        match WbcLayer::new(robot, cfg) {
+            Ok(layer) => Some(Self {
+                layer,
+                was_active: false,
+                active: false,
+                warned_unsupported: None,
+            }),
+            Err(e) => {
+                log::warn!("WBC は実行中に有効化できません（{e}）");
+                None
+            }
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// 操縦側の要求を反映する。`modes` は Plant が扱える制御モード —
+    /// **扱えない出力は拒否して今のまま**（実機で N·m が電流として線に乗る
+    /// 事故を防ぐ。`runner` の起動時の検査と同じ判断）。
+    pub fn apply_request(&mut self, req: Option<misa_core::WbcRequest>, modes: &[misa_core::ControlMode]) {
+        let Some(req) = req else { return };
+        let want = match req {
+            misa_core::WbcRequest::Off => None,
+            misa_core::WbcRequest::Position => Some(WbcOutput::Position),
+            misa_core::WbcRequest::Torque => Some(WbcOutput::Torque),
+        };
+        match want {
+            None => {
+                if self.active {
+                    self.active = false;
+                    log::info!("WBC を切りました（歩容の IK 出力をそのまま位置制御で流します）");
+                }
+            }
+            Some(output) => {
+                if self.active && self.output() == output {
+                    return;
+                }
+                let mode = Self::mode_of(output);
+                if !modes.contains(&mode) {
+                    if self.warned_unsupported != Some(output) {
+                        log::warn!(
+                            "この機体は {mode:?} 制御を扱えないので WBC の {} 出力は使えません（今のまま）",
+                            output.label()
+                        );
+                        self.warned_unsupported = Some(output);
+                    }
+                    return;
+                }
+                self.layer.set_output(output);
+                self.active = true;
+                log::info!("WBC を {} 出力にしました", output.label());
+            }
+        }
+    }
+
+    fn mode_of(output: WbcOutput) -> misa_core::ControlMode {
+        match output {
+            WbcOutput::Torque => misa_core::ControlMode::Torque,
+            WbcOutput::Velocity => misa_core::ControlMode::Velocity,
+            WbcOutput::Position => misa_core::ControlMode::Position,
+        }
     }
 
     pub fn output(&self) -> WbcOutput {
@@ -1157,11 +1240,7 @@ impl WbcRunner {
     /// この出力が実機へ要求する制御モード。**Plant の能力と突き合わせる**
     /// のに使う（扱えないモードで指令を出すと、黙って別の意味になる）。
     pub fn control_mode(&self) -> misa_core::ControlMode {
-        match self.output() {
-            WbcOutput::Torque => misa_core::ControlMode::Torque,
-            WbcOutput::Velocity => misa_core::ControlMode::Velocity,
-            WbcOutput::Position => misa_core::ControlMode::Position,
-        }
+        Self::mode_of(self.output())
     }
 
     /// モデルから求めた機体質量 [kg]。`check` の表示に使う。
@@ -1180,7 +1259,7 @@ impl WbcRunner {
         body: &crate::estimator::BodyState,
         dt: f64,
     ) -> Option<WbcPlan> {
-        let active = out.state == crate::controller::State::Active;
+        let active = out.state == crate::controller::State::Active && self.active;
         if !active {
             if self.was_active {
                 self.layer.reset();
@@ -1285,6 +1364,33 @@ mod tests {
     fn robot() -> Robot {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../models/testquad/testquad.misa");
         Robot::load(path, "extend").expect("同梱モデルが読めること")
+    }
+
+    /// **実行中の要求で WBC を入れたり切ったりできる。Plant が扱えない出力は
+    /// 拒否して今のまま。**
+    #[test]
+    fn a_dormant_runner_wakes_on_request_and_refuses_unsupported_outputs() {
+        use misa_core::{ControlMode, WbcRequest};
+        let r = robot();
+        let cfg = WbcConfig::default(); // enabled = false
+        assert!(WbcRunner::new(&r, &cfg).unwrap().is_none());
+        let mut w = WbcRunner::new_dormant(&r, &cfg).expect("同梱モデルで組み立てられること");
+        assert!(!w.is_active());
+        // 位置制御しか無い Plant（実機）: 位置出力は入る、トルクは拒否。
+        let position_only = [ControlMode::Position];
+        w.apply_request(Some(WbcRequest::Position), &position_only);
+        assert!(w.is_active() && w.output() == WbcOutput::Position);
+        w.apply_request(Some(WbcRequest::Torque), &position_only);
+        assert!(w.is_active() && w.output() == WbcOutput::Position, "扱えないトルク出力に替わっている");
+        // None は「そのまま」。
+        w.apply_request(None, &position_only);
+        assert!(w.is_active());
+        // トルクも扱える Plant（MuJoCo）: 替わる。切れる。
+        let all = [ControlMode::Position, ControlMode::Velocity, ControlMode::Torque];
+        w.apply_request(Some(WbcRequest::Torque), &all);
+        assert_eq!(w.output(), WbcOutput::Torque);
+        w.apply_request(Some(WbcRequest::Off), &all);
+        assert!(!w.is_active());
     }
 
     /// **浮遊ベースを挟んでも運動学は変わらない。** 関節は 1 つずつ後ろへ

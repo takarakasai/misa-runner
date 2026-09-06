@@ -206,6 +206,11 @@ impl Controller {
         self.gait_select
     }
 
+    /// いま使っている歩容コントローラの種類（実行中に替わり得る）。
+    pub fn controller_kind(&self) -> crate::config::GaitControllerKind {
+        self.cfg.gait.controller
+    }
+
     #[allow(dead_code)]
     pub fn robot(&self) -> &Robot {
         &self.robot
@@ -287,6 +292,19 @@ impl Controller {
         // まで戻さないと選べないのでは使いにくい。
         if cmd.gait != self.gait_select && self.can_switch_gait() {
             self.set_gait(cmd.gait);
+        }
+        // 歩容コントローラ（MPC / CHAMP）の切り替えも同じ条件。作り直しなので
+        // 歩いている最中は受け付けない。
+        if let Some(req) = cmd.gait_controller {
+            let kind = match req {
+                misa_core::GaitControllerRequest::Champ => crate::config::GaitControllerKind::Champ,
+                misa_core::GaitControllerRequest::Mpc => crate::config::GaitControllerKind::Mpc,
+            };
+            if kind != self.cfg.gait.controller && self.can_switch_gait() {
+                log::info!("歩容コントローラを {} に切り替えます", kind.label());
+                self.cfg.gait.controller = kind;
+                self.set_gait(self.gait_select);
+            }
         }
 
         // **歩容が回っていない相では MPC の参照を捨てる。** 立脚フラグと
@@ -1501,6 +1519,39 @@ mod tests {
         walk_crawl.gait = GaitSelect::Crawl;
         c.tick(&walk_crawl, &JointVec::zeros(), imu(), 0.005);
         assert_eq!(c.gait_select(), GaitSelect::Trot);
+    }
+
+    /// **歩容コントローラも立って止まっているときだけ切り替わる。**
+    #[test]
+    fn the_gait_controller_can_be_switched_while_standing_but_not_while_walking() {
+        use crate::config::GaitControllerKind;
+        use misa_core::GaitControllerRequest;
+        let mut c = controller();
+        assert_eq!(c.controller_kind(), GaitControllerKind::Auto);
+        // 脱力中に MPC を要求 → 切り替わる。
+        let mut relax_mpc = cmd(ModeRequest::Relax);
+        relax_mpc.gait_controller = Some(GaitControllerRequest::Mpc);
+        c.tick(&relax_mpc, &JointVec::zeros(), imu(), 0.005);
+        assert_eq!(c.controller_kind(), GaitControllerKind::Mpc);
+        // 立ち上がって歩き出す。
+        let mut walk = cmd(ModeRequest::Walk);
+        walk.velocity.vx_m_s = 0.1;
+        run_until(&mut c, &walk, State::Active, 20.0);
+        for _ in 0..200 {
+            c.tick(&walk, &JointVec::zeros(), imu(), 0.005);
+        }
+        // 歩行中の CHAMP 要求は無視される。
+        let mut walk_champ = walk.clone();
+        walk_champ.gait_controller = Some(GaitControllerRequest::Champ);
+        c.tick(&walk_champ, &JointVec::zeros(), imu(), 0.005);
+        assert_eq!(c.controller_kind(), GaitControllerKind::Mpc);
+        // 速度 0 で止まり切ってから要求すると切り替わる。
+        let mut stand_champ = cmd(ModeRequest::Walk);
+        stand_champ.gait_controller = Some(GaitControllerRequest::Champ);
+        for _ in 0..600 {
+            c.tick(&stand_champ, &JointVec::zeros(), imu(), 0.005);
+        }
+        assert_eq!(c.controller_kind(), GaitControllerKind::Champ);
     }
 
     #[test]

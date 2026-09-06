@@ -430,6 +430,9 @@ impl Teleop {
             stabilize_head: chicken_head,
             body_attitude_rad: attitude,
             link_ok: true,
+            // プロポには WBC / コントローラの切り替えを割り当てていない。
+            wbc: None,
+            gait_controller: None,
             // **プロポは歩容パラメータを触らない。** チャンネルが足りない
             // し、飛びながら周期を変えたい要件も無い。
             gait_tune: misa_core::GaitTune::default(),

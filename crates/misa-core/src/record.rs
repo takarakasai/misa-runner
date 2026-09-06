@@ -35,7 +35,9 @@ use crate::time::Time;
 //
 // **`SafetyVerdict` に `velocity_limited` が増えたので 3。** WBC の速度出力を
 // 丸めたことを記録に残すため。
-pub const FORMAT_VERSION: u32 = 3;
+//
+// **`Intent` に `wbc` / `gait_controller`（実行中の切り替え要求）が増えたので 4。**
+pub const FORMAT_VERSION: u32 = 4;
 
 /// 記録の先頭に 1 度だけ置く見出し。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

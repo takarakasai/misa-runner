@@ -154,6 +154,28 @@ impl GaitTune {
     }
 }
 
+/// 全身制御（WBC）の出力の要求。**`None`（送らない）なら今のまま。**
+///
+/// 起動時の設定（`[wbc] enabled / output`）を実行中に替えるためのもの。
+/// 操縦系が状態として持ち続けて毎周期送る（切り替わった瞬間だけ効く）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WbcRequest {
+    /// WBC を使わない（歩容の IK 出力をそのまま位置制御で流す）。
+    Off,
+    /// 位置出力（位置 PD + 前置トルク）。
+    Position,
+    /// トルク出力。**Plant が Torque を名乗らなければ拒否される。**
+    Torque,
+}
+
+/// 歩容コントローラの要求。**`None` なら今のまま。** 立っている（歩容が
+/// 止まって 4 脚接地）ときだけ切り替わる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GaitControllerRequest {
+    Champ,
+    Mpc,
+}
+
 /// 1 周期ぶんの意図。
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Intent {
@@ -184,6 +206,12 @@ pub struct Intent {
     /// 歩容パラメータの上書き。**既定（すべて `None`）ではプロファイルの
     /// 値がそのまま効く**ので、上書きを送らない操縦系の挙動は変わらない。
     pub gait_tune: GaitTune,
+    /// 全身制御の出力の切り替え。`None` で今のまま。
+    #[serde(default)]
+    pub wbc: Option<WbcRequest>,
+    /// 歩容コントローラの切り替え。`None` で今のまま。
+    #[serde(default)]
+    pub gait_controller: Option<GaitControllerRequest>,
 }
 
 impl Intent {

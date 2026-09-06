@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use misa_core::{GaitSelect, GaitTune, Intent, ModeRequest, Pilot, Time, Velocity};
+use misa_core::{GaitControllerRequest, GaitSelect, GaitTune, Intent, ModeRequest, Pilot, Time, Velocity, WbcRequest};
 
 use crate::config::AppConfig;
 
@@ -52,6 +52,10 @@ pub enum Key {
     Level,
     Tune(Knob, i8),
     TuneReset,
+    /// 全身制御の出力を巡回（OFF → 位置 → トルク → OFF）。
+    WbcCycle,
+    /// 歩容コントローラを MPC ↔ CHAMP で切り替える（立っているときだけ効く）。
+    ControllerToggle,
     Help,
     Quit,
 }
@@ -126,6 +130,8 @@ pub fn decode(c: u8) -> Option<Key> {
         b'.' => Key::Tune(Knob::Duty, 1),
         b',' => Key::Tune(Knob::Duty, -1),
         b'm' => Key::TuneReset,
+        b'o' => Key::WbcCycle,
+        b'p' => Key::ControllerToggle,
         b'h' | b'?' => Key::Help,
         // **Ctrl-C も自分で拾う。** raw モードでは端末が SIGINT を出さない
         // ので、これを見落とすと止められなくなる。
@@ -147,6 +153,9 @@ pub struct Limits {
     /// **「1 段上げる」を書くには基準値が要る。** 周期は歩容ごとに違うので
     /// 3 つ持ち、歩容を替えたらその歩容の基準へ戻す。
     pub base_tune: [GaitTune; 3],
+    /// 起動時の WBC / 歩容コントローラ。`o` / `p` の巡回はここから数える。
+    pub wbc_initial: WbcRequest,
+    pub controller_initial: GaitControllerRequest,
 }
 
 /// 歩容 → `base_tune` の添字。
@@ -168,6 +177,16 @@ impl Limits {
             attitude_max: cfg.gait.body_attitude_max_rad,
             base_tune: [GaitSelect::Crawl, GaitSelect::Walk, GaitSelect::Trot]
                 .map(|g| crate::robot::base_gait_tune(&cfg.gait, g)),
+            wbc_initial: match (cfg.wbc.enabled, cfg.wbc.output) {
+                (false, _) => WbcRequest::Off,
+                (true, crate::config::WbcOutput::Torque) => WbcRequest::Torque,
+                (true, _) => WbcRequest::Position,
+            },
+            controller_initial: match cfg.gait.controller {
+                crate::config::GaitControllerKind::Mpc
+                | crate::config::GaitControllerKind::Centroidal => GaitControllerRequest::Mpc,
+                _ => GaitControllerRequest::Champ,
+            },
         }
     }
 
@@ -278,6 +297,20 @@ pub fn apply(intent: &mut Intent, key: Key, lim: &Limits) {
             *t = t.clamped();
         }
         Key::TuneReset => intent.gait_tune = lim.base_of(intent.gait),
+        // **最初の 1 押しは起動時の設定から数える**（`None` は「そのまま」）。
+        Key::WbcCycle => {
+            intent.wbc = Some(match intent.wbc.unwrap_or(lim.wbc_initial) {
+                WbcRequest::Off => WbcRequest::Position,
+                WbcRequest::Position => WbcRequest::Torque,
+                WbcRequest::Torque => WbcRequest::Off,
+            })
+        }
+        Key::ControllerToggle => {
+            intent.gait_controller = Some(match intent.gait_controller.unwrap_or(lim.controller_initial) {
+                GaitControllerRequest::Champ => GaitControllerRequest::Mpc,
+                GaitControllerRequest::Mpc => GaitControllerRequest::Champ,
+            })
+        }
         Key::Help | Key::Quit => {}
     }
 }
@@ -307,6 +340,10 @@ pub fn help(lim: &Limits, gait: GaitSelect) -> String {
          　  . / ,    接地比 {:.2}     1 段 0.02（0.5 が trot）\n\
          　  m        いまの歩容の基準値へ戻す\n\
          　  ※ z / x / c で歩容を替えると、その歩容の基準値に戻ります\n\
+         \n\
+         　**制御の構成（走らせながら替えられます）**\n\
+         　  o        全身制御の出力を巡回  OFF → 位置 → トルク → OFF\n\
+         　  p        歩容コントローラ MPC ↔ CHAMP（**立って止まっているときだけ**効く）\n\
          \n\
          　  h / ?    この一覧    Esc / Ctrl-C    終了（脱力して抜けます）\n",
         lim.max_vx,
@@ -505,7 +542,30 @@ mod tests {
             height_range: 0.08,
             attitude_max: 0.20,
             base_tune: [base_tune(0.85), base_tune(0.75), base_tune(0.5)],
+            wbc_initial: WbcRequest::Off,
+            controller_initial: GaitControllerRequest::Champ,
         }
+    }
+
+    /// `o` は OFF → 位置 → トルク → OFF と巡回し、`p` は MPC ↔ CHAMP。
+    /// 最初の 1 押しは起動時の設定から数える。
+    #[test]
+    fn o_cycles_the_wbc_output_and_p_toggles_the_controller() {
+        let l = lim();
+        let mut i = Intent::default();
+        assert_eq!(i.wbc, None);
+        apply(&mut i, Key::WbcCycle, &l);
+        assert_eq!(i.wbc, Some(WbcRequest::Position));
+        apply(&mut i, Key::WbcCycle, &l);
+        assert_eq!(i.wbc, Some(WbcRequest::Torque));
+        apply(&mut i, Key::WbcCycle, &l);
+        assert_eq!(i.wbc, Some(WbcRequest::Off));
+        apply(&mut i, Key::ControllerToggle, &l);
+        assert_eq!(i.gait_controller, Some(GaitControllerRequest::Mpc));
+        apply(&mut i, Key::ControllerToggle, &l);
+        assert_eq!(i.gait_controller, Some(GaitControllerRequest::Champ));
+        assert_eq!(decode(b'o'), Some(Key::WbcCycle));
+        assert_eq!(decode(b'p'), Some(Key::ControllerToggle));
     }
 
     /// 試験用の基準値。接地比だけ歩容らしく変えてある。
