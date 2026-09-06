@@ -434,9 +434,9 @@ MuJoCo の既定ヘッドライトだけになって暗い。
 `--cam-dist` / `--cam-z`。**機体の大きさで変える** — namiashi2 は 2.2 前後、
 namiashi は 1.1 前後。
 
-`--features render` は**ローカルの articara を見る**（`.cargo/config.toml` の
-`[patch]`）。キャッシュしている git revision には `render` feature も
-`MujocoSim::mj_model` / `mj_data_mut` も無いため。articara を更新すれば外せる。
+`--features render` は `Cargo.lock` の articara（49a28c4 以降）でそのまま
+ビルドできる（2026-09-06 に rev を上げた。それ以前は `.cargo/config.toml` の
+`[patch]` でローカルの articara を見る必要があった）。
 
 #### チキンヘッドを見る
 
@@ -765,8 +765,12 @@ max_torque_nm = 0.0    # 絶対値の頭打ち。0 で無効
 **実機の値は 1.667。** LKMTech MG4005E-i10 の 24 V での瞬時最大トルクは
 2.5 N·m（減速機出力。連続定格 1.5 N·m）。calf は外側にさらに 1.556 の減速が
 あり、瞬時 3.89 N·m のところを 2.205 × 1.667 = 3.68 N·m で使う（少し控えめ）。
-同梱の `robots/namiashi.toml` に書いてある。ベンチ電源の電流制限（5 A）に
-当たるなら `max_torque_nm` で頭打ちにする。
+同梱の `robots/namiashi.toml` に書いてある。**2.5 N·m は 24 V での値** —
+バッテリは 19.8 V と 25.6 V の 2 種で、25.6 V ならそのまま、19.8 V では速く
+動く軸ほど逆起電力で瞬時トルクが落ちるので、飽和（`MISA_WBC_DEBUG` の
+「飽和」行）が増えたら下げる。電流はベンチ電源の 5 A 制限がテスト用（電源
+自体は 30 A、本番バッテリは 25 A）なので、5 A で試すときだけ `max_torque_nm`
+で頭打ちにする。
 
 `sim` では**アクチュエータ側の上限も同じ係数で上がる**（揃えないと QP が
 出ないトルクを当てにする）。**2.4 kg のモデルは連続定格のままで trot 0.80 が
