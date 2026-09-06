@@ -260,6 +260,24 @@ pub fn stance_with_measured_contact(planned: [bool; 4], obs: &misa_core::Observa
     out
 }
 
+/// **推定器のための**立脚フラグ。接地を測れる足はその値、測れない足
+/// （`None`、実機）は計画。
+///
+/// WBC の接地拘束（[`stance_with_measured_contact`]、早い着地だけ倒す）とは
+/// 別物。推定器にとって大事なのは**「本当に荷重が乗って止まっている足」だけ
+/// を使うこと**で、計画が立脚なのに浮いている足を入れると、その足の速度が
+/// そのまま胴体速度の誤差になる（trot 0.80 の着地・離地の周期で −0.2 m/s
+/// が出ていた）。
+pub fn stance_for_estimator(planned: [bool; 4], obs: &misa_core::Observation) -> [bool; 4] {
+    let mut out = planned;
+    for (slot, flag) in out.iter_mut().enumerate() {
+        if let Some(c) = obs.contacts.get(slot).copied().flatten() {
+            *flag = c;
+        }
+    }
+    out
+}
+
 /// 観測の関節速度を [`JointVec`] へ。読めていない軸は 0。
 ///
 /// 位置側（`runner::jointvec_from`）と対。**速度を 0 と読むのは安全側**で、

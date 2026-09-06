@@ -384,6 +384,9 @@ fn print_help() {
          [--kv-velocity K]         **速度制御のゲイン**（既定 20）。位置制御の
                                    --kv とは別物で、速度制御ではこれが唯一の
                                    ゲインになる
+         [--impratio R] [--cone C]  MuJoCo の接地モデル。既定（impratio 1・
+                                   pyramidal）では接地足が荷重の下で這う。
+                                   MuJoCo の推奨は --impratio 10 --cone elliptic
          [--pilot keys]            **キーボードで操縦する。** --viz と併せて
                                    articara に出せば、見ながら動かせる。
                                    押しっぱなしは端末から取れないので、押す
@@ -540,6 +543,8 @@ const VALUE_FLAGS: &[&str] = &[
     "base-height",
     "timestep",
     "friction",
+    "impratio",
+    "cone",
     // 歩容パラメータの実行中の上書き（`sim`）。
     "cycle",
     "swing",

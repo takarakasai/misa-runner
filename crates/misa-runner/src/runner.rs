@@ -697,7 +697,11 @@ pub fn run(
             attitude,
             gyro,
             obs.imu.map(|i| i.accel_m_s2),
-            out.stance,
+            if cfg.gait.estimator_use_measured_contact {
+                crate::estimator::stance_for_estimator(out.stance, &obs)
+            } else {
+                out.stance
+            },
             period.as_secs_f64(),
         );
         controller.observe_body(&body);

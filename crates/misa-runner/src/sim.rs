@@ -171,6 +171,8 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         velocity_kv: cli.f64("kv-velocity").unwrap_or(20.0),
         base_height_m: cli.f64("base-height").unwrap_or(0.20),
         timestep_s: cli.f64("timestep"),
+        impratio: cli.f64("impratio"),
+        cone: cli.str("cone").map(str::to_string),
         contact_threshold_n: cfg.wbc.contact_force_threshold_n,
         friction: cli.f64("friction").map(|f| [f, 0.005, 0.0001]),
         home,
@@ -254,11 +256,31 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let mut foot_prev: [Option<[f64; 3]>; 4] = [None; 4];
     let mut slip_sum = [0.0f64; 4];
     let mut slip_n = [0usize; 4];
+    // 符号付き（出発時の前方向へ射影）。**正なら足が進行方向へ流れている**
+    // （胴体が運動学より速く進み、脚オドメトリはそのぶん遅く読む）。
+    let mut slip_fwd_sum = [0.0f64; 4];
     let mut yaw_prev = 0.0f64;
     let mut yaw_total = 0.0f64;
     let mut track_sum = vec![0.0f64; layout.table.len()];
     let mut track_max = vec![0.0f64; layout.table.len()];
     let mut track_n = 0usize;
+    // **推定器が見ている速度と真の速度。** 歩容中の推定速度（世界座標）を
+    // 積分した前後距離と、真の胴体位置の差分を並べる。両者がずれていれば、
+    // MPC / WBC はそのぶん盲目で、指令通りに走れない理由がここにある。
+    let mut est_dist_world = [0.0f64; 2];
+    let est_every = std::env::var("MISA_EST_TRACE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|e| *e > 0);
+    let mut active_ticks = 0usize;
+    let mut q_prev_fl_thigh = 0.0f64;
+    let mut active_start: Option<[f64; 3]> = None;
+    let mut active_end: [f64; 3] = [0.0; 3];
+    // **計画の立脚と実測の接地のずれ。** `plan_stance_no_contact` は計画が
+    // 立脚なのに 5 N 乗っていない周期（遅い着地・早い離地）、
+    // `contact_in_swing` は計画が遊脚なのに乗っている周期（早い着地・遅い離地）。
+    let mut plan_stance_no_contact = [0usize; 4];
+    let mut contact_in_swing = [0usize; 4];
     let mut ground_contacts: std::collections::BTreeMap<String, usize> = Default::default();
     let start = plant.base_position().unwrap_or([0.0; 3]);
     let start_yaw = obs.imu.map(|m| m.rpy_rad[2]).unwrap_or(0.0);
@@ -327,12 +349,51 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             attitude,
             gyro,
             obs.imu.map(|m| m.accel_m_s2),
-            out.stance,
+            if cfg.gait.estimator_use_measured_contact {
+                crate::estimator::stance_for_estimator(out.stance, &obs)
+            } else {
+                out.stance
+            },
             dt,
         );
         controller.observe_body(&body);
 
         crate::dump::check_limits(&limits, &layout, &out.targets, t, &mut violations);
+
+        if out.state == State::Active {
+            if let Some(v) = body.velocity_world {
+                est_dist_world[0] += v.x * dt;
+                est_dist_world[1] += v.y * dt;
+            }
+            if let Some(p) = plant.base_position() {
+                if active_start.is_none() {
+                    active_start = Some(p);
+                }
+                // 調査用: 推定器の速度・高さと真値を並べる（MISA_EST_TRACE=<n>）。
+                if est_every.is_some_and(|e| i % e == 0) {
+                    let vt = [(p[0] - active_end[0]) / dt, (p[1] - active_end[1]) / dt];
+                    let ve = body.velocity_world.unwrap_or_default();
+                    // 関節速度の検算: Plant が報告する q̇ と、q の差分。
+                    let fd = (measured.legs[0][1] - q_prev_fl_thigh) / dt;
+                    eprintln!(
+                        "[est] t={t:.3} st={}{}{}{} v_true=({:+.3},{:+.3}) v_est=({:+.3},{:+.3}) h_true={:.3} h_est={:.3} qd_FLthigh={:+.3} dq/dt={:+.3}",
+                        out.stance[0] as u8, out.stance[1] as u8, out.stance[2] as u8, out.stance[3] as u8,
+                        vt[0], vt[1], ve.x, ve.y, p[2], body.height_m.unwrap_or(f64::NAN),
+                        measured_qd.legs[0][1], fd
+                    );
+                }
+                active_end = p;
+            }
+            active_ticks += 1;
+            q_prev_fl_thigh = measured.legs[0][1];
+            for i in 0..4 {
+                match (out.stance[i], obs.contacts.get(i).copied().flatten()) {
+                    (true, Some(false)) => plan_stance_no_contact[i] += 1,
+                    (false, Some(true)) => contact_in_swing[i] += 1,
+                    _ => {}
+                }
+            }
+        }
 
         let plan = wbc
             .as_mut()
@@ -441,6 +502,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                 {
                     let d = ((p[0] - prev[0]).powi(2) + (p[1] - prev[1]).powi(2)).sqrt();
                     slip_sum[i] += d;
+                    slip_fwd_sum[i] += (p[0] - prev[0]) * start_yaw.cos() + (p[1] - prev[1]) * start_yaw.sin();
                     slip_n[i] += 1;
                 }
                 foot_prev[i] = Some(*p);
@@ -571,6 +633,31 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         yaw_total.to_degrees(),
         yaw_end.to_degrees()
     );
+    if let Some(p0) = active_start {
+        let (edx, edy) = (est_dist_world[0], est_dist_world[1]);
+        let est_fwd = edx * c0 + edy * s0;
+        let (tdx, tdy) = (active_end[0] - p0[0], active_end[1] - p0[1]);
+        let true_fwd = tdx * c0 + tdy * s0;
+        let secs = active_ticks as f64 * dt;
+        println!(
+            "歩容中 {secs:.1} s の前後距離  真値 {true_fwd:+.3} m（平均 {:+.3} m/s） / 推定器の積分 {est_fwd:+.3} m（{:+.3} m/s）",
+            true_fwd / secs.max(1e-9),
+            est_fwd / secs.max(1e-9)
+        );
+        if plan_stance_no_contact.iter().chain(contact_in_swing.iter()).any(|&n| n > 0) {
+            let s: String = (0..4)
+                .map(|i| {
+                    format!(
+                        "{} {:.0}%/{:.0}%  ",
+                        ["FL", "FR", "RL", "RR"][i],
+                        100.0 * plan_stance_no_contact[i] as f64 / active_ticks.max(1) as f64,
+                        100.0 * contact_in_swing[i] as f64 / active_ticks.max(1) as f64
+                    )
+                })
+                .collect();
+            println!("計画と接地のずれ（立脚なのに浮いている % / 遊脚なのに乗っている %）  {s}");
+        }
+    }
     if clear_max.iter().any(|v| v.is_finite()) {
         let s: String = (0..4)
             .map(|i| {
@@ -594,6 +681,16 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             })
             .collect();
         println!("\n接地中の足の滑り [m/s]（0 に近いほど良い）  {s}");
+        let s: String = (0..4)
+            .map(|i| {
+                format!(
+                    "{} {:+.3}  ",
+                    ["FL", "FR", "RL", "RR"][i],
+                    slip_fwd_sum[i] / (slip_n[i].max(1) as f64) / dt
+                )
+            })
+            .collect();
+        println!("  うち進行方向の成分（正 = 足が前へ流れる = 脚オドメトリが遅く読む）  {s}");
     }
     if track_n > 0 {
         println!("\n追従誤差（歩容中 {track_n} 周期の平均 / 最大） [rad]");

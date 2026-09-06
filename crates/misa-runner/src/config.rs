@@ -938,6 +938,33 @@ pub struct GaitTuning {
     /// 公称高さ・水平のままなので誤差として効く。
     #[serde(default = "default_true")]
     pub mpc_observe_pose: bool,
+    /// MPC の現在状態の**並進速度**に推定値を入れるか（既定 true）。
+    ///
+    /// false にすると、MPC は「胴体は指令どおりの速さで動いている」と
+    /// 見なす（ランプ後の速度指令を世界向きに回して入れる）。速度の閉ループ
+    /// を切る形。
+    ///
+    /// # なぜ切る選択肢が要るか
+    ///
+    /// 脚オドメトリは「接地足は世界に対して止まっている」と仮定するので、
+    /// **足が進行方向へ流れていると胴体を遅く読む**。MuJoCo の trot 0.80 で
+    /// 真値 0.91 m/s のところを 0.63 m/s と読んでいた（`sim` の「歩容中の
+    /// 前後距離 真値 / 推定器の積分」）。MPC がその偽の不足ぶんを埋めようと
+    /// 押すので、トルク出力は指令より 18 % 速く走る。位置出力では MPC の力は
+    /// 位置サーボの上の前置でしかないので同じ偽の不足があっても速さは
+    /// 運動学で決まる（追従率 1.02）。LKF（`estimator = "kalman"`）も足の
+    /// 運動学を信じる重みなので同じ癖を持つ。
+    #[serde(default = "default_true")]
+    pub mpc_observe_velocity: bool,
+    /// 推定器（脚オドメトリ / LKF）の立脚に**実測の接地**を使うか。
+    ///
+    /// 計画の立脚フラグは着地・離地の周期で実際とずれる（trot 0.80 で
+    /// 各足 3〜10 % の周期）。浮いている足を「止まっている」と信じると、
+    /// その足の速度がそのまま胴体速度の誤差になるので、接地を測れる Plant
+    /// では実測を使う。測れない足（実機）は計画のまま。WBC の接地拘束には
+    /// 影響しない（そちらは `[wbc] use_measured_contact`）。
+    #[serde(default)]
+    pub estimator_use_measured_contact: bool,
     /// 胴体の状態（高さ・速度）をどう推定するか。
     ///
     /// - `leg_odometry`（既定）: 接地足の運動学だけ。状態を持たず毎周期の
@@ -1104,6 +1131,8 @@ impl Default for GaitTuning {
             mpc_dt_per_step: default_mpc_dt_per_step(),
             mpc_capture_point_gain_s: default_mpc_capture_point_gain_s(),
             mpc_observe_pose: true,
+            mpc_observe_velocity: true,
+            estimator_use_measured_contact: false,
             estimator: EstimatorKind::LegOdometry,
             velocity_ramp_s: default_velocity_ramp_s(),
             velocity_ramp_stop_s: default_velocity_ramp_stop_s(),

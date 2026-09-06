@@ -87,6 +87,13 @@ pub struct SimOptions {
     /// 既定の 2 ms だと使える `kv` が位置保持に要る値を下回り、支えきれずに
     /// 沈むか、`kv` を上げると発散する。刻みを半分にすると使える `kv` が倍になる。
     pub timestep_s: Option<f64>,
+    /// MuJoCo の `<option impratio>`。摩擦拘束の硬さの比。**既定（None = 1）
+    /// では接地足が荷重の下で地面を這う**（namiashi の trot で 0.1〜0.25 m/s
+    /// 進行方向へ流れた）。MuJoCo の推奨は 10 以上 + `cone = "elliptic"`。
+    /// 接地モデルの当て方が結果を変えるので、感度を見るための軸として残す。
+    pub impratio: Option<f64>,
+    /// MuJoCo の `<option cone>`（`"pyramidal"` | `"elliptic"`）。
+    pub cone: Option<String>,
     /// 足を「接地」と報告する垂直力の閾値 [N]。
     ///
     /// MuJoCo は接触の有無を幾何で知っているが、**かすっただけの遊脚を
@@ -113,6 +120,8 @@ impl Default for SimOptions {
             home: Vec::new(),
             friction: None,
             timestep_s: None,
+            impratio: None,
+            cone: None,
             contact_threshold_n: 5.0,
             feet: ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
                 .iter()
@@ -224,7 +233,24 @@ impl MujocoPlant {
                 pitch: 0.0,
             }),
             add_actuators: true,
-            timestep: opts.timestep_s,
+            // **物理の刻みは制御周期を割り切る値にする。** MuJoCo の既定
+            // 2 ms のままだと 5 ms の周期に 3 フレーム（= 6 ms）進めることに
+            // なり、制御が 5 ms と信じている 1 周期に物理は 6 ms 流れる。
+            // 速度は 5/6 に読まれ、歩容は物理時間で 20 % 遅く回り、重力の
+            // 効きが軽く見える（2026-09-06 まで気付かず、その間の sim の
+            // 数字はこの歪みを含む）。指定が無ければ 2 ms 以下で周期を
+            // 割り切る最大の刻みにする（5 ms → 1.667 ms × 3）。
+            timestep: Some(opts.timestep_s.unwrap_or_else(|| {
+                let n = (opts.control_period_s / 0.002).ceil().max(1.0);
+                opts.control_period_s / n
+            })),
+            impratio: opts.impratio,
+            cone: match opts.cone.as_deref() {
+                Some("elliptic") => Some("elliptic"),
+                Some("pyramidal") => Some("pyramidal"),
+                Some(other) => return Err(format!("未知の cone {other:?}（pyramidal|elliptic）")),
+                None => None,
+            },
             default_friction: opts.friction.unwrap_or([0.7, 0.005, 0.0001]),
             ..MjcfExportOptions::default()
         };
@@ -234,6 +260,15 @@ impl MujocoPlant {
 
         let timestep = sim.timestep();
         let frames_per_tick = ((opts.control_period_s / timestep).round() as u32).max(1);
+        let drift = frames_per_tick as f64 * timestep - opts.control_period_s;
+        if drift.abs() > 1e-6 {
+            log::warn!(
+                "MuJoCo の刻み {:.4} ms が制御周期 {:.2} ms を割り切りません。1 tick で物理が {:+.3} ms ずれます（--timestep で直せる）",
+                timestep * 1e3,
+                opts.control_period_s * 1e3,
+                drift * 1e3
+            );
+        }
         log::info!(
             "MuJoCo timestep {:.4} ms、制御周期 {:.2} ms → 1 tick あたり {} フレーム",
             timestep * 1e3,

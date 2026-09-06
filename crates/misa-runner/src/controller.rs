@@ -236,7 +236,20 @@ impl Controller {
         });
         let Some(v) = body.velocity_world else { return };
         self.observed_v_world = v;
-        self.gait.set_body_state_observed(v, body.angular_velocity_world);
+        // **速度の閉ループを切る選択肢**（[`crate::config::GaitTuning::mpc_observe_velocity`]）。
+        // 切ったときは、ランプ後の指令を歩容のヨーで世界向きに回して
+        // 「指令どおりに動いている」と MPC に伝える。角速度は実測のまま。
+        let v_for_mpc = if self.cfg.gait.mpc_observe_velocity {
+            v
+        } else {
+            let (s, c) = self.body_view.yaw.sin_cos();
+            nalgebra::Vector3::new(
+                c * self.ramped_v[0] - s * self.ramped_v[1],
+                s * self.ramped_v[0] + c * self.ramped_v[1],
+                0.0,
+            )
+        };
+        self.gait.set_body_state_observed(v_for_mpc, body.angular_velocity_world);
     }
 
     /// 可視化用の胴体姿勢と接地フラグ。
