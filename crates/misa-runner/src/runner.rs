@@ -541,7 +541,7 @@ pub fn run(
     let mut wbc = crate::wbc::WbcRunner::new(&robot, &cfg.wbc)?;
     // **脚オドメトリは WBC の有無に依らず回す。** MPC 歩容も同じ推定を
     // 使うので、出どころは 1 か所（[`crate::estimator`]）。
-    let estimator = crate::estimator::BodyEstimator::new(&robot);
+    let mut estimator = crate::estimator::BodyEstimator::new(&robot, cfg.gait.estimator);
     // **Plant が名乗らないモードでは出さない。** 実機のトルク制御は、
     // トルク定数を書くまで単位が食い違う（`AppConfig::torque_unit_mismatch`）。
     // ここで止めないと、N·m が電流 (A) として 12 軸ぶん線に乗る。
@@ -687,13 +687,18 @@ pub fn run(
         // 関節角が要る）。測った結果は歩容へ返して**次の周期**で使わせる。
         let measured_qd = crate::estimator::velocities_from(&obs);
         let gyro = obs.imu.map(|i| i.gyro_rad_s).unwrap_or([0.0; 3]);
+        if controller.state() != State::Active {
+            estimator.reset();
+        }
         let body = estimator.estimate(
             &measured,
             &measured_qd,
             &out.targets,
             attitude,
             gyro,
+            obs.imu.map(|i| i.accel_m_s2),
             out.stance,
+            period.as_secs_f64(),
         );
         controller.observe_body(&body);
 

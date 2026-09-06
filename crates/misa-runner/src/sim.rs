@@ -171,6 +171,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         velocity_kv: cli.f64("kv-velocity").unwrap_or(20.0),
         base_height_m: cli.f64("base-height").unwrap_or(0.20),
         timestep_s: cli.f64("timestep"),
+        contact_threshold_n: cfg.wbc.contact_force_threshold_n,
         friction: cli.f64("friction").map(|f| [f, 0.005, 0.0001]),
         home,
         root_link: robot.root_link.clone(),
@@ -218,7 +219,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         .head
         .is_some_and(|id| plant.capabilities().driven.get(id.index()) == Some(&true));
     let mut wbc = crate::wbc::WbcRunner::new(&robot, &cfg.wbc)?;
-    let estimator = crate::estimator::BodyEstimator::new(&robot);
+    let mut estimator = crate::estimator::BodyEstimator::new(&robot, cfg.gait.estimator);
     let mut controller = Controller::with_arm(robot, cfg.clone(), head_driven);
     // **可動域は `dump` と同じ表で、同じ関数で見る。**
     //
@@ -316,7 +317,19 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         }
         let measured_qd = crate::estimator::velocities_from(&obs);
         let gyro = obs.imu.map(|m| m.gyro_rad_s).unwrap_or([0.0; 3]);
-        let body = estimator.estimate(&measured, &measured_qd, &out.targets, attitude, gyro, out.stance);
+        if controller.state() != State::Active {
+            estimator.reset();
+        }
+        let body = estimator.estimate(
+            &measured,
+            &measured_qd,
+            &out.targets,
+            attitude,
+            gyro,
+            obs.imu.map(|m| m.accel_m_s2),
+            out.stance,
+            dt,
+        );
         controller.observe_body(&body);
 
         crate::dump::check_limits(&limits, &layout, &out.targets, t, &mut violations);
@@ -324,6 +337,35 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         let plan = wbc
             .as_mut()
             .and_then(|w| w.tick(&out, &obs, &measured, &measured_qd, &body, dt));
+        // 調査用: WBC の τ と Plant が実際に掛けたトルクを脚ごとに並べる
+        // （README「調べ方」）。位置出力で立ち止まらせれば Plant 側は重力補償
+        // そのものなので、モデルの検算になる。
+        let tau_every = std::env::var("MISA_WBC_TAU")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|e| *e > 0);
+        if tau_every.is_some_and(|e| i % e == 0) {
+            if let Some(p) = plan.as_ref() {
+                let mut line = format!("[tau] t={t:.3} h={:.3}", body.height_m.unwrap_or(f64::NAN));
+                for leg in 0..2 {
+                    line += &format!(" q{leg}[{:+.2},{:+.2},{:+.2}]", measured.legs[leg][0], measured.legs[leg][1], measured.legs[leg][2]);
+                }
+                for leg in 0..4 {
+                    let mut w = Vec::new();
+                    let mut m = Vec::new();
+                    for k in 0..3 {
+                        w.push(format!("{:+.2}", p.legs[leg][k].torque_nm));
+                        let tm = obs
+                            .get(misa_core::AxisId::new((leg * 3 + k) as u16))
+                            .and_then(|a| a.torque_nm)
+                            .unwrap_or(f64::NAN);
+                        m.push(format!("{tm:+.2}"));
+                    }
+                    line += &format!(" L{leg} wbc[{}] meas[{}]", w.join(","), m.join(","));
+                }
+                eprintln!("{line}");
+            }
+        }
         let outgoing = crate::snapshot::command(
             &layout,
             &out.targets,

@@ -1906,7 +1906,6 @@ dependencies = [
 [[package]]
 name = "legged-estimation"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/quadruped-gait.git#4d3f6edacee468fe5cda69c994aea95e62b6541d"
 dependencies = [
  "nalgebra",
  "quadruped-gait",
@@ -2127,6 +2126,7 @@ version = "0.1.0"
 dependencies = [
  "env_logger",
  "futures",
+ "legged-estimation",
  "libc",
  "log",
  "misa-core",
@@ -2895,7 +2895,6 @@ dependencies = [
 [[package]]
 name = "quadruped-gait"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/quadruped-gait.git#d2ce2f3ea63795fce85bb9831809747b0768bc9f"
 dependencies = [
  "clarabel",
  "log",

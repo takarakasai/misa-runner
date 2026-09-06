@@ -43,6 +43,7 @@ sbus = { git = "https://github.com/takarakasai/sbus.git", package = "sbus" }
 sbus-protocol = { git = "https://github.com/takarakasai/sbus.git", package = "sbus-protocol" }
 misarta = { git = "https://github.com/takarakasai/misarta.git" }
 quadruped-gait = { git = "https://github.com/takarakasai/quadruped-gait.git", package = "quadruped-gait" }
+legged-estimation = { git = "https://github.com/takarakasai/quadruped-gait.git", package = "legged-estimation" }
 
 # ── 外部 crate ──
 nalgebra = "0.34.2"

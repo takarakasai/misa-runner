@@ -292,6 +292,11 @@ pub struct WbcLayer {
     last_swing_target: [[f64; 3]; 4],
     /// 一度も解けていないことを 1 度だけ言うためのフラグ。
     warned_infeasible: bool,
+    /// 遊脚の加速度誤差積分（`swing_accel_integral_k`）の状態:
+    /// 「離地時の q̇ に WBC の q̈ を積んだ速度」。立脚中は意味を持たない。
+    swing_vel_pred: [[f64; 3]; 4],
+    /// 前周期に遊脚だったか。離地の周期で積分をリセットするため。
+    was_swing: [bool; 4],
 }
 
 impl WbcLayer {
@@ -418,6 +423,8 @@ impl WbcLayer {
             yaw_offset: 0.0,
             last_swing_target: [[0.0; 3]; 4],
             warned_infeasible: false,
+            swing_vel_pred: [[0.0; 3]; 4],
+            was_swing: [false; 4],
         })
     }
 
@@ -437,6 +444,7 @@ impl WbcLayer {
         self.seeded = false;
         self.x_prev = None;
         self.grf_seeded = false;
+        self.was_swing = [false; 4];
     }
 
     /// 1 周期解く。
@@ -679,6 +687,8 @@ impl WbcLayer {
             f64::INFINITY
         };
         for leg in 0..4 {
+            let swing_now = !obs.stance[leg];
+            let lift_off = swing_now && !self.was_swing[leg];
             for k in 0..3 {
                 let vi = self.leg_v_idx[leg][k];
                 let (q_ddot, tau) = if sane {
@@ -687,6 +697,24 @@ impl WbcLayer {
                     (0.0, tau_gravity[vi - 6])
                 };
                 status.tau_max_nm = status.tau_max_nm.max(tau.abs());
+
+                // 遊脚の加速度誤差積分（Grandia 2022 式 39–40）。離地の周期で
+                // 実測の q̇ に張り直し、以後は WBC の q̈ を積む。**解が壊れた
+                // 周期は積まない**（q̈ = 0 として扱う）。
+                let qd_meas_k = obs.measured_qd.legs[leg][k];
+                let tau_int = if self.cfg.swing_accel_integral_k > 0.0 && swing_now {
+                    if lift_off {
+                        self.swing_vel_pred[leg][k] = qd_meas_k;
+                    } else {
+                        self.swing_vel_pred[leg][k] += q_ddot * obs.dt;
+                    }
+                    let sat = self.cfg.swing_accel_integral_sat_nm.abs();
+                    let raw = self.cfg.swing_accel_integral_k
+                        * (self.swing_vel_pred[leg][k] - qd_meas_k);
+                    if sat > 0.0 { raw.clamp(-sat, sat) } else { raw }
+                } else {
+                    0.0
+                };
 
                 let q_plan = obs.target_q.legs[leg][k];
                 let qd_plan = if obs.dt > 1e-6 {
@@ -714,6 +742,7 @@ impl WbcLayer {
                     WbcOutput::Torque => {
                         tau + self.cfg.joint_kp * (q_plan - q_meas)
                             + self.cfg.joint_kd * (qd_plan - qd_meas)
+                            + tau_int
                     }
                     // 位置・速度出力では関節のループを Plant 側が持って
                     // いるので、ここで足すと二重になる。
@@ -731,6 +760,10 @@ impl WbcLayer {
                     torque_nm: tau_out,
                 };
             }
+        }
+
+        for leg in 0..4 {
+            self.was_swing[leg] = !obs.stance[leg];
         }
 
         WbcPlan {

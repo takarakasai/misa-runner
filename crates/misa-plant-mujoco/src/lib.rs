@@ -87,6 +87,13 @@ pub struct SimOptions {
     /// 既定の 2 ms だと使える `kv` が位置保持に要る値を下回り、支えきれずに
     /// 沈むか、`kv` を上げると発散する。刻みを半分にすると使える `kv` が倍になる。
     pub timestep_s: Option<f64>,
+    /// 足を「接地」と報告する垂直力の閾値 [N]。
+    ///
+    /// MuJoCo は接触の有無を幾何で知っているが、**かすっただけの遊脚を
+    /// 接地と報告すると WBC の硬い接地拘束が壊れる**。articara の
+    /// `ContactDrivenPhase` と同じく力で切る（あちらは 5 N）。0 以下なら
+    /// 幾何の接触そのまま。
+    pub contact_threshold_n: f64,
     /// 接地を見る足リンク。並びは脚の順。
     pub feet: Vec<String>,
     /// 胴体リンク。姿勢と角速度をここから読む。
@@ -106,6 +113,7 @@ impl Default for SimOptions {
             home: Vec::new(),
             friction: None,
             timestep_s: None,
+            contact_threshold_n: 5.0,
             feet: ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
                 .iter()
                 .map(|s| s.to_string())
@@ -124,7 +132,10 @@ pub struct MujocoPlant {
     /// 軸 → `RobotModel` の関節添字。**組み立て時に 1 回だけ引く。**
     joint_idx: Vec<usize>,
     feet: Vec<String>,
+    contact_threshold_n: f64,
     root_link: String,
+    /// 前周期の胴体速度（世界座標）と時刻。加速度計を差分で作るため。
+    prev_base_vel_world: Option<([f64; 3], f64)>,
     /// 制御モードで切り替えるゲイン。**同じ `actuator_kv` の欄を、位置と
     /// 速度で違う意味に使う**ので、両方を控えて毎周期入れ直す。
     position_kv: f64,
@@ -252,7 +263,9 @@ impl MujocoPlant {
             caps,
             joint_idx,
             feet: opts.feet.clone(),
+            contact_threshold_n: opts.contact_threshold_n,
             root_link: opts.root_link.clone(),
+            prev_base_vel_world: None,
             position_kv: opts.actuator_kv,
             velocity_kv: opts.velocity_kv,
             frames_per_tick,
@@ -476,16 +489,31 @@ impl Plant for MujocoPlant {
         let r_wb = nalgebra::Rotation3::from_euler_angles(rpy[0], rpy[1], rpy[2]);
         let gyro_body = r_wb.transpose() * nalgebra::Vector3::from(gyro_world);
         let gyro = [gyro_body.x, gyro_body.y, gyro_body.z];
-        // **真の加速度計ではない。** 重力を胴体座標へ回しただけで、並進加速
-        // は入っていない。姿勢しか使っていない現状では足りるが、加速度を
-        // 使う制御を入れるなら、モデルに IMU サイトを足して
-        // `MujocoSim::imu_readings` から取ること。
-        let (sr, cr) = rpy[0].sin_cos();
-        let (sp, cp) = rpy[1].sin_cos();
+        // 加速度計。**モデルに IMU サイトが無い**ので、胴体速度（世界座標）
+        // の差分で並進加速度を作り、重力を足して胴体座標へ回す
+        // （実機のストラップダウン IMU と同じ約束: 重力込み・胴体座標）。
+        // 最初の周期は差分が取れないので重力だけ。
+        let v_world = self
+            .sim
+            .body_world_linear_velocity(&self.root_link)
+            .unwrap_or([0.0; 3]);
+        let a_world = match self.prev_base_vel_world {
+            Some((v0, t0)) if frame.time > t0 => {
+                let inv = 1.0 / (frame.time - t0);
+                nalgebra::Vector3::new(
+                    (v_world[0] - v0[0]) * inv,
+                    (v_world[1] - v0[1]) * inv,
+                    (v_world[2] - v0[2]) * inv,
+                )
+            }
+            _ => nalgebra::Vector3::zeros(),
+        };
+        self.prev_base_vel_world = Some((v_world, frame.time));
+        let accel_body = r_wb.transpose() * (a_world + nalgebra::Vector3::new(0.0, 0.0, G));
         obs.imu = Some(Imu {
             rpy_rad: rpy,
             gyro_rad_s: gyro,
-            accel_m_s2: [-sp * G, sr * cp * G, cr * cp * G],
+            accel_m_s2: [accel_body.x, accel_body.y, accel_body.z],
             age: std::time::Duration::ZERO,
         });
 
@@ -493,16 +521,32 @@ impl Plant for MujocoPlant {
         for c in obs.contacts.iter_mut() {
             *c = Some(false);
         }
-        for contact in self.sim.contacts() {
-            if contact.is_self_collision() {
-                continue;
+        if self.contact_threshold_n > 0.0 && self.feet.len() == 4 {
+            // **力で切る。** 幾何の接触は遊脚がかすっただけでも立つ。
+            let feet: [&str; 4] = [
+                self.feet[0].as_str(),
+                self.feet[1].as_str(),
+                self.feet[2].as_str(),
+                self.feet[3].as_str(),
+            ];
+            let fz = self.sim.contact_force_per_foot(&feet);
+            for (i, f) in fz.iter().enumerate() {
+                if let Some(slot) = obs.contacts.get_mut(i) {
+                    *slot = Some(*f > self.contact_threshold_n);
+                }
             }
-            for (i, foot) in self.feet.iter().enumerate() {
-                let hit = contact.body1.eq_ignore_ascii_case(foot)
-                    || contact.body2.eq_ignore_ascii_case(foot);
-                if hit {
-                    if let Some(slot) = obs.contacts.get_mut(i) {
-                        *slot = Some(true);
+        } else {
+            for contact in self.sim.contacts() {
+                if contact.is_self_collision() {
+                    continue;
+                }
+                for (i, foot) in self.feet.iter().enumerate() {
+                    let hit = contact.body1.eq_ignore_ascii_case(foot)
+                        || contact.body2.eq_ignore_ascii_case(foot);
+                    if hit {
+                        if let Some(slot) = obs.contacts.get_mut(i) {
+                            *slot = Some(true);
+                        }
                     }
                 }
             }

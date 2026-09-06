@@ -227,6 +227,13 @@ impl Controller {
     pub fn observe_body(&mut self, body: &crate::estimator::BodyState) {
         // **角速度は接地に依らず入る。** 空中相でも姿勢は測れている。
         self.observed_omega_world = body.angular_velocity_world;
+        // 高さも同じ理由で渡す（[`crate::config::GaitTuning::mpc_observe_pose`]）。
+        // 接地足が無い周期は `None` → MPC は公称高さへ戻る。
+        self.gait.set_body_height_observed(if self.cfg.gait.mpc_observe_pose {
+            body.height_m
+        } else {
+            None
+        });
         let Some(v) = body.velocity_world else { return };
         self.observed_v_world = v;
         self.gait.set_body_state_observed(v, body.angular_velocity_world);
@@ -470,8 +477,12 @@ impl Controller {
         let v = self.ramp_velocity(want, dt);
         self.apply_gait_tune(&cmd.gait_tune);
         self.gait.set_velocity_cmd(velocity_cmd(v[0], v[1], v[2]));
-        self.gait
-            .set_body_attitude_observed(attitude_rad[0], attitude_rad[1]);
+        // **姿勢の観測は SRBD MPC にも渡す**（quadruped-gait 側で現在状態に
+        // 入り、参照は水平のまま）。切れるようにしてあるのは効きを測るため。
+        if self.cfg.gait.mpc_observe_pose {
+            self.gait
+                .set_body_attitude_observed(attitude_rad[0], attitude_rad[1]);
+        }
         let out = self.gait.tick(dt);
         if !out.all_reachable() {
             log::warn!("IK が届かない脚があります（姿勢がクランプされました）");

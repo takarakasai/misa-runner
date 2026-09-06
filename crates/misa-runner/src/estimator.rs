@@ -30,10 +30,15 @@
 
 use nalgebra as na;
 
+use legged_estimation::{LinearKalmanEstimator, LinearKalmanInputs};
 use quadruped_gait::{foot_jacobian_body, forward_leg_kinematics, KinematicsConfig};
 
+use crate::config::EstimatorKind;
 use crate::jointvec::JointVec;
 use crate::robot::Robot;
+
+/// 重力 [m/s²]。
+const G: f64 = 9.806_65;
 
 /// 接地足から測った胴体の状態。**接地足が 1 本も無ければ全部 `None`。**
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -55,32 +60,55 @@ pub struct BodyState {
     pub stance_count: usize,
 }
 
-/// 脚オドメトリ。**状態を持たない**（毎周期の観測だけで決まる）。
+/// 脚オドメトリ（＋任意で LKF）。
+///
+/// 脚オドメトリは**状態を持たない**（毎周期の観測だけで決まる）。
+/// [`EstimatorKind::Kalman`] のときだけ `kalman` に legged_control の
+/// 18 状態 LKF を持ち、高さと速度をそちらから出す。**計画に対する位置誤差
+/// は常に脚オドメトリ**（LKF は計画を知らない）。
 #[derive(Debug, Clone)]
 pub struct BodyEstimator {
     kin: KinematicsConfig,
     /// IK 出力 → モデル符号の変換表。`q_model = q_ik * sign` なので、
     /// 逆向きも同じ式（`sign` は ±1）。
     signs: [[f64; 3]; 4],
+    kalman: Option<LinearKalmanEstimator>,
+    /// LKF を脚オドメトリの高さで一度張ったか。**張らないと胴体が原点
+    /// （z = 0 = 地面）から始まり、収束するまで高さが嘘になる。**
+    kalman_seeded: bool,
 }
 
 impl BodyEstimator {
-    pub fn new(robot: &Robot) -> Self {
+    pub fn new(robot: &Robot, kind: EstimatorKind) -> Self {
         Self {
             kin: robot.kin.clone(),
             signs: robot.signs,
+            kalman: match kind {
+                EstimatorKind::LegOdometry => None,
+                EstimatorKind::Kalman => Some(LinearKalmanEstimator::new()),
+            },
+            kalman_seeded: false,
         }
     }
 
-    /// 1 周期ぶん。`gyro_body` は IMU の角速度（**胴体座標系**）。
+    /// 歩容が止まったら LKF を捨てる。**立ち上がり・伏せの間は足が世界に
+    /// 対して止まっていない**ので、そこで積んだ状態は次の歩容の邪魔になる。
+    pub fn reset(&mut self) {
+        self.kalman_seeded = false;
+    }
+
+    /// 1 周期ぶん。`gyro_body` は IMU の角速度、`accel_body` は加速度計
+    /// （**重力込み・胴体座標系**、無ければ `None`）。どちらも胴体座標系。
     pub fn estimate(
-        &self,
+        &mut self,
         measured_q: &JointVec,
         measured_qd: &JointVec,
         target_q: &JointVec,
         attitude_rad: [f64; 3],
         gyro_body: [f64; 3],
+        accel_body: Option<[f64; 3]>,
         stance: [bool; 4],
+        dt: f64,
     ) -> BodyState {
         let [roll, pitch, yaw] = attitude_rad;
         let r_wb = na::Rotation3::from_euler_angles(roll, pitch, yaw);
@@ -91,8 +119,67 @@ impl BodyEstimator {
             stance_count: stance.iter().filter(|s| **s).count(),
             ..BodyState::default()
         };
+        let odom = self.leg_odometry(measured_q, measured_qd, target_q, &r_wb, &omega_body, stance, &mut out);
+
+        if let Some(kf) = self.kalman.as_mut() {
+            // 足 4 本ぶんの運動学（遊脚も入れる。LKF が共分散で重みを落とす）。
+            let mut p_world = [na::Vector3::zeros(); 4];
+            let mut v_world = [na::Vector3::zeros(); 4];
+            for slot in 0..4 {
+                let kin = self.kin.legs()[slot];
+                let s = self.signs[slot];
+                let q: Vec<f64> = (0..3).map(|k| measured_q.legs[slot][k] * s[k]).collect();
+                let qd = na::Vector3::new(
+                    measured_qd.legs[slot][0] * s[0],
+                    measured_qd.legs[slot][1] * s[1],
+                    measured_qd.legs[slot][2] * s[2],
+                );
+                let p = forward_leg_kinematics(kin, q[0], q[1], q[2]);
+                let j = foot_jacobian_body(kin, q[0], q[1], q[2]);
+                p_world[slot] = r_wb * p;
+                // 足の胴体原点に対する速度（世界向き）。
+                v_world[slot] = r_wb * (omega_body.cross(&p) + j * qd);
+            }
+            if !self.kalman_seeded {
+                // 高さは脚オドメトリ、水平位置は原点。接地足が無ければ
+                // 公称立ち高さで張る。
+                let h = odom.unwrap_or(-self.kin.legs()[0].nominal_foot_body.z);
+                let body = na::Vector3::new(0.0, 0.0, h);
+                let feet: [na::Vector3<f64>; 4] = std::array::from_fn(|i| body + p_world[i]);
+                kf.reset(body, &feet);
+                self.kalman_seeded = true;
+            }
+            // 重力を抜いて世界座標へ。加速度計が無い Plant では 0（＝等速予測）。
+            let accel_world = accel_body
+                .map(|a| r_wb * na::Vector3::new(a[0], a[1], a[2]) - na::Vector3::new(0.0, 0.0, G))
+                .unwrap_or_else(na::Vector3::zeros);
+            let est = kf.update(&LinearKalmanInputs {
+                dt,
+                accel_world,
+                foot_pos_world_offset: &p_world,
+                foot_vel_world: &v_world,
+                contact_flag: stance,
+            });
+            out.velocity_world = Some(est.body_vel_world);
+            out.height_m = Some(est.body_pos_world.z);
+        }
+        out
+    }
+
+    /// 脚オドメトリ。`out` の高さ・速度・位置誤差を埋め、接地足からの高さを
+    /// 返す（接地足が無ければ何も埋めず `None`）。
+    fn leg_odometry(
+        &self,
+        measured_q: &JointVec,
+        measured_qd: &JointVec,
+        target_q: &JointVec,
+        r_wb: &na::Rotation3<f64>,
+        omega_body: &na::Vector3<f64>,
+        stance: [bool; 4],
+        out: &mut BodyState,
+    ) -> Option<f64> {
         if out.stance_count == 0 {
-            return out;
+            return None;
         }
 
         let mut foot_meas = na::Vector3::zeros();
@@ -133,7 +220,7 @@ impl BodyEstimator {
         out.velocity_world = Some(r_wb * (v_body / n));
         out.height_m = Some(-foot_meas_world.z);
         out.position_error_world = Some(foot_meas_world - foot_plan_world);
-        out
+        out.height_m
     }
 }
 
@@ -217,9 +304,9 @@ mod tests {
     #[test]
     fn standing_on_the_plan_reports_no_error_and_the_stance_height() {
         let r = robot();
-        let e = BodyEstimator::new(&r);
+        let mut e = BodyEstimator::new(&r, EstimatorKind::LegOdometry);
         let q = stance_pose(&r);
-        let s = e.estimate(&q, &JointVec::zeros(), &q, [0.0; 3], [0.0; 3], [true; 4]);
+        let s = e.estimate(&q, &JointVec::zeros(), &q, [0.0; 3], [0.0; 3], None, [true; 4], 0.005);
         assert_eq!(s.stance_count, 4);
         let err = s.position_error_world.unwrap();
         assert!(err.norm() < 1e-9, "{err:?}");
@@ -233,14 +320,14 @@ mod tests {
     #[test]
     fn a_folded_leg_shows_up_as_a_height_error() {
         let r = robot();
-        let e = BodyEstimator::new(&r);
+        let mut e = BodyEstimator::new(&r, EstimatorKind::LegOdometry);
         let plan = stance_pose(&r);
         let mut q = plan;
         for leg in 0..4 {
             q.legs[leg][1] += 0.05;
             q.legs[leg][2] -= 0.10;
         }
-        let s = e.estimate(&q, &JointVec::zeros(), &plan, [0.0; 3], [0.0; 3], [true; 4]);
+        let s = e.estimate(&q, &JointVec::zeros(), &plan, [0.0; 3], [0.0; 3], None, [true; 4], 0.005);
         let h = s.height_m.unwrap();
         let err = s.position_error_world.unwrap();
         assert!(h < 0.2, "畳んだのに高さが {h}");
@@ -254,14 +341,14 @@ mod tests {
     #[test]
     fn extending_every_leg_reads_as_the_body_rising() {
         let r = robot();
-        let e = BodyEstimator::new(&r);
+        let mut e = BodyEstimator::new(&r, EstimatorKind::LegOdometry);
         let q = stance_pose(&r);
         let mut qd = JointVec::zeros();
         for leg in 0..4 {
             qd.legs[leg][1] = -0.2;
             qd.legs[leg][2] = 0.4;
         }
-        let s = e.estimate(&q, &qd, &q, [0.0; 3], [0.0; 3], [true; 4]);
+        let s = e.estimate(&q, &qd, &q, [0.0; 3], [0.0; 3], None, [true; 4], 0.005);
         let v = s.velocity_world.unwrap();
         assert!(v.z > 0.01, "伸ばしているのに上がっていない: {v:?}");
         assert!(v.x.abs() < 1e-6 && v.y.abs() < 1e-6, "横に動いている: {v:?}");
@@ -293,9 +380,9 @@ mod tests {
     #[test]
     fn a_flight_phase_reports_nothing() {
         let r = robot();
-        let e = BodyEstimator::new(&r);
+        let mut e = BodyEstimator::new(&r, EstimatorKind::LegOdometry);
         let q = stance_pose(&r);
-        let s = e.estimate(&q, &JointVec::zeros(), &q, [0.0; 3], [0.1, 0.0, 0.0], [false; 4]);
+        let s = e.estimate(&q, &JointVec::zeros(), &q, [0.0; 3], [0.1, 0.0, 0.0], None, [false; 4], 0.005);
         assert_eq!(s.stance_count, 0);
         assert!(s.height_m.is_none());
         assert!(s.velocity_world.is_none());
@@ -307,7 +394,7 @@ mod tests {
     #[test]
     fn the_gyro_is_rotated_into_the_world_frame() {
         let r = robot();
-        let e = BodyEstimator::new(&r);
+        let mut e = BodyEstimator::new(&r, EstimatorKind::LegOdometry);
         let q = stance_pose(&r);
         // ヨー 90°。胴体 x 軸まわりの回転は世界 y 軸まわりになる。
         let s = e.estimate(
@@ -316,9 +403,30 @@ mod tests {
             &q,
             [0.0, 0.0, std::f64::consts::FRAC_PI_2],
             [1.0, 0.0, 0.0],
+            None,
             [true; 4],
+            0.005,
         );
         let w = s.angular_velocity_world;
         assert!(w.x.abs() < 1e-9 && (w.y - 1.0).abs() < 1e-9, "{w:?}");
+    }
+
+    /// **LKF は脚オドメトリの高さで張られ、止まって立っていれば同じ答えを出す。**
+    /// 加速度計は重力だけ（胴体座標で +G の z）。
+    #[test]
+    fn the_kalman_filter_agrees_with_leg_odometry_when_standing_still() {
+        let r = robot();
+        let mut e = BodyEstimator::new(&r, EstimatorKind::Kalman);
+        let q = stance_pose(&r);
+        let want = crate::config::AppConfig::default().gait.stance_height_m;
+        let mut s = BodyState::default();
+        for _ in 0..200 {
+            s = e.estimate(&q, &JointVec::zeros(), &q, [0.0; 3], [0.0; 3], Some([0.0, 0.0, G]), [true; 4], 0.005);
+        }
+        let h = s.height_m.unwrap();
+        assert!((h - want).abs() < 1e-3, "LKF の高さ {h} が立ち高さ {want} と違う");
+        assert!(s.velocity_world.unwrap().norm() < 1e-3, "{:?}", s.velocity_world);
+        // 計画に対する誤差は脚オドメトリのまま。
+        assert!(s.position_error_world.unwrap().norm() < 1e-9);
     }
 }

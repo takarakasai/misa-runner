@@ -400,6 +400,19 @@ pub struct WbcConfig {
     /// LKMTech は MIT を持たないので、**ホスト側で足して 1 本のトルクに
     /// してから出す**（`τ = τ_WBC + kp·(q*−q) + kd·(q̇*−q̇)`）。
     /// 両方 0 にすれば純粋なトルクになる。
+    ///
+    /// # `joint_kd` は legged_control の 3 をそのまま使ってはいけない
+    ///
+    /// あちらの kd=3 は**モータ内 2.5 kHz** の PD のもの。ここは制御周期
+    /// （200 Hz）で回るホスト側の PD なので、脚リンクの慣性（1e-3 kg·m²
+    /// 程度）に対して kd·dt/I が 2 を超えて**離散の微分項が発振する**。
+    /// 実測（MuJoCo、立ち止まり）: kd=3 では起動した最初の周期から τ が
+    /// ±18 N·m で毎周期符号を替え、上限で削られた結果として胴体が 0.20 →
+    /// 0.03 m まで沈んだ。kd=0.3 以下なら τ_WBC が Plant の実トルクと
+    /// 一致して 0.200 m に立つ。5 走行の平均追従率は kd=0 で 1.21（横ずれ
+    /// 0.83 m・ヨー 4.8°）、kd=0.3 で 1.18（0.46 m・0.4°）、kd=1.0 で 0.96
+    /// （ヨー −44°）。**既定は 0.3。** モータ側に PD がある機体（MIT モード）
+    /// で初めて 3 に戻せる。
     pub joint_kp: f64,
     pub joint_kd: f64,
     /// 立脚の関節空間 PD ゲイン。**既定は 0（＝タスクを置かない）。**
@@ -518,14 +531,18 @@ pub struct WbcConfig {
     /// 計画より早い相を渡せないと trot は壊れる（articara の WBC 検証も
     /// `ContactDrivenPhase` で同じことをしている）。
     ///
-    /// **足りないのは力の閾値。** あちらは 5 N を超えたときだけ立脚へ倒すが、
-    /// [`misa_core::Observation::contacts`] は真偽値しか持たないので、遊脚が
-    /// かすっただけでも立脚に倒れる。MuJoCo の trot で実測すると、進む量が
-    /// 9.50 → 8.43 m、ヨーのずれが 29° → 61° と**悪化した**。
-    ///
-    /// **足裏に力を出せるセンサが付いたら、観測の語彙に垂直力を足して
-    /// 閾値付きで倒すこと。** そこまでは計画をそのまま使う。
+    /// **足りなかったのは力の閾値。** あちらは 5 N を超えたときだけ立脚へ
+    /// 倒すが、[`misa_core::Observation::contacts`] は真偽値しか持たないので、
+    /// 幾何の接触をそのまま入れると遊脚がかすっただけでも立脚に倒れた
+    /// （MuJoCo の trot で進む量 9.50 → 8.43 m、ヨー 29° → 61°）。
+    /// 2026-09-06 から MuJoCo の Plant は [`Self::contact_force_threshold_n`]
+    /// で切った真偽値を報告するので、この問題は無い。既定が無効なのは、
+    /// 実機に足裏センサが無く（`None` が並んで計画がそのまま通る）、
+    /// sim と実機で挙動を揃えるため。
     pub use_measured_contact: bool,
+    /// 足を接地と報告する垂直力の閾値 [N]。**力を測れる Plant（MuJoCo）
+    /// だけが使う。** articara の `ContactDrivenPhase` と同じ 5 N。
+    pub contact_force_threshold_n: f64,
     /// MPC の接地力の予測を鈍らせる係数（`鈍 = α·新 + (1−α)·前`）。
     /// `1.0` で鈍らせない。**MPC 歩容のときだけ効く。**
     ///
@@ -546,6 +563,23 @@ pub struct WbcConfig {
     /// 離れていく。`q̇* = q̇_計画 + q̈·dt + kp·(q_計画 − q_実測)` の kp。
     /// 位置・トルク出力では使わない。
     pub velocity_track_kp: f64,
+    /// 遊脚の**加速度誤差積分**（Grandia 2022 式 39–40）のゲイン
+    /// [N·m·s/rad]。**0 で無効（既定）。`output = "torque"` のときだけ効く。**
+    ///
+    /// WBC は加速度 q̈ を出すが、モデル誤差・摩擦のぶん脚は解いた通りに
+    /// 加速しない。離地の瞬間の q̇ に WBC の q̈ を積んだ「解通りなら今こう
+    /// 動いているはず」の速度と実測との差にゲインを掛けて τ に足す:
+    ///
+    /// ```text
+    ///   τ_i += -K · (q̇_i − q̇_i(t_sw) − ∫_{t_sw}^{t} q̈_i,wbc dt)
+    /// ```
+    ///
+    /// 遊脚だけ・離地でリセット・飽和付き。立脚には置かない（接地拘束の
+    /// 下で速度を追わせると接地力と喧嘩する）。
+    pub swing_accel_integral_k: f64,
+    /// 上の項の飽和 [N·m]。積分なので外れ値を溜め込む。0.5 N·m は hip の
+    /// 定格 1.5 の 1/3。
+    pub swing_accel_integral_sat_nm: f64,
 }
 
 impl Default for WbcConfig {
@@ -562,7 +596,7 @@ impl Default for WbcConfig {
             aux_kp: 100.0,
             aux_kd: 10.0,
             joint_kp: 5.0,
-            joint_kd: 3.0,
+            joint_kd: 0.3,
             stance_kp: 0.0,
             stance_kd: 0.0,
             attitude_kp: 60.0,
@@ -582,9 +616,12 @@ impl Default for WbcConfig {
             max_base_accel_lin: 10.0,
             max_base_accel_ang: 100.0,
             use_measured_contact: false,
+            contact_force_threshold_n: 5.0,
             grf_smoothing: 0.3,
             prox_weight: 1e-3,
             velocity_track_kp: 20.0,
+            swing_accel_integral_k: 0.0,
+            swing_accel_integral_sat_nm: 0.5,
         }
     }
 }
@@ -650,6 +687,15 @@ impl WbcConfig {
 /// ものから MPC の予測に変わる（[`crate::wbc`]）。そこが入る唯一の効き目で、
 /// WBC を無効にしたまま MPC を選んでも、接地力の予測は前置トルクにしか
 /// 使われない。
+/// 胴体の状態推定の方式。[`GaitTuning::estimator`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EstimatorKind {
+    #[default]
+    LegOdometry,
+    Kalman,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GaitControllerKind {
@@ -881,6 +927,28 @@ pub struct GaitTuning {
     /// 粗い刻みで先を見る）。
     #[serde(default = "default_mpc_dt_per_step")]
     pub mpc_dt_per_step: f64,
+    /// MPC に**推定した胴体の高さと姿勢**を観測として渡すか。
+    ///
+    /// quadruped-gait の SRBD MPC は既定で「z = 公称立ち高さ、roll = pitch = 0」
+    /// を現在状態に置き、参照もそこから作るので、高さと姿勢の誤差が**構造的に
+    /// 見えない**（MuJoCo の trot でトルク出力が 0.06 m まで沈んでも MPC は
+    /// 0.20 m に居るつもりだった）。legged_control は推定器の全状態を毎 tick
+    /// MPC に渡す（`setCurrentObservation`）。これを true にすると脚
+    /// オドメトリの高さと IMU の roll/pitch が MPC の現在状態に入り、参照は
+    /// 公称高さ・水平のままなので誤差として効く。
+    #[serde(default = "default_true")]
+    pub mpc_observe_pose: bool,
+    /// 胴体の状態（高さ・速度）をどう推定するか。
+    ///
+    /// - `leg_odometry`（既定）: 接地足の運動学だけ。状態を持たず毎周期の
+    ///   観測で決まる。IMU は姿勢と角速度しか使わない。
+    /// - `kalman`: legged_control の 18 状態 LKF
+    ///   （`legged_estimation::LinearKalmanEstimator`）。IMU の加速度で予測し、
+    ///   足の運動学で補正する。接地していない足は共分散を 100 倍にして
+    ///   ほとんど見ない。**加速度計が要る** — MuJoCo は胴体速度の差分で
+    ///   作る。計画に対する位置誤差は変わらず脚オドメトリで出す。
+    #[serde(default)]
+    pub estimator: EstimatorKind,
     /// 接地点の捕捉点フィードバックのゲイン [s]。`0` で無効。
     ///
     /// **硬い PD（kp ≥ 100 / kv ≤ 1.2）では正帰還になることが
@@ -983,6 +1051,10 @@ fn default_max_wz() -> f64 {
     0.6
 }
 /// quadruped-gait の `SrbdMpcConfig::default()` と同じ。
+fn default_true() -> bool {
+    true
+}
+
 fn default_mpc_horizon_steps() -> usize {
     10
 }
@@ -1031,6 +1103,8 @@ impl Default for GaitTuning {
             mpc_horizon_steps: default_mpc_horizon_steps(),
             mpc_dt_per_step: default_mpc_dt_per_step(),
             mpc_capture_point_gain_s: default_mpc_capture_point_gain_s(),
+            mpc_observe_pose: true,
+            estimator: EstimatorKind::LegOdometry,
             velocity_ramp_s: default_velocity_ramp_s(),
             velocity_ramp_stop_s: default_velocity_ramp_stop_s(),
             stop_settle_s: default_stop_settle_s(),
