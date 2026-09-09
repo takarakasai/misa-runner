@@ -570,7 +570,7 @@ pub fn run(
     };
     // **脚オドメトリは WBC の有無に依らず回す。** MPC 歩容も同じ推定を
     // 使うので、出どころは 1 か所（[`crate::estimator`]）。
-    let mut estimator = crate::estimator::BodyEstimator::new(&robot, cfg.gait.estimator);
+    let mut estimator = crate::estimator::BodyEstimator::with_passive_scale(&robot, cfg.gait.estimator, cfg.gait.contact_passive_scale);
     // **Plant が名乗らないモードでは出さない。** 実機のトルク制御は、
     // トルク定数を書くまで単位が食い違う（`AppConfig::torque_unit_mismatch`）。
     // ここで止めないと、N·m が電流 (A) として 12 軸ぶん線に乗る。
@@ -711,6 +711,24 @@ pub fn run(
         let attitude = obs.imu.map(|i| i.rpy_rad).unwrap_or([0.0; 3]);
 
         let mut out = controller.tick(&cmd, &measured, attitude, period.as_secs_f64());
+        // **関節トルクから接地を推定する**（足裏センサが無い機体の唯一の道）。
+        // 推定できた足だけ観測を上書きする。
+        let measured_qd = crate::estimator::velocities_from(&obs);
+        if cfg.gait.contact_from_torque {
+            let fz = estimator.foot_forces_from_torque(
+                &measured,
+                &measured_qd,
+                &crate::estimator::torques_from(&obs),
+                attitude,
+                period.as_secs_f64(),
+            );
+            let flags = estimator.contacts_from_forces(&fz, cfg.wbc.contact_force_threshold_n);
+            for i in 0..4 {
+                if let (Some(c), Some(slot)) = (flags[i], obs.contacts.get_mut(i)) {
+                    *slot = Some(c);
+                }
+            }
+        }
         // **計画した立脚を実測の接地で直す。** WBC の「立脚足が滑らない」は
         // 硬い制約なので、接地していない足を接地と信じると解が壊れる。
         if cfg.wbc.use_measured_contact {
@@ -719,7 +737,6 @@ pub fn run(
 
         // **胴体の状態は歩容の出力が出てから測る**（立脚フラグと計画した
         // 関節角が要る）。測った結果は歩容へ返して**次の周期**で使わせる。
-        let measured_qd = crate::estimator::velocities_from(&obs);
         let gyro = obs.imu.map(|i| i.gyro_rad_s).unwrap_or([0.0; 3]);
         if controller.state() != State::Active {
             estimator.reset();

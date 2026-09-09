@@ -935,6 +935,50 @@ misa-run sim --robot robots/testquad.toml --gait-controller mpc --wbc-output pos
 estimator = "kalman"   # leg_odometry（既定）| kalman
 ```
 
+### 関節トルクから接地を推定する（センサレス）
+
+```toml
+[gait]
+contact_from_torque = true     # 既定 false
+contact_passive_scale = 0.5    # 受動動力学（armature / damping / friction）を引く倍率
+[wbc]
+contact_force_threshold_n = 5.0
+```
+
+足裏センサが無い機体で `use_measured_contact` / `estimator_use_measured_contact`
+を効かせる道。胴体を固定した脚の逆動力学（RNEA）と関節の受動動力学を実測トルク
+から引き、`f = −J⁻ᵀ (τ − τ_id)` で足の垂直力を出す。閾値を超えたら接地
+（離地は 6 割を切ったとき — ヒステリシス）。legged_control が推定接地力で
+接地を判定するのと同じ考え方。**観測の接地フラグを上書きする**ので、MuJoCo
+でも推定のほうが使われ、`sim` は終わりに MuJoCo の接地との一致率と垂直力の
+誤差 RMS を出す。
+
+MuJoCo の namiashi（trot 0.80）での一致率:
+
+| 引くもの | 位置出力 | トルク出力 |
+|---|---|---|
+| 重力だけ（準静的） | 97〜98 % | **78 %**（遊脚の加速のトルクを接地と誤る。18〜20 %） |
+| 逆動力学 + 受動動力学 ×1.0 | 87 % | 93〜98 % |
+| 逆動力学 + 受動動力学 **×0.5**（既定） | **96〜98 %** | **94〜97 %** |
+
+推定した接地を WBC と推定器に使ったときの 5 走行（2.4 kg、MPC）:
+
+| | 追従率 | trot 横ずれ | trot ヨー |
+|---|---|---|---|
+| トルク出力（接地は計画） | 1.04 | 0.42 m | 0.8° |
+| トルク出力 + MuJoCo の接地（答え） | 1.03 | 0.41 m | 1.8° |
+| **トルク出力 + トルクから推定した接地** | 1.06 | **0.36 m** | 0.8° |
+| 位置出力 + トルクから推定した接地 | 1.01 | 1.6 m | 12.9° |
+
+トルク出力では**答えの接地を使ったのと同じ結果**が出る。位置出力では悪化する
+（横ずれ 0.65 → 1.6 m）ので、推定した接地は**トルク出力で使う**。
+
+なぜ半分が合うかは分かっていない（q̈ を差分で作る遅れ、MuJoCo の陰的な減衰の
+扱いが候補）。**実機ではモータの減衰・摩擦を同定して決めること。** 実機で
+使うにはトルクが読めること（namiashi は `torque_constant_nm_per_a`）が前提で、
+読めない軸のある脚は推定せず（`None`）、Plant の値のまま。
+`MISA_CONTACT_TRACE=<脚 0..3>` で τ・τ_id・q̇・q̈・推定 fz の内訳が毎周期出る。
+
 `[gait] estimator_use_measured_contact = true` で、推定器の立脚に（接地を
 測れる Plant では）実測を使う。`[gait] mpc_observe_velocity = false` で MPC の
 速度の閉ループを切れる（横ずれが悪化するので比較用）。

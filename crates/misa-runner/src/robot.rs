@@ -43,6 +43,10 @@ pub struct Robot {
     /// そこで丸めるのが正しい。歩容がここを超える要求を出していたら
     /// `dump` が知らせる。
     pub rate_limits: BTreeMap<String, f64>,
+    /// 関節の受動動力学（`[joint.dynamics]`）: `(armature, damping, friction)`。
+    /// MuJoCo にはそのまま渡っていて、**misarta の動力学モデルには入っていない**
+    /// ので、トルクから接地力を推定するときにこちらで足す。
+    pub joint_dynamics: BTreeMap<String, (f64, f64, f64)>,
     /// モデルが宣言する定格トルク [N·m]（`[joint.limit] effort`）。宣言の
     /// 無い関節は入らない。
     ///
@@ -156,6 +160,12 @@ impl Robot {
             .map_err(|errs| format!("脚の運動学を自動検出できません: {errs:?}"))?;
         let signs = joint_signs(&model, &kin)?;
 
+        let joint_dynamics = parsed
+            .file
+            .joint
+            .iter()
+            .map(|j| (j.name.clone(), (j.dynamics.armature, j.dynamics.damping, j.dynamics.friction)))
+            .collect();
         Ok(Self {
             model,
             kin,
@@ -167,6 +177,7 @@ impl Robot {
             effort_limits,
             root_link,
             bad_meshes,
+            joint_dynamics,
         })
     }
 

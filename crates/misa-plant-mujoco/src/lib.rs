@@ -397,6 +397,20 @@ impl MujocoPlant {
             .collect()
     }
 
+    /// 足 4 本の**真の**垂直接地力 [N]（診断用。接地推定の答え合わせ）。
+    pub fn foot_forces(&self) -> Option<[f64; 4]> {
+        if self.feet.len() != 4 {
+            return None;
+        }
+        let feet: [&str; 4] = [
+            self.feet[0].as_str(),
+            self.feet[1].as_str(),
+            self.feet[2].as_str(),
+            self.feet[3].as_str(),
+        ];
+        Some(self.sim.contact_force_per_foot(&feet))
+    }
+
     /// **いま地面に触れている、足ではないリンクの名前。**
     ///
     /// 四脚が足以外で体重を支えていると、歩容が空振りしていても

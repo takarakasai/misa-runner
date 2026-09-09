@@ -31,6 +31,7 @@
 use nalgebra as na;
 
 use legged_estimation::{LinearKalmanEstimator, LinearKalmanInputs};
+use misarta::model::Model;
 use quadruped_gait::{foot_jacobian_body, forward_leg_kinematics, KinematicsConfig};
 
 use crate::config::EstimatorKind;
@@ -76,10 +77,55 @@ pub struct BodyEstimator {
     /// LKF を脚オドメトリの高さで一度張ったか。**張らないと胴体が原点
     /// （z = 0 = 地面）から始まり、収束するまで高さが嘘になる。**
     kalman_seeded: bool,
+    /// 固定ベースのモデル。**関節トルクから接地力を推定する**ときに、脚
+    /// リンク自身の重力トルクを差し引くのに使う（[`Self::foot_forces_from_torque`]）。
+    model: Model<f64>,
+    /// 脚 4 本 × 3 関節の、モデルの q / v の添字（`JOINT_NAMES` の順）。
+    leg_q_idx: [[usize; 3]; 4],
+    leg_v_idx: [[usize; 3]; 4],
+    /// 脚の関節の受動動力学 `(armature, damping, friction)`。misarta の RNEA に
+    /// 入っていないぶんを足す（MuJoCo には入っている）。
+    leg_dynamics: [[(f64, f64, f64); 3]; 4],
+    /// その倍率（[`crate::config::GaitTuning::contact_passive_scale`]）。
+    passive_scale: f64,
+    /// 前周期の関節速度と、鈍らせた関節加速度（接地力の推定で慣性項を引くため）。
+    prev_qd: Option<JointVec>,
+    qdd_filt: [[f64; 3]; 4],
+    /// 接地フラグのヒステリシス状態。
+    contact_flags: [Option<bool>; 4],
 }
 
 impl BodyEstimator {
     pub fn new(robot: &Robot, kind: EstimatorKind) -> Self {
+        Self::with_passive_scale(robot, kind, 0.5)
+    }
+
+    /// `passive_scale` は接地力の推定で受動動力学を引く倍率。
+    pub fn with_passive_scale(robot: &Robot, kind: EstimatorKind, passive_scale: f64) -> Self {
+        // 脚の関節をモデルの添字へ。無い関節は 0 番（= 根）に倒しておく —
+        // モデルの検証は `Robot::load` と WBC が済ませているので、ここでは
+        // 落とさない。
+        let by_name: std::collections::HashMap<&str, usize> = robot
+            .model
+            .joints
+            .iter()
+            .enumerate()
+            .map(|(i, j)| (j.name.as_str(), i))
+            .collect();
+        let mut leg_q_idx = [[0usize; 3]; 4];
+        let mut leg_v_idx = [[0usize; 3]; 4];
+        let mut leg_dynamics = [[(0.0, 0.0, 0.0); 3]; 4];
+        for (leg, names) in misa_hal::joint::JOINT_NAMES.iter().enumerate() {
+            for (k, name) in names.iter().enumerate() {
+                if let Some(&mi) = by_name.get(name) {
+                    leg_q_idx[leg][k] = robot.model.q_idx[mi];
+                    leg_v_idx[leg][k] = robot.model.v_idx[mi];
+                }
+                if let Some(d) = robot.joint_dynamics.get(*name) {
+                    leg_dynamics[leg][k] = *d;
+                }
+            }
+        }
         Self {
             kin: robot.kin.clone(),
             signs: robot.signs,
@@ -88,13 +134,140 @@ impl BodyEstimator {
                 EstimatorKind::Kalman => Some(LinearKalmanEstimator::new()),
             },
             kalman_seeded: false,
+            model: robot.model.clone(),
+            leg_q_idx,
+            leg_v_idx,
+            leg_dynamics,
+            passive_scale,
+            prev_qd: None,
+            qdd_filt: [[0.0; 3]; 4],
+            contact_flags: [None; 4],
         }
+    }
+
+    /// **関節トルクから足の接地力（世界 z 成分 [N]）を推定する。** 足裏
+    /// センサが無い機体で接地を知る唯一の道（legged_control も推定した接地力
+    /// が閾値を超えたら接地と見なす）。
+    ///
+    /// `τ_脚 = τ_id(q, q̇, q̈) − Jᵀ f`（`f` は地面が足に及ぼす力、胴体座標）と
+    /// 見て `f = −J⁻ᵀ (τ_脚 − τ_id)`。`τ_id` は**胴体を固定したときの脚の逆動力学**
+    /// （固定ベースのモデルで RNEA。重力 + 慣性力 + コリオリ）に、関節の受動
+    /// 動力学（`armature·q̈ + damping·q̇ + friction·sign(q̇)`。`[joint.dynamics]`。
+    /// MuJoCo にはあって misarta の RNEA には無い）を足したもの。q̈ は測った q̇ の
+    /// 差分を 20 ms で鈍らせたもの。
+    ///
+    /// # なぜ慣性項が要るか
+    ///
+    /// 重力だけ（準静的）で引くと、**トルク出力の遊脚を接地と誤る**。遊脚の
+    /// 直交空間タスク（350 / 37）が出す加速度のトルクが、そのまま「地面から
+    /// 押されている」に見えるため — MuJoCo の trot 0.80 で遊脚の 18〜20 % の
+    /// 周期を接地と言い、一致率 78 %。位置出力（アクチュエータの PD が
+    /// 出すトルクは小さい）では 97〜100 % だった。胴体の加速度は入っていない
+    /// （固定ベース）が、平地の歩行では脚の加速に比べて小さい。
+    ///
+    /// トルクが 1 軸でも読めていない脚、ヤコビアンが特異な脚（伸び切り）は
+    /// `None`。**符号はモデル（URDF）の関節座標系**で受ける — Plant の
+    /// `torque_nm` はその約束（MuJoCo はアクチュエータの出力、実機は
+    /// 電流 × Kt を符号表で直したもの）。
+    pub fn foot_forces_from_torque(
+        &mut self,
+        measured_q: &JointVec,
+        measured_qd: &JointVec,
+        tau: &[[Option<f64>; 3]; 4],
+        attitude_rad: [f64; 3],
+        dt: f64,
+    ) -> [Option<f64>; 4] {
+        let [roll, pitch, yaw] = attitude_rad;
+        let r_wb = na::Rotation3::from_euler_angles(roll, pitch, yaw);
+        // q̈: q̇ の差分を一次遅れ（20 ms）で鈍らせる。最初の周期は 0。
+        const QDD_TAU_S: f64 = 0.02;
+        let alpha = if dt > 0.0 { (dt / (QDD_TAU_S + dt)).clamp(0.0, 1.0) } else { 1.0 };
+        if let Some(prev) = self.prev_qd.as_ref().filter(|_| dt > 1e-6) {
+            for leg in 0..4 {
+                for k in 0..3 {
+                    let raw = (measured_qd.legs[leg][k] - prev.legs[leg][k]) / dt;
+                    self.qdd_filt[leg][k] += alpha * (raw - self.qdd_filt[leg][k]);
+                }
+            }
+        }
+        self.prev_qd = Some(*measured_qd);
+
+        let mut q = na::DVector::<f64>::zeros(self.model.nq);
+        let mut v = na::DVector::<f64>::zeros(self.model.nv);
+        let mut a = na::DVector::<f64>::zeros(self.model.nv);
+        for leg in 0..4 {
+            for k in 0..3 {
+                q[self.leg_q_idx[leg][k]] = measured_q.legs[leg][k];
+                v[self.leg_v_idx[leg][k]] = measured_qd.legs[leg][k];
+                a[self.leg_v_idx[leg][k]] = self.qdd_filt[leg][k];
+            }
+        }
+        let mut g = misarta::rnea::rnea(&self.model, q.as_slice(), v.as_slice(), a.as_slice());
+        for leg in 0..4 {
+            for k in 0..3 {
+                let (armature, damping, friction) = self.leg_dynamics[leg][k];
+                let vi = self.leg_v_idx[leg][k];
+                g[vi] += self.passive_scale
+                    * (armature * a[vi] + damping * v[vi] + friction * v[vi].signum() * (v[vi] != 0.0) as u8 as f64);
+            }
+        }
+
+        let mut out = [None; 4];
+        for slot in 0..4 {
+            let Some(t) = (0..3).map(|k| tau[slot][k]).collect::<Option<Vec<f64>>>() else {
+                continue;
+            };
+            let kin = self.kin.legs()[slot];
+            let s = self.signs[slot];
+            // IK 座標系へ（q も τ も同じ符号表で移る）。
+            let q_ik: Vec<f64> = (0..3).map(|k| measured_q.legs[slot][k] * s[k]).collect();
+            let rhs = na::Vector3::new(
+                -(t[0] - g[self.leg_v_idx[slot][0]]) * s[0],
+                -(t[1] - g[self.leg_v_idx[slot][1]]) * s[1],
+                -(t[2] - g[self.leg_v_idx[slot][2]]) * s[2],
+            );
+            let j = foot_jacobian_body(kin, q_ik[0], q_ik[1], q_ik[2]);
+            // Jᵀ f = −(τ − τ_g)
+            let Some(f_body) = j.transpose().lu().solve(&rhs) else { continue };
+            if !f_body.iter().all(|v| v.is_finite()) {
+                continue;
+            }
+            out[slot] = Some((r_wb * f_body).z);
+            // 調査用: MISA_CONTACT_TRACE=<脚 0..3> でその脚の内訳を毎周期出す。
+            if std::env::var("MISA_CONTACT_TRACE").ok().and_then(|v| v.parse::<usize>().ok()) == Some(slot) {
+                let vi = self.leg_v_idx[slot];
+                eprintln!(
+                    "[contact] leg{slot} tau=({:+.3},{:+.3},{:+.3}) tau_id=({:+.3},{:+.3},{:+.3}) qd=({:+.2},{:+.2},{:+.2}) qdd=({:+.1},{:+.1},{:+.1}) fz={:+.2}",
+                    t[0], t[1], t[2], g[vi[0]], g[vi[1]], g[vi[2]],
+                    v[vi[0]], v[vi[1]], v[vi[2]], a[vi[0]], a[vi[1]], a[vi[2]], (r_wb * f_body).z
+                );
+            }
+        }
+        out
+    }
+
+    /// 推定した接地力を接地フラグに（**ヒステリシス付き**）。`threshold_n` を
+    /// 超えたら接地、その 6 割を下回ったら離地。推定できなかった足は前回の
+    /// まま（一度も推定できていなければ `None`）。閾値の付近で毎周期ぱたぱた
+    /// しないため — WBC の接地拘束は硬いので、1 周期の誤判定でも解が跳ぶ。
+    pub fn contacts_from_forces(&mut self, fz: &[Option<f64>; 4], threshold_n: f64) -> [Option<bool>; 4] {
+        for i in 0..4 {
+            let Some(f) = fz[i] else { continue };
+            self.contact_flags[i] = Some(match self.contact_flags[i] {
+                Some(true) => f > 0.6 * threshold_n,
+                _ => f > threshold_n,
+            });
+        }
+        self.contact_flags
     }
 
     /// 歩容が止まったら LKF を捨てる。**立ち上がり・伏せの間は足が世界に
     /// 対して止まっていない**ので、そこで積んだ状態は次の歩容の邪魔になる。
     pub fn reset(&mut self) {
         self.kalman_seeded = false;
+        self.prev_qd = None;
+        self.qdd_filt = [[0.0; 3]; 4];
+        self.contact_flags = [None; 4];
     }
 
     /// 1 周期ぶん。`gyro_body` は IMU の角速度、`accel_body` は加速度計
@@ -278,6 +451,22 @@ pub fn stance_for_estimator(planned: [bool; 4], obs: &misa_core::Observation) ->
     out
 }
 
+/// 観測の関節トルクを脚 4 本 × 3 軸へ。読めていない軸は `None`。
+pub fn torques_from(obs: &misa_core::Observation) -> [[Option<f64>; 3]; 4] {
+    let mut t = [[None; 3]; 4];
+    for leg in 0..4 {
+        for k in 0..3 {
+            let id = misa_core::AxisId::new((leg * 3 + k) as u16);
+            if let Some(a) = obs.get(id) {
+                if a.health.valid {
+                    t[leg][k] = a.torque_nm;
+                }
+            }
+        }
+    }
+    t
+}
+
 /// 観測の関節速度を [`JointVec`] へ。読めていない軸は 0。
 ///
 /// 位置側（`runner::jointvec_from`）と対。**速度を 0 と読むのは安全側**で、
@@ -427,6 +616,53 @@ mod tests {
         );
         let w = s.angular_velocity_world;
         assert!(w.x.abs() < 1e-9 && (w.y - 1.0).abs() < 1e-9, "{w:?}");
+    }
+
+    /// **静的に立っているときの関節トルクから、足 1 本あたり体重の 1/4 が戻る。**
+    /// トルクは同じ式（`τ = τ_g − Jᵀ f`）で作るので符号と添字の往復の試験。
+    #[test]
+    fn foot_forces_round_trip_from_static_torques() {
+        let r = robot();
+        let mut e = BodyEstimator::new(&r, EstimatorKind::LegOdometry);
+        let q = stance_pose(&r);
+        // 足 1 本あたり 7 N（testquad 2.9 kg の 1/4 相当）。
+        let f_each = 7.0;
+        // 固定ベースの重力トルク。
+        let mut qm = na::DVector::<f64>::zeros(r.model.nq);
+        for leg in 0..4 {
+            for k in 0..3 {
+                qm[e.leg_q_idx[leg][k]] = q.legs[leg][k];
+            }
+        }
+        let g = misarta::rnea::compute_gravity(&r.model, qm.as_slice());
+        let mut tau = [[None; 3]; 4];
+        for slot in 0..4 {
+            let kin = r.kin.legs()[slot];
+            let s = r.signs[slot];
+            let q_ik: Vec<f64> = (0..3).map(|k| q.legs[slot][k] * s[k]).collect();
+            let j = foot_jacobian_body(kin, q_ik[0], q_ik[1], q_ik[2]);
+            let jt_f = j.transpose() * na::Vector3::new(0.0, 0.0, f_each);
+            for k in 0..3 {
+                // IK 座標系の τ をモデル座標系へ戻して「観測」にする。
+                tau[slot][k] = Some(g[e.leg_v_idx[slot][k]] - jt_f[k] * s[k]);
+            }
+        }
+        let fz = e.foot_forces_from_torque(&q, &JointVec::zeros(), &tau, [0.0; 3], 0.005);
+        for slot in 0..4 {
+            let f = fz[slot].expect("推定できること");
+            assert!((f - f_each).abs() < 1e-6, "脚 {slot}: {f} ≠ {f_each}");
+        }
+        let flags = e.contacts_from_forces(&fz, 5.0);
+        assert!(flags.iter().all(|c| *c == Some(true)));
+        // ヒステリシス: 閾値の 6 割までは接地のまま、それを切ると離地。
+        let low = [Some(3.5); 4];
+        assert!(e.contacts_from_forces(&low, 5.0).iter().all(|c| *c == Some(true)));
+        let lower = [Some(2.5); 4];
+        assert!(e.contacts_from_forces(&lower, 5.0).iter().all(|c| *c == Some(false)));
+        // トルクが欠けた脚は None（フラグは前回のまま）。
+        tau[1][2] = None;
+        let fz = e.foot_forces_from_torque(&q, &JointVec::zeros(), &tau, [0.0; 3], 0.005);
+        assert!(fz[1].is_none() && fz[0].is_some());
     }
 
     /// **LKF は脚オドメトリの高さで張られ、止まって立っていれば同じ答えを出す。**

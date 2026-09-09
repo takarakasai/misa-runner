@@ -269,7 +269,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         Some(w) => Some(w),
         None => crate::wbc::WbcRunner::new_dormant(&robot, &cfg.wbc),
     };
-    let mut estimator = crate::estimator::BodyEstimator::new(&robot, cfg.gait.estimator);
+    let mut estimator = crate::estimator::BodyEstimator::with_passive_scale(&robot, cfg.gait.estimator, cfg.gait.contact_passive_scale);
     let mut controller = Controller::with_arm(robot, cfg.clone(), head_driven);
     // **可動域は `dump` と同じ表で、同じ関数で見る。**
     //
@@ -329,6 +329,16 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // `contact_in_swing` は計画が遊脚なのに乗っている周期（早い着地・遅い離地）。
     let mut plan_stance_no_contact = [0usize; 4];
     let mut contact_in_swing = [0usize; 4];
+    // **トルクからの接地推定の答え合わせ**（`gait.contact_from_torque`）。
+    // MuJoCo の接地（力 5 N で切った真偽値）との一致率と、真の垂直力に対する
+    // 推定の誤差（RMS）。
+    let mut est_contact_n = 0usize;
+    let mut est_contact_agree = [0usize; 4];
+    /// 推定が接地と言ったが浮いていた（遊脚の慣性力を接地と誤る）/ 逆。
+    let mut est_false_contact = [0usize; 4];
+    let mut est_missed_contact = [0usize; 4];
+    let mut est_fz_sq_err = [0.0f64; 4];
+    let mut est_fz_n = [0usize; 4];
     let mut ground_contacts: std::collections::BTreeMap<String, usize> = Default::default();
     let start = plant.base_position().unwrap_or([0.0; 3]);
     let start_yaw = obs.imu.map(|m| m.rpy_rad[2]).unwrap_or(0.0);
@@ -401,11 +411,48 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         }
         let measured = jointvec_from(&obs);
         let attitude = obs.imu.map(|m| m.rpy_rad).unwrap_or([0.0; 3]);
+        let measured_qd = crate::estimator::velocities_from(&obs);
+        if cfg.gait.contact_from_torque {
+            let fz = estimator.foot_forces_from_torque(
+                &measured,
+                &measured_qd,
+                &crate::estimator::torques_from(&obs),
+                attitude,
+                dt,
+            );
+            let flags = estimator.contacts_from_forces(&fz, cfg.wbc.contact_force_threshold_n);
+            if controller.state() == State::Active {
+                est_contact_n += 1;
+                let truth = plant.foot_forces();
+                if let Some(leg) = std::env::var("MISA_CONTACT_TRACE").ok().and_then(|v| v.parse::<usize>().ok()) {
+                    eprintln!("[contact] leg{leg} truth_fz={:+.2} truth_contact={:?} est_flag={:?} t={t:.3}",
+                        truth.map(|f| f[leg]).unwrap_or(f64::NAN), obs.contacts.get(leg).copied().flatten(), flags[leg]);
+                }
+                for i in 0..4 {
+                    let truth_flag = obs.contacts.get(i).copied().flatten();
+                    match (flags[i], truth_flag) {
+                        (Some(a), Some(b)) if a == b => est_contact_agree[i] += 1,
+                        (Some(true), Some(false)) => est_false_contact[i] += 1,
+                        (Some(false), Some(true)) => est_missed_contact[i] += 1,
+                        _ => {}
+                    }
+                    if let (Some(f), Some(t)) = (fz[i], truth.map(|t| t[i])) {
+                        est_fz_sq_err[i] += (f - t) * (f - t);
+                        est_fz_n[i] += 1;
+                    }
+                }
+            }
+            // 上書き。推定できなかった足は Plant の値のまま。
+            for i in 0..4 {
+                if let (Some(c), Some(slot)) = (flags[i], obs.contacts.get_mut(i)) {
+                    *slot = Some(c);
+                }
+            }
+        }
         let mut out = controller.tick(&cmd, &measured, attitude, dt);
         if cfg.wbc.use_measured_contact {
             out.stance = crate::estimator::stance_with_measured_contact(out.stance, &obs);
         }
-        let measured_qd = crate::estimator::velocities_from(&obs);
         let gyro = obs.imu.map(|m| m.gyro_rad_s).unwrap_or([0.0; 3]);
         if controller.state() != State::Active {
             estimator.reset();
@@ -735,6 +782,30 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                 .collect();
             println!("計画と接地のずれ（立脚なのに浮いている % / 遊脚なのに乗っている %）  {s}");
         }
+    }
+    if est_contact_n > 0 {
+        let s: String = (0..4)
+            .map(|i| {
+                format!(
+                    "{} {:.0}%/{:.1}N  ",
+                    ["FL", "FR", "RL", "RR"][i],
+                    100.0 * est_contact_agree[i] as f64 / est_contact_n as f64,
+                    (est_fz_sq_err[i] / est_fz_n[i].max(1) as f64).sqrt()
+                )
+            })
+            .collect();
+        println!("トルクからの接地推定（MuJoCo の接地との一致 % / 垂直力の誤差 RMS）  {s}");
+        let s: String = (0..4)
+            .map(|i| {
+                format!(
+                    "{} {:.0}%/{:.0}%  ",
+                    ["FL", "FR", "RL", "RR"][i],
+                    100.0 * est_false_contact[i] as f64 / est_contact_n as f64,
+                    100.0 * est_missed_contact[i] as f64 / est_contact_n as f64
+                )
+            })
+            .collect();
+        println!("  うち 浮いているのに接地と言った % / 接地なのに浮いていると言った %  {s}");
     }
     if clear_max.iter().any(|v| v.is_finite()) {
         let s: String = (0..4)

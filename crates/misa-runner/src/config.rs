@@ -969,6 +969,27 @@ pub struct GaitTuning {
     /// 影響しない（そちらは `[wbc] use_measured_contact`）。
     #[serde(default)]
     pub estimator_use_measured_contact: bool,
+    /// **関節トルクから接地を推定する**（センサレス。既定 false）。
+    ///
+    /// 足裏センサが無い機体で `use_measured_contact` /
+    /// `estimator_use_measured_contact` を効かせる道。準静的に
+    /// `f = −J⁻ᵀ (τ − τ_g)` で足の垂直力を出し、`[wbc] contact_force_threshold_n`
+    /// を超えた足を接地と見なす（legged_control の接地判定と同じ考え方）。
+    /// **観測の接地フラグを上書きする**ので、MuJoCo でも推定のほうが使われる
+    /// （`sim` は Plant の接地との一致率を終わりに出す）。実機はトルクが読める
+    /// こと（namiashi は `torque_constant_nm_per_a`）が前提。
+    #[serde(default)]
+    pub contact_from_torque: bool,
+    /// 接地力の推定で、関節の受動動力学（`[joint.dynamics]` の armature /
+    /// damping / friction）をどれだけ引くかの倍率。**既定 0.5。**
+    ///
+    /// MuJoCo の namiashi（trot 0.80）で、位置出力・トルク出力の両方で接地の
+    /// 一致率が最も高かった値（0: 位置 97 % / トルク 84 %、0.5: 97 % / 96 %、
+    /// 1.0: 87 % / 95 %）。理屈では 1.0 のはずで、なぜ半分が合うかは
+    /// 分かっていない（q̈ を差分で作る遅れ、MuJoCo の陰的な減衰の扱いが候補）。
+    /// **実機ではモータの減衰・摩擦を同定してから決めること。**
+    #[serde(default = "default_contact_passive_scale")]
+    pub contact_passive_scale: f64,
     /// 胴体の状態（高さ・速度）をどう推定するか。
     ///
     /// - `leg_odometry`（既定）: 接地足の運動学だけ。状態を持たず毎周期の
@@ -1082,6 +1103,9 @@ fn default_max_wz() -> f64 {
     0.6
 }
 /// quadruped-gait の `SrbdMpcConfig::default()` と同じ。
+fn default_contact_passive_scale() -> f64 {
+    0.5
+}
 fn default_true() -> bool {
     true
 }
@@ -1137,6 +1161,8 @@ impl Default for GaitTuning {
             mpc_observe_pose: true,
             mpc_observe_velocity: true,
             estimator_use_measured_contact: false,
+            contact_from_torque: false,
+            contact_passive_scale: default_contact_passive_scale(),
             estimator: EstimatorKind::LegOdometry,
             velocity_ramp_s: default_velocity_ramp_s(),
             velocity_ramp_stop_s: default_velocity_ramp_stop_s(),
