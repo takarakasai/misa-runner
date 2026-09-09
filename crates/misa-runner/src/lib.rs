@@ -47,6 +47,7 @@ pub mod robot;
 pub mod sim;
 pub mod runner;
 pub mod snapshot;
+pub mod stance;
 pub mod teleop;
 pub mod viz;
 pub mod wbc;
@@ -157,6 +158,7 @@ fn dispatch(cli: &Cli, backends: &[&dyn Backend]) -> Result<(), String> {
         #[cfg(not(feature = "sim"))]
         "sim" => Err("このビルドには sim が入っていません（--features sim で有効化）".into()),
         "calib" => calib::run(&cfg, cli),
+        "stance" => stance::run(&cfg, cli, backends),
         "imu" => diag::imu(&cfg, secs_or_forever(cli, 10.0)),
         "sbus" => diag::sbus(&cfg, secs_or_forever(cli, 10.0), cli.flag("plain")),
         "legs" => diag::legs(&cfg, secs_or_forever(cli, 10.0), &viz_config(cli)),
@@ -391,6 +393,9 @@ fn print_help() {
                             1 軸を保持して電流を測り、トルク定数 Kt を出す
                             （脚を浮かせ、関節の先を水平に。既知の荷 m を距離 d に
                             掛けて T = m·g·d。2 回測って差で取ると脚の重さが消える）
+  stance capture            実機の観測（--secs S）か記録（--from-record REC [--at S]）の
+         [--symmetrize] [--write PATH]  関節角から基準姿勢（脚ごとの足先位置）を作り、
+                            gait.stance_feet_body に書く。--symmetrize で左右を平均
   run    [--record PATH]    制御ループ（プロポ操縦）
                             --record で毎周期を記録する（別スレッドで書く）
          [--pilot keys]            **キーボードで操縦する（実機）。** 受信機は待たない。
@@ -602,6 +607,8 @@ const VALUE_FLAGS: &[&str] = &[
     "speed",
     "assume",
     "torque-nm",
+    "from-record",
+    "at",
     "write",
     "max-id",
     "margin",
@@ -630,6 +637,7 @@ const VALUE_FLAGS: &[&str] = &[
 
 /// 値を取らないフラグ。ここに無いものは次のトークンを値として食う。
 const BOOL_FLAGS: &[&str] = &[
+    "symmetrize",
     "help",
     "wbc",
     "dry-run",

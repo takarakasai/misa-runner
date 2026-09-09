@@ -157,16 +157,29 @@ keel の実測姿勢はそれを 4.2° 破っている。どうするか 3 択:
   0.33 m、水平のまま」。前上がり 4.2° と足パターンの 89 mm 後退は R1 が
   入るまで書けない。
 
-## 6. 受け入れ条件
+## 6. 受け入れ条件（2026-09-10 実装。README「基準姿勢（立ち姿勢）を機体ごとに決める」）
 
-- [ ] 既存 3 機のプロファイルで出力が変わらない（R9）
-- [ ] 実機の `/low_state` 1 フレームから基準姿勢を作り、`check` が通る（R3）
-- [ ] 左右対称化の有無で足先座標が期待どおり変わる（R4）
-- [ ] 可動域外・IK 不可達の基準姿勢が**起動前に**弾かれる（R5）
-- [ ] 実行中に差し替えても歩容の位相が飛ばない（R6）
-- [ ] 採用前後を並べた絵が同じカメラで出る（R7）
-- [ ] keel の実測姿勢を入れると、`sim` の立ちピッチが実機 IMU の −4.25° と
-      ±0.2° で一致する（§1 の 3 通り一致を回帰にする）
+- [x] 既存 3 機のプロファイルで出力が変わらない（R9）— `stance_height_m` だけの由来は
+      `kin_at_height` と 1 ビットも違わないことをテストで固定（`a_height_only_stance_is_bit_identical_to_the_old_path`）
+- [x] 実機の観測 / 記録から基準姿勢を作り、`check` が通る（R3）— `misa-run stance capture`
+      （`--secs` で実機、`--from-record` で記録）。keel の `/low_state` そのものは
+      keel-run 経由（Backend）で読む
+- [x] 左右対称化の有無で足先座標が期待どおり変わる（R4）— `stance_symmetrize`、
+      `--symmetrize`。取ったことがプロファイルに残る
+- [x] 可動域外・IK 不可達の基準姿勢が**起動前に**弾かれる（R5）— `load_from_config` が
+      `stance_report` のエラーで止まる。左右差・傾きの宣言違いは警告
+- [x] 実行中に差し替えても歩容の位相が飛ばない（R6）— `stance_kinematics_at_height` →
+      `set_kinematics`（高さ変更と同じ道。MuJoCo で keel の実測姿勢のまま
+      `--height-offset -0.03` を入れて歩く）
+- [x] 採用前後を並べる（R7）— `check` の数字（足先・高さ・スパン・幅・中心・傾き）と、
+      `sim --vx 0 --features render --video --cam-fixed` を 2 プロファイルで撮る手順
+- [x] keel の実測姿勢を入れると、`sim` の立ちピッチが −4.24°（実機 IMU −4.25°、
+      順運動学 −4.36°、±0.2° 以内）
+
+未実装: `stance_pose`（由来 b）を実機の観測から**モデルのポーズとして**書き出す道。
+capture は由来 c（`stance_feet_body`）で書く — 関節角はコマンドが表示するので、
+ポーズとして残したければ `.misa` へ写す。keel の実測値は keel-runner の
+`robots/keel_stance_measured.toml`。
 
 ## 7. 前提
 

@@ -201,6 +201,9 @@ impl AppConfig {
         if self.control.rate_hz <= 0.0 {
             return Err("control.rate_hz は正の値が必要です".into());
         }
+        if self.gait.stance_pose.is_some() && self.gait.stance_feet_body.is_some() {
+            return Err("gait.stance_pose と gait.stance_feet_body は同時に書けません（基準姿勢の由来は 1 つ）".into());
+        }
         // 制御周期がバス周期より速いと、同じ指令を 2 回送るだけで意味がない。
         if let Some(bus_hz) = self.hardware.max_control_rate_hz() {
         if self.control.rate_hz > bus_hz {
@@ -691,6 +694,21 @@ impl WbcConfig {
 /// ものから MPC の予測に変わる（[`crate::wbc`]）。そこが入る唯一の効き目で、
 /// WBC を無効にしたまま MPC を選んでも、接地力の予測は前置トルクにしか
 /// 使われない。
+/// 脚ごとの足先位置（胴体座標 [m]）。[`GaitTuning::stance_feet_body`]。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct StanceFeet {
+    pub fl: [f64; 3],
+    pub fr: [f64; 3],
+    pub rl: [f64; 3],
+    pub rr: [f64; 3],
+}
+
+impl StanceFeet {
+    pub fn as_array(&self) -> [[f64; 3]; 4] {
+        [self.fl, self.fr, self.rl, self.rr]
+    }
+}
+
 /// 胴体の状態推定の方式。[`GaitTuning::estimator`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -878,9 +896,43 @@ pub struct GaitTuning {
     /// 可動域検査を必ず通すこと (2026-09-01)。
     #[serde(default)]
     pub knee_pattern: KneeShape,
-    /// 立ち姿勢での胴体高さ (m)。
+    /// 立ち姿勢での胴体高さ (m)。**基準姿勢の由来 a**（4 脚共通のスカラ）。
+    /// `stance_pose` / `stance_feet_body` が無いときの既定。
     #[serde(default = "default_stance_height")]
     pub stance_height_m: f64,
+    /// 基準姿勢の由来 b: **モデルの名前付きポーズ**。その関節角の順運動学で
+    /// 脚ごとの足先位置（`nominal_foot_body`）を決める。実機で測った関節角を
+    /// ポーズとして書けば、そのまま基準姿勢になる（`misa-run stance capture`）。
+    /// `stance_feet_body` と同時には書けない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stance_pose: Option<String>,
+    /// 基準姿勢の由来 c: **脚ごとの足先位置**（胴体座標 [m]、FL / FR / RL / RR）。
+    /// `stance capture --write` が書く形。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stance_feet_body: Option<StanceFeet>,
+    /// 基準姿勢を左右で平均するか（b / c にだけ効く）。
+    ///
+    /// 実測はゲインと重力でつり合った姿勢なので左右で 2〜3 cm ずれる
+    /// （keel の実測で足先 x が FL/FR 20 mm、RL/RR 28 mm）。そのまま基準にする
+    /// と左右差ごと焼き付く。**黙って対称化はしない** — 本当に非対称な機体も
+    /// あるので、取ったかどうかをここに残す。
+    #[serde(default)]
+    pub stance_symmetrize: bool,
+    /// **意図した**前後の傾き [rad]（前足が低い＝前上がりを正）。基準姿勢の
+    /// 前後の高さ差から出る傾きがこれと `stance_pitch_warn_rad` 以上違えば
+    /// 警告する。「うっかり傾いた」と「傾けたい」を区別できるのはここだけ。
+    #[serde(default)]
+    pub stance_pitch_rad: f64,
+    /// 上の許容差 [rad]。既定 2°。
+    #[serde(default = "default_stance_pitch_warn")]
+    pub stance_pitch_warn_rad: f64,
+    /// 左右差の許容 [m]（x / z）。超えたら警告。既定 1 cm。
+    #[serde(default = "default_stance_symmetry_warn")]
+    pub stance_symmetry_warn_m: f64,
+    /// 基準姿勢の出どころ（自由記述）。`stance capture --write` が
+    /// 「いつ・何から採ったか」を書く。プロファイルだけで再現できるように。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stance_note: Option<String>,
     /// 遊脚の持ち上げ高さ (m)。
     #[serde(default = "default_swing_height")]
     pub swing_height_m: f64,
@@ -1094,6 +1146,12 @@ pub struct GaitTuning {
     pub step_length_m: Option<f64>,
 }
 
+fn default_stance_pitch_warn() -> f64 {
+    0.035
+}
+fn default_stance_symmetry_warn() -> f64 {
+    0.01
+}
 fn default_stance_height() -> f64 {
     // 脚は thigh 0.1528 + calf 0.1528 = 0.306 m。膝を曲げた常用姿勢としての初期値。
     0.20
@@ -1156,6 +1214,13 @@ impl Default for GaitTuning {
         Self {
             knee_pattern: KneeShape::default(),
             stance_height_m: default_stance_height(),
+            stance_pose: None,
+            stance_feet_body: None,
+            stance_symmetrize: false,
+            stance_pitch_rad: 0.0,
+            stance_pitch_warn_rad: default_stance_pitch_warn(),
+            stance_symmetry_warn_m: default_stance_symmetry_warn(),
+            stance_note: None,
             swing_height_m: default_swing_height(),
             max_vx_m_s: default_max_vx(),
             max_vy_m_s: default_max_vy(),

@@ -334,7 +334,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // 推定の誤差（RMS）。
     let mut est_contact_n = 0usize;
     let mut est_contact_agree = [0usize; 4];
-    /// 推定が接地と言ったが浮いていた（遊脚の慣性力を接地と誤る）/ 逆。
+    // 推定が接地と言ったが浮いていた（遊脚の慣性力を接地と誤る）/ 逆。
     let mut est_false_contact = [0usize; 4];
     let mut est_missed_contact = [0usize; 4];
     let mut est_fz_sq_err = [0.0f64; 4];

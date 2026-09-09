@@ -719,6 +719,7 @@ pub fn check(cfg: &AppConfig) -> Result<(), String> {
             .map(|v| (v * 1e3).round() / 1e3)
             .collect::<Vec<_>>()
     );
+    println!("{}", robot.stance_report(&cfg.gait).describe());
     print_teleop(&cfg.teleop);
     print_wiring(&cfg.hardware);
     Ok(())

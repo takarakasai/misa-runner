@@ -8,10 +8,11 @@
 use std::collections::BTreeMap;
 
 use misarta::model::Model;
+use nalgebra::Vector3;
 use quadruped_gait::{
-    auto_detect_kinematics_config, joint_signs, AnyGaitController, ControllerOutput, GaitConfig,
-    GaitGenerator, GaitMode, GaitType, KinematicsConfig, KneePattern, VelocityCmd,
-    DEFAULT_FOOT_LINKS,
+    auto_detect_kinematics_config, forward_leg_kinematics, joint_signs, solve_leg_ik,
+    AnyGaitController, ControllerOutput, GaitConfig, GaitGenerator, GaitMode, GaitType,
+    KinematicsConfig, KneePattern, VelocityCmd, DEFAULT_FOOT_LINKS,
 };
 
 use crate::config::{AppConfig, GaitControllerKind, GaitTuning, KneeShape};
@@ -208,14 +209,13 @@ impl Robot {
     ) -> AnyGaitController {
         let cfg = base_gait_config(tuning, select);
         let mode = gait_mode_of(select, tuning);
-        let mut ctrl =
-            AnyGaitController::new(mode, cfg, self.kin_at_height(tuning.stance_height_m));
+        let mut ctrl = AnyGaitController::new(mode, cfg, self.stance_kinematics(tuning));
         // **膝の向きは機体ごとに違う。** 取れる向きはモデルの可動域が
         // 決めるので、`dump` / `sim` の可動域検査で確かめてから選ぶ。
         ctrl.set_knee_pattern(knee_pattern_of(tuning.knee_pattern));
         // LinearCrawl はこちらで胴体高さを持つ。CHAMP 系は
-        // `nominal_foot_body` を見るので上の `kin_at_height` が効く。
-        ctrl.set_body_height_m(tuning.stance_height_m);
+        // `nominal_foot_body` を見るので上の `stance_kinematics` が効く。
+        ctrl.set_body_height_m(self.reference_height_m(tuning));
         self.configure_mpc(&mut ctrl, tuning, wbc, mode);
         ctrl
     }
@@ -294,7 +294,7 @@ impl Robot {
         let mut ctrl = AnyGaitController::new(
             GaitMode::Champ,
             base_gait_config(tuning, GaitSelect::Crawl),
-            self.kin_at_height(tuning.stance_height_m),
+            self.stance_kinematics(tuning),
         );
         ctrl.set_knee_pattern(knee_pattern_of(tuning.knee_pattern));
         ctrl.set_velocity_cmd(velocity_cmd(0.0, 0.0, 0.0));
@@ -330,6 +330,237 @@ impl Robot {
             leg.nominal_foot_body.z = -stance_height_m;
         }
         kin
+    }
+
+    // ── 基準姿勢（立ち姿勢）を機体ごとに決める（doc/reference_stance.md）──
+
+    /// 関節角から足先の位置（**IK 座標系 = 胴体座標**、FL / FR / RL / RR）。
+    /// 実測した関節角を基準姿勢にするときの入口。
+    pub fn feet_from_posture(&self, q: &JointVec) -> [Vector3<f64>; 4] {
+        let mut out = [Vector3::zeros(); 4];
+        for slot in 0..4 {
+            let kin = self.kin.legs()[slot];
+            let s = self.signs[slot];
+            out[slot] = forward_leg_kinematics(
+                kin,
+                q.legs[slot][0] * s[0],
+                q.legs[slot][1] * s[1],
+                q.legs[slot][2] * s[2],
+            );
+        }
+        out
+    }
+
+    /// 左右を平均する（FL/FR、RL/RR）。y は大きさを平均して符号は元のまま。
+    pub fn symmetrize_feet(feet: [Vector3<f64>; 4]) -> [Vector3<f64>; 4] {
+        let mut out = feet;
+        for (a, b) in [(0usize, 1usize), (2, 3)] {
+            let x = 0.5 * (feet[a].x + feet[b].x);
+            let y = 0.5 * (feet[a].y.abs() + feet[b].y.abs());
+            let z = 0.5 * (feet[a].z + feet[b].z);
+            out[a] = Vector3::new(x, y.copysign(feet[a].y), z);
+            out[b] = Vector3::new(x, y.copysign(feet[b].y), z);
+        }
+        out
+    }
+
+    /// 基準姿勢の足先位置を、設定の由来（高さ / ポーズ / 明示）から決める。
+    /// **`stance_height_m` だけなら `kin_at_height` と 1 ビットも違わない。**
+    fn stance_feet(&self, tuning: &GaitTuning) -> Result<([Vector3<f64>; 4], String, bool), String> {
+        if let Some(f) = tuning.stance_feet_body {
+            let feet = f.as_array().map(|v| Vector3::new(v[0], v[1], v[2]));
+            let sym = tuning.stance_symmetrize;
+            return Ok((
+                if sym { Self::symmetrize_feet(feet) } else { feet },
+                "stance_feet_body（明示）".into(),
+                sym,
+            ));
+        }
+        if let Some(name) = tuning.stance_pose.as_deref() {
+            let pose = self
+                .poses
+                .pose(name)
+                .ok_or_else(|| format!("gait.stance_pose {name:?} がモデルにありません（あるポーズ: {:?}）", self.poses.pose_names().collect::<Vec<_>>()))?;
+            let q = self.poses.resolve(&pose.angles, JointVec::zeros());
+            // ポーズの関節角がモデルの可動域に入っているか。
+            for (jn, v) in q.iter_named() {
+                if let Some((lo, hi)) = self.limits.get(jn) {
+                    if v < *lo - 1e-9 || v > *hi + 1e-9 {
+                        return Err(format!(
+                            "gait.stance_pose {name:?} の {jn} = {v:+.3} rad が可動域 [{lo:+.3}, {hi:+.3}] の外です"
+                        ));
+                    }
+                }
+            }
+            let feet = self.feet_from_posture(&q);
+            let sym = tuning.stance_symmetrize;
+            return Ok((
+                if sym { Self::symmetrize_feet(feet) } else { feet },
+                format!("stance_pose {name:?}（順運動学）"),
+                sym,
+            ));
+        }
+        let kin = self.kin_at_height(tuning.stance_height_m);
+        Ok((
+            kin.legs().map(|l| l.nominal_foot_body),
+            format!("stance_height_m = {:.3}", tuning.stance_height_m),
+            false,
+        ))
+    }
+
+    /// 基準姿勢の運動学設定（`nominal_foot_body` を差し替えたもの）。設定が
+    /// 壊れているときは高さだけの既定に落として**ログに出す**（起動時の検査は
+    /// [`Self::stance_report`] が別に止める）。
+    pub fn stance_kinematics(&self, tuning: &GaitTuning) -> KinematicsConfig {
+        match self.stance_feet(tuning) {
+            Ok((feet, _, _)) => self.kin_with_feet(feet),
+            Err(e) => {
+                log::error!("基準姿勢を作れません（{e}）。stance_height_m だけの姿勢に落とします");
+                self.kin_at_height(tuning.stance_height_m)
+            }
+        }
+    }
+
+    fn kin_with_feet(&self, feet: [Vector3<f64>; 4]) -> KinematicsConfig {
+        let mut kin = self.kin.clone();
+        kin.fl.nominal_foot_body = feet[0];
+        kin.fr.nominal_foot_body = feet[1];
+        kin.rl.nominal_foot_body = feet[2];
+        kin.rr.nominal_foot_body = feet[3];
+        kin
+    }
+
+    /// 基準姿勢の胴体高さ [m]（足先 z の平均の符号違い）。高さだけの由来なら
+    /// `stance_height_m` そのもの。
+    pub fn reference_height_m(&self, tuning: &GaitTuning) -> f64 {
+        if tuning.stance_pose.is_none() && tuning.stance_feet_body.is_none() {
+            return tuning.stance_height_m;
+        }
+        let kin = self.stance_kinematics(tuning);
+        -kin.legs().iter().map(|l| l.nominal_foot_body.z).sum::<f64>() / 4.0
+    }
+
+    /// 基準姿勢を、胴体高さ `h` に合わせて上下させたもの（実行中の高さ変更）。
+    /// 4 脚とも同じだけ z をずらすので、前後の高さ差や足パターンは保たれる。
+    /// 高さだけの由来なら `kin_at_height(h)` と同じ。
+    pub fn stance_kinematics_at_height(&self, tuning: &GaitTuning, h: f64) -> KinematicsConfig {
+        if tuning.stance_pose.is_none() && tuning.stance_feet_body.is_none() {
+            return self.kin_at_height(h);
+        }
+        let mut kin = self.stance_kinematics(tuning);
+        let dz = self.reference_height_m(tuning) - h;
+        for leg in [&mut kin.fl, &mut kin.fr, &mut kin.rl, &mut kin.rr] {
+            leg.nominal_foot_body.z += dz;
+        }
+        kin
+    }
+
+    /// 基準姿勢の検査結果（`check` の表示と起動時の判定）。
+    pub fn stance_report(&self, tuning: &GaitTuning) -> StanceReport {
+        let mut rep = StanceReport::default();
+        let (feet, source, symmetrized) = match self.stance_feet(tuning) {
+            Ok(v) => v,
+            Err(e) => {
+                rep.errors.push(e);
+                let kin = self.kin_at_height(tuning.stance_height_m);
+                (kin.legs().map(|l| l.nominal_foot_body), "（壊れているので高さだけ）".into(), false)
+            }
+        };
+        rep.source = source;
+        rep.symmetrized = symmetrized;
+        rep.feet = feet;
+        let front_x = 0.5 * (feet[0].x + feet[1].x);
+        let rear_x = 0.5 * (feet[2].x + feet[3].x);
+        let front_z = 0.5 * (feet[0].z + feet[1].z);
+        let rear_z = 0.5 * (feet[2].z + feet[3].z);
+        rep.span_m = front_x - rear_x;
+        rep.width_m = 0.5 * ((feet[0].y - feet[1].y).abs() + (feet[2].y - feet[3].y).abs());
+        rep.center_x_m = 0.25 * feet.iter().map(|f| f.x).sum::<f64>();
+        rep.height_m = -0.25 * feet.iter().map(|f| f.z).sum::<f64>();
+        // 前足が低い（z が小さい）＝前上がり＝正。
+        rep.pitch_rad = (rear_z - front_z).atan2(rep.span_m.max(1e-6));
+
+        // 左右差（対称化していないときだけ意味がある）。
+        if !symmetrized {
+            for (a, b, name) in [(0usize, 1usize, "前"), (2, 3, "後")] {
+                let dx = (feet[a].x - feet[b].x).abs();
+                let dz = (feet[a].z - feet[b].z).abs();
+                let dy = (feet[a].y.abs() - feet[b].y.abs()).abs();
+                if dx > tuning.stance_symmetry_warn_m || dz > tuning.stance_symmetry_warn_m || dy > tuning.stance_symmetry_warn_m {
+                    rep.warnings.push(format!(
+                        "{name}脚の左右差 x {:.0} mm / y {:.0} mm / z {:.0} mm（許容 {:.0} mm。意図した非対称でなければ gait.stance_symmetrize = true）",
+                        dx * 1e3, dy * 1e3, dz * 1e3, tuning.stance_symmetry_warn_m * 1e3
+                    ));
+                }
+            }
+        }
+        // 前後の傾き — 宣言と違えば言う。
+        if (rep.pitch_rad - tuning.stance_pitch_rad).abs() > tuning.stance_pitch_warn_rad {
+            rep.warnings.push(format!(
+                "基準姿勢の前後の傾きが {:+.1}°（前足が低い＝正）で、宣言 gait.stance_pitch_rad = {:+.1}° と {:.1}° 以上違います。\
+                 意図した傾きなら宣言に書く、そうでなければ足先の高さを揃える",
+                rep.pitch_rad.to_degrees(),
+                tuning.stance_pitch_rad.to_degrees(),
+                tuning.stance_pitch_warn_rad.to_degrees()
+            ));
+        }
+        // IK 可達と可動域: 基準位置と、歩幅の半分・遊脚高さを足した最悪点。
+        let kin = self.kin_with_feet(feet);
+        let half_step = 0.5 * base_gait_config(tuning, GaitSelect::Trot).max_step_length_m;
+        for slot in 0..4 {
+            let leg = kin.legs()[slot];
+            let knee_forward = knee_forward_for(tuning.knee_pattern, slot);
+            let probes = [
+                ("基準", feet[slot]),
+                ("前へ歩幅/2", feet[slot] + Vector3::new(half_step, 0.0, 0.0)),
+                ("後ろへ歩幅/2", feet[slot] - Vector3::new(half_step, 0.0, 0.0)),
+                ("遊脚の頂点", feet[slot] + Vector3::new(0.0, 0.0, tuning.swing_height_m)),
+            ];
+            for (what, target) in probes {
+                let sol = solve_leg_ik(leg, target, knee_forward);
+                if !sol.is_reachable() {
+                    rep.errors.push(format!(
+                        "{} の{what}（{:+.3}, {:+.3}, {:+.3}）に IK が届きません",
+                        misa_hal::joint::JOINT_NAMES[slot][0].trim_end_matches("_hip_joint"),
+                        target.x, target.y, target.z
+                    ));
+                    continue;
+                }
+                let (h, t, c) = sol.angles();
+                let s = self.signs[slot];
+                for (k, v_ik) in [h, t, c].iter().enumerate() {
+                    let jn = misa_hal::joint::JOINT_NAMES[slot][k];
+                    let v = v_ik * s[k];
+                    if let Some((lo, hi)) = self.limits.get(jn) {
+                        if v < *lo - 1e-6 || v > *hi + 1e-6 {
+                            rep.errors.push(format!(
+                                "{jn} が{what}で {v:+.3} rad（可動域 [{lo:+.3}, {hi:+.3}] の外）"
+                            ));
+                        }
+                    }
+                }
+            }
+            // ポーズ由来なら、膝の向きが knee_pattern と合っているか — FK した足先を
+            // 設定の膝の向きで IK し直して、元の関節角に戻るか。
+            if let Some(name) = tuning.stance_pose.as_deref() {
+                if let Some(pose) = self.poses.pose(name) {
+                    let q = self.poses.resolve(&pose.angles, JointVec::zeros());
+                    let s = self.signs[slot];
+                    let sol = solve_leg_ik(leg, feet[slot], knee_forward);
+                    let (h, t, c) = sol.angles();
+                    let back = [h * s[0], t * s[1], c * s[2]];
+                    let err = (0..3).map(|k| (back[k] - q.legs[slot][k]).abs()).fold(0.0, f64::max);
+                    if err > 1e-3 {
+                        rep.errors.push(format!(
+                            "{} の膝の向きが gait.knee_pattern と矛盾しています（ポーズの calf {:+.3} rad、設定の向きで解くと {:+.3}）",
+                            misa_hal::joint::JOINT_NAMES[slot][0].trim_end_matches("_hip_joint"),
+                            q.legs[slot][2], back[2]
+                        ));
+                    }
+                }
+            }
+        }
+        rep
     }
 
     /// `.misa` の `[link.inertial]` を misarta の [`misarta::model::LinkInertia`] へ
@@ -628,6 +859,59 @@ pub fn velocity_cmd(vx: f64, vy: f64, wz: f64) -> VelocityCmd {
     VelocityCmd { vx, vy, wz }
 }
 
+/// 基準姿勢の検査結果。[`Robot::stance_report`]。
+#[derive(Debug, Clone, Default)]
+pub struct StanceReport {
+    /// 由来（設定のどれから作ったか）。
+    pub source: String,
+    /// 足先位置（胴体座標、FL / FR / RL / RR）。
+    pub feet: [Vector3<f64>; 4],
+    /// 前後の傾き [rad]。前足が低い（前上がり）を正。
+    pub pitch_rad: f64,
+    pub span_m: f64,
+    pub width_m: f64,
+    pub center_x_m: f64,
+    pub height_m: f64,
+    pub symmetrized: bool,
+    pub warnings: Vec<String>,
+    /// 1 つでもあれば起動しない。
+    pub errors: Vec<String>,
+}
+
+impl StanceReport {
+    /// `check` と起動ログ用の表。
+    pub fn describe(&self) -> String {
+        let mut s = format!(
+            "基準姿勢: {}{}\n  足先 [m]  FL ({:+.3}, {:+.3}, {:+.3})  FR ({:+.3}, {:+.3}, {:+.3})\n            RL ({:+.3}, {:+.3}, {:+.3})  RR ({:+.3}, {:+.3}, {:+.3})\n  高さ {:.3} m / 前後スパン {:.3} m / 左右幅 {:.3} m / 足パターンの中心 x {:+.3} m / 前後の傾き {:+.2}°（前足が低い＝正）",
+            self.source,
+            if self.symmetrized { "、左右を平均" } else { "" },
+            self.feet[0].x, self.feet[0].y, self.feet[0].z,
+            self.feet[1].x, self.feet[1].y, self.feet[1].z,
+            self.feet[2].x, self.feet[2].y, self.feet[2].z,
+            self.feet[3].x, self.feet[3].y, self.feet[3].z,
+            self.height_m, self.span_m, self.width_m, self.center_x_m, self.pitch_rad.to_degrees()
+        );
+        for w in &self.warnings {
+            s += &format!("\n  警告: {w}");
+        }
+        for e in &self.errors {
+            s += &format!("\n  エラー: {e}");
+        }
+        s
+    }
+}
+
+/// 膝の向き（前向き = true）を脚ごとに。`slot` は FL / FR / RL / RR。
+fn knee_forward_for(shape: KneeShape, slot: usize) -> bool {
+    let front = slot < 2;
+    match shape {
+        KneeShape::BothBack => false,
+        KneeShape::BothForward => true,
+        KneeShape::MammalianForward => !front,
+        KneeShape::MammalianReverse => front,
+    }
+}
+
 /// 運動学の自動検出に使う姿勢を決める。
 ///
 /// 指定された名前が無ければ `[home]`、それも空なら全ゼロ。落とさないのは、
@@ -668,7 +952,17 @@ fn set_joint(model: &Model<f64>, q: &mut [f64], name: &str, value: f64) {
 
 /// アプリ設定からロボットを読む。
 pub fn load_from_config(cfg: &AppConfig) -> Result<Robot, String> {
-    Robot::load(&cfg.control.model, &cfg.control.kinematics_pose)
+    let robot = Robot::load(&cfg.control.model, &cfg.control.kinematics_pose)?;
+    // **基準姿勢が壊れていたら起動しない**（doc/reference_stance.md R5）。
+    // 警告は出して通す。高さだけの既定の由来では何も言わない。
+    let rep = robot.stance_report(&cfg.gait);
+    if !rep.errors.is_empty() {
+        return Err(format!("基準姿勢を受け入れられません:\n{}", rep.describe()));
+    }
+    for w in &rep.warnings {
+        log::warn!("基準姿勢: {w}");
+    }
+    Ok(robot)
 }
 
 #[cfg(test)]
@@ -942,6 +1236,93 @@ mod tests {
     /// 同梱モデルの絶対パス（`crates/misa-runner` から見たリポジトリルート）。
     fn shipped_model_path() -> String {
         format!("{}/../../models/testquad/testquad.misa", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    /// **高さだけの由来では `stance_kinematics` は `kin_at_height` と 1 ビットも
+    /// 違わない**（doc/reference_stance.md R9）。
+    #[test]
+    fn a_height_only_stance_is_bit_identical_to_the_old_path() {
+        let robot = Robot::load(&shipped_model_path(), "extend").unwrap();
+        let cfg = crate::config::AppConfig::default();
+        let a = robot.stance_kinematics(&cfg.gait);
+        let b = robot.kin_at_height(cfg.gait.stance_height_m);
+        for (x, y) in a.legs().iter().zip(b.legs().iter()) {
+            assert_eq!(x.nominal_foot_body, y.nominal_foot_body);
+            assert_eq!(x.hip_offset, y.hip_offset);
+        }
+        assert_eq!(robot.reference_height_m(&cfg.gait), cfg.gait.stance_height_m);
+        let c = robot.stance_kinematics_at_height(&cfg.gait, 0.17);
+        let d = robot.kin_at_height(0.17);
+        for (x, y) in c.legs().iter().zip(d.legs().iter()) {
+            assert_eq!(x.nominal_foot_body, y.nominal_foot_body);
+        }
+        let rep = robot.stance_report(&cfg.gait);
+        assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+        assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
+    }
+
+    /// **名前付きポーズから作った基準姿勢は、そのポーズの順運動学と一致し、
+    /// IK で元の関節角に戻る**（R2 b、膝の向きの検査）。
+    #[test]
+    fn a_pose_stance_round_trips_through_ik() {
+        let robot = Robot::load(&shipped_model_path(), "extend").unwrap();
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.gait.stance_pose = Some("extend".into());
+        let kin = robot.stance_kinematics(&cfg.gait);
+        let q = robot.poses.resolve(&robot.poses.pose("extend").unwrap().angles, JointVec::zeros());
+        let feet = robot.feet_from_posture(&q);
+        for (slot, leg) in kin.legs().iter().enumerate() {
+            assert!((leg.nominal_foot_body - feet[slot]).norm() < 1e-12);
+        }
+        // `extend`（thigh 0.3 / calf −0.6）の高さは 0.2 より高い。
+        assert!(robot.reference_height_m(&cfg.gait) > 0.25, "{}", robot.reference_height_m(&cfg.gait));
+        let rep = robot.stance_report(&cfg.gait);
+        assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+        assert!(rep.pitch_rad.abs() < 1e-9, "同じ角度の 4 脚なら傾き 0: {}", rep.pitch_rad);
+        // 高さを 3 cm 下げても前後差は保たれる。
+        let low = robot.stance_kinematics_at_height(&cfg.gait, robot.reference_height_m(&cfg.gait) - 0.03);
+        for (slot, leg) in low.legs().iter().enumerate() {
+            assert!((leg.nominal_foot_body.z - (feet[slot].z + 0.03)).abs() < 1e-12);
+            assert_eq!(leg.nominal_foot_body.x, feet[slot].x);
+        }
+    }
+
+    /// **明示した足先位置は左右平均でき、非対称なままなら警告、届かなければ拒否。**
+    #[test]
+    fn explicit_feet_are_symmetrized_warned_and_rejected() {
+        let robot = Robot::load(&shipped_model_path(), "extend").unwrap();
+        let mut cfg = crate::config::AppConfig::default();
+        let base = robot.kin_at_height(0.20);
+        let f = base.legs().map(|l| l.nominal_foot_body);
+        // 前脚を 2 cm 低く（前上がり）、FL だけ x を 3 cm 前へ（非対称）。
+        cfg.gait.stance_feet_body = Some(crate::config::StanceFeet {
+            fl: [f[0].x + 0.03, f[0].y, f[0].z - 0.02],
+            fr: [f[1].x, f[1].y, f[1].z - 0.02],
+            rl: [f[2].x, f[2].y, f[2].z],
+            rr: [f[3].x, f[3].y, f[3].z],
+        });
+        let rep = robot.stance_report(&cfg.gait);
+        assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+        assert!(rep.pitch_rad > 0.05, "前足が低いなら前上がり: {}", rep.pitch_rad);
+        assert!(rep.warnings.iter().any(|w| w.contains("左右差")), "{:?}", rep.warnings);
+        assert!(rep.warnings.iter().any(|w| w.contains("傾き")), "{:?}", rep.warnings);
+        // 傾きを宣言し、左右を平均すれば警告は消える。
+        cfg.gait.stance_symmetrize = true;
+        cfg.gait.stance_pitch_rad = rep.pitch_rad;
+        let rep2 = robot.stance_report(&cfg.gait);
+        assert!(rep2.warnings.is_empty(), "{:?}", rep2.warnings);
+        assert!((rep2.feet[0].x - rep2.feet[1].x).abs() < 1e-12);
+        assert!(rep2.symmetrized);
+        // 届かない足先は拒否される（起動しない）。
+        cfg.gait.stance_feet_body = Some(crate::config::StanceFeet {
+            fl: [f[0].x, f[0].y, -0.5],
+            fr: [f[1].x, f[1].y, -0.5],
+            rl: [f[2].x, f[2].y, -0.5],
+            rr: [f[3].x, f[3].y, -0.5],
+        });
+        let rep3 = robot.stance_report(&cfg.gait);
+        assert!(!rep3.errors.is_empty());
+        assert!(load_from_config(&cfg).is_err());
     }
 
     #[test]
