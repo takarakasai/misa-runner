@@ -387,6 +387,10 @@ fn print_help() {
 
   imu / sbus / legs は --secs 0（以下）または --forever で Ctrl-C まで回り続ける。
   calib  <sub>              符号・ゼロ点・可動域を実機で確定して設定に書き戻す
+         kt --leg L --joint J [--torque-nm T] [--secs S]
+                            1 軸を保持して電流を測り、トルク定数 Kt を出す
+                            （脚を浮かせ、関節の先を水平に。既知の荷 m を距離 d に
+                            掛けて T = m·g·d。2 回測って差で取ると脚の重さが消える）
   run    [--record PATH]    制御ループ（プロポ操縦）
                             --record で毎周期を記録する（別スレッドで書く）
          [--pilot keys]            **キーボードで操縦する（実機）。** 受信機は待たない。
@@ -597,6 +601,7 @@ const VALUE_FLAGS: &[&str] = &[
     "deg",
     "speed",
     "assume",
+    "torque-nm",
     "write",
     "max-id",
     "margin",

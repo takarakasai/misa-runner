@@ -57,9 +57,10 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         Some("clear-error") => clear_error(cfg, cli),
         Some("restart") => restart(cfg, cli),
         Some("pid") => pid(cfg, cli),
+        Some("kt") => kt(cfg, cli),
         Some(other) => Err(format!(
             "未知の calib サブコマンド {other:?}\
-             （scan|move|range|zero|clear-multiturn|single-turn|clear-error|restart|pid）"
+             （scan|move|range|zero|clear-multiturn|single-turn|clear-error|restart|pid|kt）"
         )),
         None => Err(
             "calib のサブコマンドを指定してください（scan|move|range|zero|clear-multiturn）".into(),
@@ -253,6 +254,122 @@ fn jog(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         println!("{path} に書き戻しました");
     } else {
         println!("（--write PATH を付けると設定に書き戻します）");
+    }
+    Ok(())
+}
+
+// ── kt（トルク定数の実測） ──────────────────────────────────────────────
+
+/// `calib kt` — 1 軸を今の位置で保持し、流れる電流を測ってトルク定数を出す。
+///
+/// **トルク定数が無いとトルク制御が使えない**（N·m が電流 A として線に乗る。
+/// `AppConfig::torque_unit_mismatch`）。データシートの値は減速機の効率と
+/// 個体差で外れるので、機体で測る。
+///
+/// # 測り方
+///
+/// 1. 脚を浮かせ、測る関節の先を**水平**にする（thigh なら腿を水平に）。
+/// 2. `calib kt --leg FL --joint thigh` で保持し、電流の平均を読む（何も掛けない）。
+/// 3. 既知の質量 m を関節から距離 d に掛けて、もう一度読む（`--torque-nm m·g·d`）。
+/// 4. **2 回の差を取る**: `Kt = (T₂ − T₁) / 減速比 / (I₂ − I₁)`。脚自身の重さ
+///    （モデルの質量は実機と違う。namiashi は 2.4 kg と 3.3 kg）が消える。
+///    `--torque-nm` を付けた 1 回だけでも出すが、それは脚の重さを無視した値。
+///
+/// 読むのは `JointState::torque_nm` で、**Kt 未設定のときは電流 [A]**
+/// （`LkMotorConfig::current_units` が Kt = 1/減速比 を選ぶため）。Kt を設定した
+/// 後に測ると N·m で返るので、そのときは Kt で割って電流に戻す。
+///
+/// 出す Kt は**モータ軸**の値（`[hardware.legs] torque_constant_nm_per_a`。
+/// 減速比は軸ごとに `gear_ratio` が別に掛かる）。
+fn kt(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
+    let (leg, k) = target_joint(cli)?;
+    let secs = cli.f64("secs").unwrap_or(5.0).clamp(1.0, 60.0);
+    let torque_nm = cli.f64("torque-nm");
+    let sh = serial(cfg)?;
+    let bi = bus_index(sh, leg)?;
+    let motor = &sh.legs.bus[bi].motors[k];
+    let ratio = motor.gear_ratio_or(sh.legs.gear_ratio);
+    let kt_now = sh.legs.torque_constant_nm_per_a;
+    let name = joint_label(cfg, leg, k);
+
+    println!(
+        "{name} を今の位置で {secs:.0} 秒保持して電流を測ります（減速比 {ratio:.3}）。\
+         他の 2 軸は脱力のままです"
+    );
+    println!("脚が浮いていて、測る関節の先が水平か確認してください。続けるなら Enter、やめるなら Ctrl-C");
+    let _ = read_line();
+
+    let bus = LegBus::open_alone(sh, leg).map_err(|e| e.to_string())?;
+    let here = measure_one(&bus, k)?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !bus.is_anchored() {
+        if Instant::now() >= deadline {
+            return Err("マルチターンフレームを確立できません（モータ電源とボーレートを確認してください）".into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(SETTLE);
+    bus.request(BusRequest::EnableJoint(k)).map_err(|e| e.to_string())?;
+    let mut cmds = [JointCommand::default(); 3];
+    cmds[k] = JointCommand {
+        mode: JointMode::Position,
+        position_rad: here,
+        max_speed_rad_s: 0.3,
+        torque_nm: 0.0,
+        velocity_rad_s: 0.0,
+    };
+    bus.set_commands(cmds);
+    // 保持が落ち着くまで待ってから測る。
+    std::thread::sleep(Duration::from_secs(1));
+
+    let mut samples: Vec<f64> = Vec::new();
+    let mut drift = 0.0f64;
+    let end = Instant::now() + Duration::from_secs_f64(secs);
+    while Instant::now() < end {
+        let s = bus.state()[k];
+        if s.ok {
+            // Kt 設定済みなら N·m で来るので電流に戻す。
+            let amps = match kt_now {
+                Some(kt) if kt > 0.0 => s.torque_nm / (kt * ratio),
+                _ => s.torque_nm,
+            };
+            samples.push(amps);
+            drift = drift.max((s.position_rad - here).abs());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    bus.set_commands([JointCommand::default(); 3]);
+    let _ = bus.request(BusRequest::DisableJoint(k));
+    std::thread::sleep(SETTLE);
+
+    if samples.len() < 10 {
+        return Err(format!("{name}: 電流がほとんど読めませんでした（{} 点）", samples.len()));
+    }
+    let n = samples.len() as f64;
+    let mean = samples.iter().sum::<f64>() / n;
+    let std = (samples.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n).sqrt();
+    println!(
+        "{name}: 電流 平均 {mean:+.3} A / ばらつき {std:.3} A（{} 点、保持中の位置ずれ最大 {:.2}°）",
+        samples.len(),
+        drift.to_degrees()
+    );
+    if std > mean.abs() * 0.2 && mean.abs() > 0.05 {
+        println!("⚠ ばらつきが大きい。振動しているか、荷が揺れています。落ち着かせてからやり直してください");
+    }
+    match torque_nm {
+        Some(t) if mean.abs() > 1e-3 => {
+            let kt = (t / ratio / mean).abs();
+            println!(
+                "関節トルク {t:.3} N·m = モータ軸 {:.4} N·m / 電流 {:.3} A → **Kt ≈ {kt:.4} N·m/A**\n\
+                 （脚自身の重さを無視した値。2 回測って差で取るなら\n\
+                 　Kt = (T₂ − T₁) / {ratio:.3} / (I₂ − I₁)）\n\
+                 設定するなら [hardware.legs] torque_constant_nm_per_a = {kt:.4}",
+                t / ratio,
+                mean.abs()
+            );
+        }
+        Some(_) => println!("電流がほぼ 0 なので Kt は出せません（荷を掛けてください）"),
+        None => println!("（--torque-nm T を付けると Kt を出します。T は関節に掛かるトルク [N·m] = m·g·d）"),
     }
     Ok(())
 }

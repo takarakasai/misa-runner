@@ -122,8 +122,23 @@ impl Robot {
             }
         }
 
-        let (model, _visual, _collision) = misarta::native::build_model(&parsed.file)
+        let (mut model, _visual, _collision) = misarta::native::build_model(&parsed.file)
             .map_err(|e| format!("モデルの構築に失敗: {e:?}"))?;
+        // **misarta は根リンク自身の `[link.inertial]` を落とす。** `build_model`
+        // は関節の子リンクにだけ慣性を付け、根（joint 0 = universe）はゼロの
+        // まま。namiashi は根の `trunk` が質量 0 で慣性を fixed 関節の子
+        // （`trunk_interia`）に持たせているので気づかなかったが、keel は
+        // `base_link` に 18.3 kg が直接書いてあり、WBC と MPC が 53 kg の機体を
+        // 35 kg と思って走った（MuJoCo は .misa から直接作るので 53 kg。
+        // 2026-09-09、trot 0.12 で −0.15 m・ヨー 63°）。固定ベースの動力学では
+        // joint 0 の慣性は使われないので、ここに入れても脚の重力補償は変わらず、
+        // 浮遊ベースへ組み直すとき（`wbc::build_floating_base_model`）と
+        // `body_inertia_at` がこれを拾う。misarta 側で直すのが筋。
+        if let Some(root) = parsed.file.link.iter().find(|l| l.name == parsed.file.robot.root) {
+            if root.inertial.mass > 0.0 {
+                model.inertias[0] = Self::root_link_inertia(&root.inertial);
+            }
+        }
 
         let limits: BTreeMap<String, (f64, f64)> = parsed
             .file
@@ -227,6 +242,19 @@ impl Robot {
         let body = self.body_inertia_at(&self.stance_posture(tuning));
 
         ctrl.set_capture_point_gain(tuning.mpc_capture_point_gain_s);
+        // **接地力のコストと上限は質量で伸ばす。** quadruped-gait の既定
+        // （`r_diag = 1e-3`、`max_normal_force = 200 N`）は namiashi（2.4 kg）で
+        // 詰めた値で、重い機体ではそのままだと (a) 接地力 1 本が 200 N で
+        // 頭打ち（keel 35 kg は trot の 2 本支持で 1 本 172 N、53 kg なら 260 N）、
+        // (b) 力の 2 乗のコストが追従のコストを圧倒して、体重を支えない解が
+        // 最適になる。keel の MuJoCo でこれが起きた（MPC の接地力の合計が
+        // 体重の 1/4、胴体の目標加速度が −8 m/s²、trot 0.12 が −0.15 m・
+        // ヨー 63°）。力を「体重で割った無次元量」で罰する形に揃える。
+        let weight_n = body.mass_kg * 9.806_65;
+        let r_diag = tuning
+            .mpc_force_cost
+            .unwrap_or(1e-3 * (2.4 * 9.806_65 / weight_n).powi(2));
+        let max_normal_force = 1.5 * weight_n;
         match mode {
             GaitMode::Mpc => ctrl.set_srbd_mpc_config(quadruped_gait::SrbdMpcConfig {
                 horizon_steps: tuning.mpc_horizon_steps,
@@ -236,6 +264,8 @@ impl Robot {
                 // （胴体が左右対称ならもともと小さい）。
                 inertia_diag_body: body.inertia_body.diagonal(),
                 friction_mu: wbc.friction_mu,
+                r_diag,
+                max_normal_force,
                 ..quadruped_gait::SrbdMpcConfig::default()
             }),
             GaitMode::CentroidalSrbd => {
@@ -302,7 +332,21 @@ impl Robot {
         kin
     }
 
-    /// 歩容の出力（IK 座標系）をモデル座標系の関節ベクトルへ直す。
+    /// `.misa` の `[link.inertial]` を misarta の [`misarta::model::LinkInertia`] へ
+/// （`misarta::native::build_model` の子リンクと同じ変換）。慣性テンソルは
+/// 原点の回転でリンク座標へ回す。
+fn root_link_inertia(i: &misarta::native::schema::Inertial) -> misarta::model::LinkInertia<f64> {
+    let [r, p, y] = i.origin.rpy.unwrap_or([0.0; 3]);
+    let rot = nalgebra::Rotation3::from_euler_angles(r, p, y);
+    let raw = nalgebra::Matrix3::new(i.ixx, i.ixy, i.ixz, i.ixy, i.iyy, i.iyz, i.ixz, i.iyz, i.izz);
+    misarta::model::LinkInertia {
+        mass: i.mass,
+        center_of_mass: nalgebra::Vector3::new(i.origin.xyz[0], i.origin.xyz[1], i.origin.xyz[2]),
+        rotational_inertia: rot.matrix() * raw * rot.matrix().transpose(),
+    }
+}
+
+/// 歩容の出力（IK 座標系）をモデル座標系の関節ベクトルへ直す。
     ///
     /// 腕は歩容の管轄外なので `arm` はそのまま持ち越す。
     /// 胴体を `[roll, pitch]` (rad) 傾けた姿勢の関節角。
