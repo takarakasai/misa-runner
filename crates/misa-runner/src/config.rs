@@ -990,6 +990,12 @@ pub struct GaitTuning {
     /// **実機ではモータの減衰・摩擦を同定してから決めること。**
     #[serde(default = "default_contact_passive_scale")]
     pub contact_passive_scale: f64,
+    /// MPC の接地力のコスト（`SrbdMpcConfig::r_diag`）。`None`（既定）なら
+    /// 質量から決める: namiashi（2.4 kg）で詰めた 1e-3 を `(2.4 g / m g)²` で
+    /// 伸ばし、力を体重で割った無次元量に対して同じ罰にする。重い機体で
+    /// 既定の 1e-3 のままだと、体重を支えない解が最適になる（keel）。
+    #[serde(default)]
+    pub mpc_force_cost: Option<f64>,
     /// 胴体の状態（高さ・速度）をどう推定するか。
     ///
     /// - `leg_odometry`（既定）: 接地足の運動学だけ。状態を持たず毎周期の
@@ -1001,11 +1007,13 @@ pub struct GaitTuning {
     ///   作る。計画に対する位置誤差は変わらず脚オドメトリで出す。
     #[serde(default)]
     pub estimator: EstimatorKind,
-    /// 接地点の捕捉点フィードバックのゲイン [s]。`0` で無効。
+    /// 接地点の捕捉点フィードバックのゲイン [s]。**既定 0（無効）。**
     ///
-    /// **硬い PD（kp ≥ 100 / kv ≤ 1.2）では正帰還になることが
-    /// `quadruped_gait` 側で報告されている**（追従の雑音を増幅する）。
-    /// 既定は quadruped-gait の既定値と同じ 0.05。切り分けるときは 0 に。
+    /// quadruped-gait の既定は 0.05 だが、**追従の悪い相手には正帰還になる**
+    /// （観測速度と指令の差で着地点を動かすので、追従誤差を増幅する）。
+    /// namiashi では MPC 単体で trot が +0.496 → +0.154 m に落ち、keel では
+    /// MPC + WBC が −0.15 m・ヨー 63° で歩けなかった（0 にしたら +1.16 m、
+    /// 96 %）。articara も 0 に落としている。効かせるなら機体で値を出す。
     #[serde(default = "default_mpc_capture_point_gain_s")]
     pub mpc_capture_point_gain_s: f64,
     /// 速度指令を 0 から最大まで振り切るのにかける時間 [s]。0 でランプ無し。
@@ -1120,7 +1128,7 @@ fn default_mpc_dt_per_step() -> f64 {
 
 /// `quadruped_gait::mpc_controller::DEFAULT_CAPTURE_POINT_GAIN_S`。
 fn default_mpc_capture_point_gain_s() -> f64 {
-    0.05
+    0.0
 }
 
 fn default_velocity_ramp_s() -> f64 {
@@ -1163,6 +1171,7 @@ impl Default for GaitTuning {
             estimator_use_measured_contact: false,
             contact_from_torque: false,
             contact_passive_scale: default_contact_passive_scale(),
+            mpc_force_cost: None,
             estimator: EstimatorKind::LegOdometry,
             velocity_ramp_s: default_velocity_ramp_s(),
             velocity_ramp_stop_s: default_velocity_ramp_stop_s(),
