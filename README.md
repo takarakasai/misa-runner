@@ -862,6 +862,50 @@ N·m なので、そのまま流すと 12 軸ぶんの N·m が A に読み替�
 歩容を**既定値のまま**（歩幅 0.06/0.08/0.10 m）0.05 m/s で走らせたときの
 古い表と、位置出力・MPC の比較も機体側へ移した。
 
+### 基準姿勢（立ち姿勢）を機体ごとに決める
+
+要件は [`doc/reference_stance.md`](doc/reference_stance.md)。歩容の着地点計画は
+`LegKinematics::nominal_foot_body`（脚ごとの足先位置）を基準にするので、それを
+**3 通りの由来**から決められる（優先順に）:
+
+```toml
+[gait]
+stance_feet_body = { fl = [x, y, z], fr = [...], rl = [...], rr = [...] }  # c. 明示（胴体座標 [m]）
+stance_pose = "stand_measured"      # b. モデルの名前付きポーズの順運動学
+stance_height_m = 0.30              # a. 高さだけ（既定。4 脚とも z = −h、x / y は kinematics_pose の FK）
+stance_symmetrize = false           # b / c を左右で平均するか（取ったことが残る）
+stance_pitch_rad = 0.0              # 意図した前後の傾き（前足が低い＝正）。違えば警告
+stance_pitch_warn_rad = 0.035       # 2°
+stance_symmetry_warn_m = 0.01
+stance_note = "..."                 # 出どころ（stance capture --write が書く）
+```
+
+**`stance_height_m` だけの既存プロファイルは 1 ビットも変わらない**（回帰テストで
+固定）。実行中の高さ変更（CH3 / `r` `f`）は基準姿勢の 4 脚を同じだけ上下させる
+ので、前後の高さ差や足パターンは保たれる。
+
+起動時（`load_from_config`）と `check` が検査する: ポーズの可動域、基準位置と
+歩幅/2 前後・遊脚の頂点での IK 可達と可動域、左右差（許容超えは警告）、前後の
+傾き（宣言と違えば警告）、膝の向き（ポーズ由来なら `knee_pattern` で IK し直して
+元の角度に戻るか）。**エラーがあれば起動しない。** `check` は足先・高さ・スパン・
+幅・足パターンの中心・傾きを出す。
+
+**実機の観測から作る**（手で 12 個の数を写さない）:
+
+```sh
+misa-run stance capture --robot robots/x.toml --secs 3 --symmetrize --write robots/x.toml   # 実機を読む（指令は脱力）
+misa-run stance capture --robot robots/x.toml --from-record run.rec --at 5.0                 # 記録から
+```
+
+`--write` は `stance_feet_body` / `stance_symmetrize` / `stance_pitch_rad`（測った傾き
+を「意図した傾き」として）/ `stance_note` を書く。**採用前後を並べる**なら
+`check` の数字と、`sim --vx 0 --features render --video DIR --cam-fixed --cam-az 90`
+を 2 つのプロファイルで撮って同じフレームを並べる。
+
+keel の実測姿勢（`doc/reference_stance.md` §1）を入れて MuJoCo で立たせると
+**pitch −4.24°**（実機 IMU −4.25°、順運動学 −4.36°）で、モデルの幾何が実機と合って
+いることの回帰になっている。
+
 ### 歩幅が速度の上限を決める
 
 `歩幅 / (周期 × 接地比)` がその歩容の最高速度。ライブラリの既定では:

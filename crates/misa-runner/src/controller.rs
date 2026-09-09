@@ -167,7 +167,8 @@ impl Controller {
     /// `arm_app_driven` はアプリが腕サーボを駆動できるか
     /// （`misa_hal::arm::ArmServo::is_app_driven`）。
     pub fn with_arm(robot: Robot, cfg: AppConfig, arm_app_driven: bool) -> Self {
-        let stance_height_m = cfg.gait.stance_height_m;
+        // 基準姿勢の胴体高さ（高さだけの由来なら stance_height_m そのもの）。
+        let stance_height_m = robot.reference_height_m(&cfg.gait);
         let gait_select = GaitSelect::Crawl;
         let gait = robot.build_gait(&cfg.gait, &cfg.wbc, gait_select);
         let chicken = ChickenHead::new(&cfg.poses);
@@ -484,7 +485,7 @@ impl Controller {
         }
         // 胴体高さはスティックで上下できる。歩容の立ち位置そのものを動かす
         // （全歩容。[`Self::apply_body_height`]）。
-        let h = self.clamp_body_height(self.cfg.gait.stance_height_m + cmd.height_offset_m);
+        let h = self.clamp_body_height(self.robot.reference_height_m(&self.cfg.gait) + cmd.height_offset_m);
         self.apply_body_height(h);
         let want = match cmd.mode {
             ModeRequest::Walk => [cmd.velocity.vx_m_s, cmd.velocity.vy_m_s, cmd.velocity.wz_rad_s],
@@ -716,7 +717,7 @@ impl Controller {
         if (h - self.applied_height_m).abs() < 1e-6 {
             return;
         }
-        self.gait.set_kinematics(self.robot.kin_at_height(h));
+        self.gait.set_kinematics(self.robot.stance_kinematics_at_height(&self.cfg.gait, h));
         self.gait.set_body_height_m(h);
         self.applied_height_m = h;
     }
@@ -729,7 +730,8 @@ impl Controller {
 
     /// 歩容が「今この設定で立つ」姿勢。時間を進めずに取り出す。
     fn stance_targets(&mut self) -> JointVec {
-        self.apply_body_height(self.cfg.gait.stance_height_m);
+        let h = self.robot.reference_height_m(&self.cfg.gait);
+        self.apply_body_height(h);
         self.gait.set_velocity_cmd(velocity_cmd(0.0, 0.0, 0.0));
         let out = self.gait.tick(0.0);
         self.robot.output_to_joints(&out, self.targets.arm)
