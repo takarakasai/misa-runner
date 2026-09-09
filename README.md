@@ -902,7 +902,13 @@ misa-run sim --robot robots/testquad.toml --gait-controller mpc --wbc-output pos
 
 **MPC の機体諸元はモデルから入れる。** 入れないと quadruped-gait の既定
 （Cheetah 級の 9 kg・慣性 0.07/0.26/0.24）で走り、namiashi（2.4 kg・
-0.008/0.034/0.034）とは 4〜8 倍ずれる。`misa-run check` が実際に入る値を出す:
+0.008/0.034/0.034）とは 4〜8 倍ずれる。**接地力のコスト（`r_diag`）と上限も
+質量で伸ばす**（力を体重で割った無次元量で罰する。`[gait] mpc_force_cost` で
+上書き可）— namiashi の値のままだと keel（53 kg）では体重を支えない解が最適に
+なった。**misarta は根リンク自身の `[link.inertial]` を落とす**ので
+`Robot::load` で補っている（keel は `base_link` の 18.3 kg が消えて 35 kg に
+見えていた。namiashi は根の質量が 0 なので無事）。`misa-run check` が実際に
+入る値を出すので、**.misa の link 質量の合計と突き合わせること**:
 
 ```
 歩容コントローラ: MPC (SRBD)（Crawl=Mpc Walk=Mpc Trot=Mpc）
@@ -1063,9 +1069,10 @@ keel-runner、namiashi は namiashi-runner2）。namiashi のもの（`robots/te
   1 台落ちたときの縮退性能はこれで決まる。直すなら misa-actuator 側。
 - **WBC の速度出力は詰め切れていない。** シムのアクチュエータのゲイン
   （`--kv-velocity`）に強く依り、MPC 歩容と組むと後ろへ走る。
-- **MPC 歩容は WBC と組むこと。** WBC 無効のまま MPC を選ぶと、接地点の
-  捕捉点フィードバックが追従の悪い相手に対して正帰還になる
-  （`gait.mpc_capture_point_gain_s = 0` で消える）。
+- **捕捉点フィードバック（`gait.mpc_capture_point_gain_s`）は既定 0。** 追従の
+  悪い相手に対して正帰還になり、namiashi（MPC 単体 +0.496 → +0.154 m）も
+  keel（MPC + WBC が −0.15 m・ヨー 63°）も歩けなくなった。効かせるなら機体で
+  値を出す。
 - **WBC のトルク・速度出力は実機で回したことがない。** HAL からモータの
   コマンド（`0xA1` / `0xA2`）まで配線して MuJoCo で確かめてあるだけ。
   LKMTech の MIT はホスト側エミュレーション（`measure` + `set_torque` の
