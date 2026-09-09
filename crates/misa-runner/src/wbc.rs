@@ -1208,7 +1208,7 @@ impl WbcRunner {
                     return;
                 }
                 let mode = Self::mode_of(output);
-                if !modes.contains(&mode) {
+                if !Self::plant_can(modes, mode) {
                     if self.warned_unsupported != Some(output) {
                         log::warn!(
                             "この機体は {mode:?} 制御を扱えないので WBC の {} 出力は使えません（今のまま）",
@@ -1231,6 +1231,22 @@ impl WbcRunner {
             WbcOutput::Velocity => misa_core::ControlMode::Velocity,
             WbcOutput::Position => misa_core::ControlMode::Position,
         }
+    }
+
+    /// Plant がこの制御モードの指令を**意味を変えずに**受けられるか。
+    ///
+    /// 名乗っているモードそのものに加えて、**MIT（インピーダンス）しか無い
+    /// 機体は位置出力を受けられる**。位置出力の指令は「目標角 + 前置トルク」で、
+    /// MIT の機体はそれに kp/kd を毎周期載せて `τ = kp(q_d − q) − kd·q̇ + τ_ff`
+    /// にする（[`crate::snapshot::command`]）。WBC を切った素の歩容が keel の
+    /// ブリッジへ出ているのも同じ形なので、位置出力にしても線に乗る量の
+    /// 意味は変わらない。**トルク出力は含めない** — kp = kd = 0 で τ だけ
+    /// 出す形になり、ゲインで抑えていた誤差がそのまま出る（MuJoCo でも
+    /// keel のトルク出力は未調整で後退する）。使うなら Plant 側で
+    /// `Torque` を名乗ってから。
+    pub fn plant_can(modes: &[misa_core::ControlMode], mode: misa_core::ControlMode) -> bool {
+        use misa_core::ControlMode::{Impedance, Position};
+        modes.contains(&mode) || (mode == Position && modes.contains(&Impedance))
     }
 
     pub fn output(&self) -> WbcOutput {
@@ -1391,6 +1407,16 @@ mod tests {
         assert_eq!(w.output(), WbcOutput::Torque);
         w.apply_request(Some(WbcRequest::Off), &all);
         assert!(!w.is_active());
+        // MIT しか名乗らない Plant（keel のブリッジ）: 位置出力は MIT の
+        // 「目標角 + 前置トルク + kp/kd」そのものなので入る。トルクは拒否。
+        let mit_only = [ControlMode::Impedance];
+        assert!(WbcRunner::plant_can(&mit_only, ControlMode::Position));
+        assert!(!WbcRunner::plant_can(&mit_only, ControlMode::Torque));
+        assert!(!WbcRunner::plant_can(&mit_only, ControlMode::Velocity));
+        w.apply_request(Some(WbcRequest::Position), &mit_only);
+        assert!(w.is_active() && w.output() == WbcOutput::Position);
+        w.apply_request(Some(WbcRequest::Torque), &mit_only);
+        assert_eq!(w.output(), WbcOutput::Position, "MIT の機体でトルク出力に替わっている");
     }
 
     /// **浮遊ベースを挟んでも運動学は変わらない。** 関節は 1 つずつ後ろへ
