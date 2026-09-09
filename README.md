@@ -277,7 +277,11 @@ trot で詰めた値を crawl へ持ち込ませない）。
 MuJoCo の trot 0.3 で 位置 → トルク → OFF → 位置 と替えても転倒せず速度も
 保たれた（`--wbc-script "3:torque,7:off,11:position"` で再現できる）。
 **Plant が扱えない出力は拒否して今のまま**（実機はトルク定数を書くまで
-トルク出力に替わらない。`WbcRunner::apply_request`）。要求は
+トルク出力に替わらない。`WbcRunner::apply_request`）。**MIT（インピーダンス）
+しか名乗らない機体 — keel の STM ブリッジ — は位置出力だけ受けられる**:
+位置出力の指令は「目標角 + 前置トルク」で、MIT の機体はそれに kp/kd を
+毎周期載せるので、WBC を切った素の歩容と線に乗る量の意味が変わらない
+（`WbcRunner::plant_can`。起動時の検査も同じ判断）。要求は
 `Intent.wbc` / `Intent.gait_controller`（`None` = そのまま）で、プロポや ROS 2
 の操縦系は送らないので挙動は変わらない。記録形式は 4 に上がった。
 
