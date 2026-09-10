@@ -269,7 +269,8 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         Some(w) => Some(w),
         None => crate::wbc::WbcRunner::new_dormant(&robot, &cfg.wbc),
     };
-    let mut estimator = crate::estimator::BodyEstimator::with_passive_scale(&robot, cfg.gait.estimator, cfg.gait.contact_passive_scale);
+    let mut estimator = crate::estimator::BodyEstimator::with_passive_scale(&robot, cfg.gait.estimator, cfg.gait.contact_passive_scale)
+        .with_filters(cfg.gait.imu_gyro_lpf_hz, cfg.gait.estimator_velocity_lpf_hz);
     // 開ループの重力補償（`[control] gravity_feedforward`）に使う体重。WBC と同じ
     // 出どころ（モデルの慣性の和。根リンクは `Robot::load` が補っている）。
     let weight_n = robot.model.inertias.iter().map(|i| i.mass).sum::<f64>() * 9.81;

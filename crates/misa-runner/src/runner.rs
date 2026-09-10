@@ -570,7 +570,8 @@ pub fn run(
     };
     // **脚オドメトリは WBC の有無に依らず回す。** MPC 歩容も同じ推定を
     // 使うので、出どころは 1 か所（[`crate::estimator`]）。
-    let mut estimator = crate::estimator::BodyEstimator::with_passive_scale(&robot, cfg.gait.estimator, cfg.gait.contact_passive_scale);
+    let mut estimator = crate::estimator::BodyEstimator::with_passive_scale(&robot, cfg.gait.estimator, cfg.gait.contact_passive_scale)
+        .with_filters(cfg.gait.imu_gyro_lpf_hz, cfg.gait.estimator_velocity_lpf_hz);
     // **Plant が名乗らないモードでは出さない。** 実機のトルク制御は、
     // トルク定数を書くまで単位が食い違う（`AppConfig::torque_unit_mismatch`）。
     // ここで止めないと、N·m が電流 (A) として 12 軸ぶん線に乗る。
