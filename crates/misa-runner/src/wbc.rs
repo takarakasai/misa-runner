@@ -1291,7 +1291,9 @@ impl WbcRunner {
             target_q: &out.targets,
             target_foot_body: out.target_foot_body,
             attitude_rad: imu.map(|i| i.rpy_rad).unwrap_or([0.0; 3]),
-            gyro_rad_s: imu.map(|i| i.gyro_rad_s).unwrap_or([0.0; 3]),
+            // ジャイロは推定器を通った値（`gait.imu_gyro_lpf_hz` の一次遅れ込み。
+            // フィルタ無しなら生値と同じ）。
+            gyro_rad_s: body.gyro_body,
             planned_yaw_rad: out.planned_yaw_rad,
             body_velocity: out.body_velocity,
             body: *body,
@@ -1373,6 +1375,7 @@ mod tests {
             position_error_world: Some(na::Vector3::zeros()),
             velocity_world: Some(na::Vector3::zeros()),
             angular_velocity_world: na::Vector3::zeros(),
+            gyro_body: [0.0; 3],
             stance_count: 4,
         }
     }

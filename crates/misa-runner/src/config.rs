@@ -186,6 +186,14 @@ impl AppConfig {
         if self.name.is_empty() {
             return Err("name が空です。ロボット名を書いてください".into());
         }
+        for (name, hz) in [
+            ("gait.imu_gyro_lpf_hz", self.gait.imu_gyro_lpf_hz),
+            ("gait.estimator_velocity_lpf_hz", self.gait.estimator_velocity_lpf_hz),
+        ] {
+            if !(hz.is_finite() && hz >= 0.0) {
+                return Err(format!("{name} = {hz} は 0 以上の Hz で書いてください（0 で無し）"));
+            }
+        }
         let sc = self.control.gravity_feedforward_scale;
         if !(0.0..=1.5).contains(&sc) || !sc.is_finite() {
             return Err(format!(
@@ -1102,6 +1110,20 @@ pub struct GaitTuning {
     /// **実機ではモータの減衰・摩擦を同定してから決めること。**
     #[serde(default = "default_contact_passive_scale")]
     pub contact_passive_scale: f64,
+    /// IMU のジャイロに掛ける一次遅れのカットオフ [Hz]。0 で無し（既定）。
+    ///
+    /// WBC の姿勢 kd 項・運動方程式の v、MPC の角速度観測はこの値を見る。
+    /// 実機のジャイロは生値で届くので、200 Hz ホストの微分系の帰還に
+    /// そのまま入れるとブリッジの遅れと組んで発振しうる。10〜20 Hz が目安
+    /// （2〜3 周期の遅れ）。姿勢角には掛けない（IMU 側で融合済み）。
+    #[serde(default)]
+    pub imu_gyro_lpf_hz: f64,
+    /// 脚オドメトリの胴体速度に掛ける一次遅れのカットオフ [Hz]。0 で無し（既定）。
+    ///
+    /// WBC の高さ・速度 kd 項と MPC の速度閉ループが見る値。J·q̇ を接地脚で
+    /// 平均しただけの生値なので、関節速度のノイズがそのまま乗る。
+    #[serde(default)]
+    pub estimator_velocity_lpf_hz: f64,
     /// MPC の接地力のコスト（`SrbdMpcConfig::r_diag`）。`None`（既定）なら
     /// 質量から決める: namiashi（2.4 kg）で詰めた 1e-3 を `(2.4 g / m g)²` で
     /// 伸ばし、力を体重で割った無次元量に対して同じ罰にする。重い機体で
@@ -1296,6 +1318,8 @@ impl Default for GaitTuning {
             estimator_use_measured_contact: false,
             contact_from_torque: false,
             contact_passive_scale: default_contact_passive_scale(),
+            imu_gyro_lpf_hz: 0.0,
+            estimator_velocity_lpf_hz: 0.0,
             mpc_force_cost: None,
             estimator: EstimatorKind::LegOdometry,
             velocity_ramp_s: default_velocity_ramp_s(),

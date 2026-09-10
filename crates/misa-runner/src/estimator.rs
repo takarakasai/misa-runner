@@ -41,6 +41,40 @@ use crate::robot::Robot;
 /// 重力 [m/s²]。
 const G: f64 = 9.806_65;
 
+/// 3 成分の一次遅れ（`gait.imu_gyro_lpf_hz` / `gait.estimator_velocity_lpf_hz`）。
+///
+/// `y += α (x − y)`、`α = dt / (τ + dt)`、`τ = 1 / (2π f_c)`。最初の値はそのまま
+/// 通す（0 からの立ち上がりで姿勢 PD に偽の過渡を作らない）。
+#[derive(Debug, Clone, Copy)]
+pub struct Lpf3 {
+    tau_s: f64,
+    y: Option<[f64; 3]>,
+}
+
+impl Lpf3 {
+    /// `cutoff_hz <= 0` なら `None`（フィルタ無し）。
+    pub fn new(cutoff_hz: f64) -> Option<Self> {
+        (cutoff_hz > 0.0 && cutoff_hz.is_finite()).then(|| Self {
+            tau_s: 1.0 / (2.0 * std::f64::consts::PI * cutoff_hz),
+            y: None,
+        })
+    }
+    pub fn apply(&mut self, x: [f64; 3], dt: f64) -> [f64; 3] {
+        let Some(y) = self.y.as_mut() else {
+            self.y = Some(x);
+            return x;
+        };
+        let alpha = if dt > 0.0 { (dt / (self.tau_s + dt)).clamp(0.0, 1.0) } else { 1.0 };
+        for k in 0..3 {
+            y[k] += alpha * (x[k] - y[k]);
+        }
+        *y
+    }
+    pub fn reset(&mut self) {
+        self.y = None;
+    }
+}
+
 /// 接地足から測った胴体の状態。**接地足が 1 本も無ければ全部 `None`。**
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct BodyState {
@@ -55,8 +89,11 @@ pub struct BodyState {
     /// 胴体の並進速度 [m/s]（世界座標系）。
     pub velocity_world: Option<na::Vector3<f64>>,
     /// 胴体の角速度 [rad/s]（世界座標系）。**IMU のジャイロを回しただけ**
-    /// なので接地足が無くても出る。
+    /// なので接地足が無くても出る。`gait.imu_gyro_lpf_hz` の一次遅れ込み。
     pub angular_velocity_world: na::Vector3<f64>,
+    /// IMU のジャイロ [rad/s]（胴体座標系）、一次遅れ込み。WBC はこれを見る
+    /// （生値ではなく）。フィルタ無しなら生値そのもの。
+    pub gyro_body: [f64; 3],
     /// 立脚と見なした脚の数。
     pub stance_count: usize,
 }
@@ -93,6 +130,9 @@ pub struct BodyEstimator {
     qdd_filt: [[f64; 3]; 4],
     /// 接地フラグのヒステリシス状態。
     contact_flags: [Option<bool>; 4],
+    /// ジャイロと胴体速度の一次遅れ（設定で 0 なら `None`）。
+    gyro_lpf: Option<Lpf3>,
+    vel_lpf: Option<Lpf3>,
 }
 
 impl BodyEstimator {
@@ -142,7 +182,18 @@ impl BodyEstimator {
             prev_qd: None,
             qdd_filt: [[0.0; 3]; 4],
             contact_flags: [None; 4],
+            gyro_lpf: None,
+            vel_lpf: None,
         }
+    }
+
+    /// ジャイロと胴体速度の一次遅れを付ける（[Hz]。0 で無し）。
+    /// [`crate::config::GaitTuning::imu_gyro_lpf_hz`] /
+    /// [`crate::config::GaitTuning::estimator_velocity_lpf_hz`]。
+    pub fn with_filters(mut self, gyro_lpf_hz: f64, velocity_lpf_hz: f64) -> Self {
+        self.gyro_lpf = Lpf3::new(gyro_lpf_hz);
+        self.vel_lpf = Lpf3::new(velocity_lpf_hz);
+        self
     }
 
     /// **開ループの重力補償トルク**（[`crate::config::GravityFeedforward`]）。
@@ -313,6 +364,12 @@ impl BodyEstimator {
         self.prev_qd = None;
         self.qdd_filt = [[0.0; 3]; 4];
         self.contact_flags = [None; 4];
+        if let Some(f) = self.gyro_lpf.as_mut() {
+            f.reset();
+        }
+        if let Some(f) = self.vel_lpf.as_mut() {
+            f.reset();
+        }
     }
 
     /// 1 周期ぶん。`gyro_body` は IMU の角速度、`accel_body` は加速度計
@@ -330,10 +387,17 @@ impl BodyEstimator {
     ) -> BodyState {
         let [roll, pitch, yaw] = attitude_rad;
         let r_wb = na::Rotation3::from_euler_angles(roll, pitch, yaw);
+        // ジャイロの一次遅れ。**ここから先は全部この値**（脚オドメトリの回転項、
+        // 世界座標の角速度、WBC が見る `gyro_body`）。
+        let gyro_body = match self.gyro_lpf.as_mut() {
+            Some(f) => f.apply(gyro_body, dt),
+            None => gyro_body,
+        };
         let omega_body = na::Vector3::new(gyro_body[0], gyro_body[1], gyro_body[2]);
 
         let mut out = BodyState {
             angular_velocity_world: r_wb * omega_body,
+            gyro_body,
             stance_count: stance.iter().filter(|s| **s).count(),
             ..BodyState::default()
         };
@@ -380,6 +444,12 @@ impl BodyEstimator {
             });
             out.velocity_world = Some(est.body_vel_world);
             out.height_m = Some(est.body_pos_world.z);
+        }
+        // 胴体速度の一次遅れ（`gait.estimator_velocity_lpf_hz`）。接地脚が無くて
+        // `None` の周期はフィルタも進めない（次に値が来たらそこから続ける）。
+        if let (Some(f), Some(v)) = (self.vel_lpf.as_mut(), out.velocity_world) {
+            let y = f.apply([v.x, v.y, v.z], dt);
+            out.velocity_world = Some(na::Vector3::new(y[0], y[1], y[2]));
         }
         out
     }
@@ -661,6 +731,40 @@ mod tests {
         );
         let w = s.angular_velocity_world;
         assert!(w.x.abs() < 1e-9 && (w.y - 1.0).abs() < 1e-9, "{w:?}");
+    }
+
+    /// **一次遅れ: 0 Hz は素通し、正のカットオフは初値そのまま → 一定入力へ収束。**
+    /// τ = 1/(2π·10 Hz) = 15.9 ms なので、5 ms 刻み 20 周期（100 ms）で 99 % 超。
+    #[test]
+    fn the_low_pass_passes_through_at_zero_and_settles_at_a_positive_cutoff() {
+        assert!(Lpf3::new(0.0).is_none());
+        assert!(Lpf3::new(-1.0).is_none());
+        let mut f = Lpf3::new(10.0).unwrap();
+        // 最初の値は素通し（偽の過渡を作らない）。
+        assert_eq!(f.apply([1.0, 2.0, 3.0], 0.005), [1.0, 2.0, 3.0]);
+        // ステップ: 1 周期目は α = 5/(15.9+5) ≈ 0.24 だけ動く。
+        let y1 = f.apply([2.0, 2.0, 3.0], 0.005);
+        assert!(y1[0] > 1.2 && y1[0] < 1.3, "{y1:?}");
+        assert_eq!(y1[1], 2.0);
+        let mut y = y1;
+        for _ in 0..19 {
+            y = f.apply([2.0, 2.0, 3.0], 0.005);
+        }
+        assert!((y[0] - 2.0).abs() < 0.01, "{y:?}");
+        // 推定器に付けると、静止中の値はフィルタ有無で同じ（定常値は変えない）。
+        let r = robot();
+        let q = stance_pose(&r);
+        let mut plain = BodyEstimator::new(&r, EstimatorKind::LegOdometry);
+        let mut filt = BodyEstimator::new(&r, EstimatorKind::LegOdometry).with_filters(10.0, 10.0);
+        let mut a = plain.estimate(&q, &JointVec::zeros(), &q, [0.0; 3], [0.0, 0.0, 0.0], None, [true; 4], 0.005);
+        let mut b = filt.estimate(&q, &JointVec::zeros(), &q, [0.0; 3], [0.0, 0.0, 0.0], None, [true; 4], 0.005);
+        for _ in 0..50 {
+            a = plain.estimate(&q, &JointVec::zeros(), &q, [0.0; 3], [0.0, 0.0, 0.1], None, [true; 4], 0.005);
+            b = filt.estimate(&q, &JointVec::zeros(), &q, [0.0; 3], [0.0, 0.0, 0.1], None, [true; 4], 0.005);
+        }
+        assert_eq!(a.gyro_body, [0.0, 0.0, 0.1]);
+        assert!((b.gyro_body[2] - 0.1).abs() < 1e-3, "{:?}", b.gyro_body);
+        assert!((a.velocity_world.unwrap() - b.velocity_world.unwrap()).norm() < 1e-6);
     }
 
     /// **開ループの重力補償を接地力の推定に通すと、足 1 本あたり体重の 1/4 が戻る。**
