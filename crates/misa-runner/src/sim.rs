@@ -518,12 +518,14 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             .and_then(|w| w.tick(&out, &obs, &measured, &measured_qd, &body, dt));
         // WBC が解いていない周期だけ、開ループの重力補償を τ_ff に載せる。
         let gravity_ff = (plan.is_none() && cfg.control.gravity_feedforward.is_on()).then(|| {
-            estimator.gravity_feedforward(
-                &out.targets,
-                out.stance,
-                weight_n,
-                cfg.control.gravity_feedforward.with_weight(),
-            )
+            estimator
+                .gravity_feedforward(
+                    &out.targets,
+                    out.stance,
+                    weight_n,
+                    cfg.control.gravity_feedforward.with_weight(),
+                )
+                .scaled(cfg.control.gravity_feedforward_scale)
         });
         // 調査用: WBC の τ と Plant が実際に掛けたトルクを脚ごとに並べる
         // （README「調べ方」）。位置出力で立ち止まらせれば Plant 側は重力補償

@@ -630,9 +630,10 @@ pub fn check(cfg: &AppConfig) -> Result<(), String> {
     if cfg.control.gravity_feedforward.is_on() {
         let weight = robot.model.inertias.iter().map(|i| i.mass).sum::<f64>() * 9.81;
         println!(
-            "重力補償（開ループ）: {}（体重 {:.1} N を τ_ff に。実測は見ない。WBC が回れば WBC が優先）",
+            "重力補償（開ループ）: {}（体重 {:.1} N × 倍率 {:.2} を τ_ff に。実測は見ない。WBC が回れば WBC が優先）",
             cfg.control.gravity_feedforward.label(),
-            weight
+            weight,
+            cfg.control.gravity_feedforward_scale
         );
     }
     // **どの歩容コントローラで回るかを実機の前に見せる。** MPC を選んだ

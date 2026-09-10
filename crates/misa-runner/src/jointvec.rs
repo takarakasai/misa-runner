@@ -25,6 +25,17 @@ impl Default for JointVec {
 }
 
 impl JointVec {
+    /// 全成分を `k` 倍したもの（前置トルクの倍率など）。
+    pub fn scaled(&self, k: f64) -> Self {
+        let mut out = *self;
+        for leg in out.legs.iter_mut() {
+            for v in leg.iter_mut() {
+                *v *= k;
+            }
+        }
+        out.arm *= k;
+        out
+    }
     pub const fn zeros() -> Self {
         Self {
             legs: [[0.0; 3]; 4],
