@@ -147,6 +147,7 @@ pub struct MujocoPlant {
     prev_base_vel_world: Option<([f64; 3], f64)>,
     /// 制御モードで切り替えるゲイン。**同じ `actuator_kv` の欄を、位置と
     /// 速度で違う意味に使う**ので、両方を控えて毎周期入れ直す。
+    position_kp: f64,
     position_kv: f64,
     velocity_kv: f64,
     /// 1 tick で進める MuJoCo のフレーム数。
@@ -301,6 +302,7 @@ impl MujocoPlant {
             contact_threshold_n: opts.contact_threshold_n,
             root_link: opts.root_link.clone(),
             prev_base_vel_world: None,
+            position_kp: opts.actuator_kp,
             position_kv: opts.actuator_kv,
             velocity_kv: opts.velocity_kv,
             frames_per_tick,
@@ -489,7 +491,18 @@ impl Plant for MujocoPlant {
                 // 同じ形）。位置制御しか持たない機体では無視される値。
                 ControlMode::Position | ControlMode::Impedance => {
                     self.model.joints[ji].actuator_mode = ActuatorMode::Position;
-                    self.model.joints[ji].actuator_kv = self.position_kv;
+                    // **指令に kp/kd が載っていればそれを使う。** ブリッジ越しの
+                    // 機体（keel）は `[hardware.mit_gains]` を毎周期載せるので、
+                    // シムでも同じ関節別のゲインで回る（実機は calf だけ kp の
+                    // 上限が低い、という事情をシムで見られる）。載っていない
+                    // 機体（シリアル）は `--kp` / `--kv` の一律の値。
+                    if a.kp_nm_per_rad > 0.0 {
+                        self.model.joints[ji].actuator_kp = a.kp_nm_per_rad;
+                        self.model.joints[ji].actuator_kv = a.kd_nm_s_per_rad;
+                    } else {
+                        self.model.joints[ji].actuator_kp = self.position_kp;
+                        self.model.joints[ji].actuator_kv = self.position_kv;
+                    }
                     self.sim.set_position_target(ji, a.position_rad);
                     self.sim.set_torque_feedforward(ji, a.torque_ff_nm);
                 }
