@@ -403,6 +403,16 @@ ros2 service call /namiashi2/misa_run/set_body_attitude \
 指令の 94〜97% が出る。**実機のゲインとは別物**で、あちらは STM ブリッジが
 MIT モードで持つ。
 
+**プロファイルに `[hardware.mit_gains]` があれば、シムの脚もそのゲインで回る**
+（2026-09-10 以降。`--kp` / `--kv` は載っていない機体 — シリアル — の一律の値）。
+ブリッジ越しの機体は kp/kd を毎周期指令に載せるので、MuJoCo の位置制御に
+同じ値を入れれば実機の MIT と同じ形になる。関節別に上限が違う機体
+（keel は hip / thigh kp 2000、calf は kp 500・kd 5 まで）を実機の値で評価できる。
+keel の trot 0.12 で kp 300 / kd 2 なら素の歩容は −0.30 m（後退）、MPC + WBC
+位置出力で +0.50 m。kp 2000 / 2000 / 500、kd 20 / 20 / 5 で +0.52 m と +1.12 m
+（keel-runner の `doc/bringup_checklist_keel.md` 段階 1-3 の表）。calf の減衰が
+足りないぶんを埋めるのは WBC の前置トルクで、hip / thigh の kd を上げても戻らない。
+
 うまくいっているかは終了時の 3 行で見る:
 
 | 見るもの | 良い状態 |
