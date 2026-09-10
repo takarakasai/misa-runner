@@ -759,9 +759,51 @@ impl GaitControllerKind {
     }
 }
 
+/// **開ループの重力補償。** WBC を使わずに、計画上の目標角と接地だけから
+/// 前置トルクを作って指令に添える（MIT の τ_ff、シムの位置制御の前置）。
+///
+/// 実測は一切見ない — 関節角も IMU も脚オドメトリも入らないので、
+/// ホスト側に帰還ループは増えない。`[wbc]` の位置出力との違いはそこ
+/// （あちらは胴体の姿勢・高さ・速度の PD が τ_ff に乗る）。
+///
+/// MIT の kp が低い機体（keel は calf が kp 500 / kd 5 まで）で、PD だけでは
+/// 自重を持てずに沈む・後退するときの最初の一手。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GravityFeedforward {
+    /// 前置なし（従来どおり）。
+    #[default]
+    Off,
+    /// 脚リンクの重力だけ（胴体を固定した RNEA）。体重は PD が持つ。
+    Legs,
+    /// 脚の重力 + 体重を計画上の接地脚に等分した接地力（`τ = τ_g − Jᵀ f`）。
+    /// 胴体は水平と仮定する（開ループなので IMU は見ない）。
+    Full,
+}
+
+impl GravityFeedforward {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Legs => "脚の重力のみ",
+            Self::Full => "脚の重力 + 体重の配分",
+        }
+    }
+    pub fn is_on(&self) -> bool {
+        *self != Self::Off
+    }
+    pub fn with_weight(&self) -> bool {
+        *self == Self::Full
+    }
+}
+
 /// 制御ループ全体の設定。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ControlConfig {
+    /// 開ループの重力補償（[`GravityFeedforward`]）。既定 off。
+    /// WBC が有効なあいだは WBC の解が優先され、こちらは使われない。
+    #[serde(default)]
+    pub gravity_feedforward: GravityFeedforward,
     /// ロボットモデル (`.misa`)。ポーズ・シーケンスもここから読む。
     #[serde(default = "default_model_path")]
     pub model: String,
@@ -877,6 +919,7 @@ impl Default for ControlConfig {
             teleop_timeout_ms: default_teleop_timeout_ms(),
             // 省略 = 姿勢指令の上限から導く（`AppConfig::max_tilt_rad`）。
             max_tilt_rad: None,
+            gravity_feedforward: GravityFeedforward::Off,
         }
     }
 }

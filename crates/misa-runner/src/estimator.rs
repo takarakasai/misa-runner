@@ -145,6 +145,51 @@ impl BodyEstimator {
         }
     }
 
+    /// **開ループの重力補償トルク**（[`crate::config::GravityFeedforward`]）。
+    ///
+    /// 計画上の目標角 `q_plan` と計画上の接地 `stance` だけから
+    /// `τ = τ_g(q) − Jᵀ f` を作る。`τ_g` は胴体を固定した脚の重力トルク
+    /// （RNEA、q̇ = q̈ = 0）、`f` は体重 `weight_n` を接地脚に等分した
+    /// 鉛直上向きの接地力（胴体は水平と仮定。`with_weight` が false なら 0）。
+    /// 接地脚が無ければ `f = 0`。**実測は見ない**ので、これを τ_ff に載せても
+    /// ホスト側に帰還ループは増えない。
+    pub fn gravity_feedforward(
+        &self,
+        q_plan: &JointVec,
+        stance: [bool; 4],
+        weight_n: f64,
+        with_weight: bool,
+    ) -> JointVec {
+        let mut q = na::DVector::<f64>::zeros(self.model.nq);
+        for leg in 0..4 {
+            for k in 0..3 {
+                q[self.leg_q_idx[leg][k]] = q_plan.legs[leg][k];
+            }
+        }
+        let g = misarta::rnea::compute_gravity(&self.model, q.as_slice());
+        let n_stance = stance.iter().filter(|s| **s).count();
+        let mut out = JointVec::zeros();
+        for slot in 0..4 {
+            let s = self.signs[slot];
+            let mut tau = [0.0; 3];
+            for k in 0..3 {
+                tau[k] = g[self.leg_v_idx[slot][k]];
+            }
+            if with_weight && stance[slot] && n_stance > 0 && weight_n > 0.0 {
+                let kin = self.kin.legs()[slot];
+                let q_ik: Vec<f64> = (0..3).map(|k| q_plan.legs[slot][k] * s[k]).collect();
+                let j = foot_jacobian_body(kin, q_ik[0], q_ik[1], q_ik[2]);
+                let jt_f = j.transpose() * na::Vector3::new(0.0, 0.0, weight_n / n_stance as f64);
+                for k in 0..3 {
+                    // IK 座標系の Jᵀf をモデル座標系へ（`foot_forces_from_torque` の逆）。
+                    tau[k] -= jt_f[k] * s[k];
+                }
+            }
+            out.legs[slot] = tau;
+        }
+        out
+    }
+
     /// **関節トルクから足の接地力（世界 z 成分 [N]）を推定する。** 足裏
     /// センサが無い機体で接地を知る唯一の道（legged_control も推定した接地力
     /// が閾値を超えたら接地と見なす）。
@@ -616,6 +661,50 @@ mod tests {
         );
         let w = s.angular_velocity_world;
         assert!(w.x.abs() < 1e-9 && (w.y - 1.0).abs() < 1e-9, "{w:?}");
+    }
+
+    /// **開ループの重力補償を接地力の推定に通すと、足 1 本あたり体重の 1/4 が戻る。**
+    /// `gravity_feedforward` と `foot_forces_from_torque` は同じ式の往復なので、
+    /// 符号・添字・IK 座標系の変換が揃っていることの試験。脚の重力だけなら 0 N。
+    #[test]
+    fn gravity_feedforward_round_trips_to_a_quarter_of_the_weight_per_foot() {
+        let r = robot();
+        let mut e = BodyEstimator::new(&r, EstimatorKind::LegOdometry);
+        let q = stance_pose(&r);
+        let weight = 28.0;
+        let ff = e.gravity_feedforward(&q, [true; 4], weight, true);
+        let mut tau = [[None; 3]; 4];
+        for slot in 0..4 {
+            for k in 0..3 {
+                tau[slot][k] = Some(ff.legs[slot][k]);
+            }
+        }
+        let fz = e.foot_forces_from_torque(&q, &JointVec::zeros(), &tau, [0.0; 3], 0.005);
+        for slot in 0..4 {
+            let f = fz[slot].expect("推定できること");
+            assert!((f - weight / 4.0).abs() < 1e-6, "脚 {slot}: {f} ≠ {}", weight / 4.0);
+        }
+        // 3 脚接地なら 1/3 ずつ、遊脚は重力だけ（接地力 0）。
+        let ff3 = e.gravity_feedforward(&q, [true, false, true, true], weight, true);
+        let mut tau3 = [[None; 3]; 4];
+        for slot in 0..4 {
+            for k in 0..3 {
+                tau3[slot][k] = Some(ff3.legs[slot][k]);
+            }
+        }
+        let fz3 = e.foot_forces_from_torque(&q, &JointVec::zeros(), &tau3, [0.0; 3], 0.005);
+        assert!((fz3[0].unwrap() - weight / 3.0).abs() < 1e-6);
+        assert!(fz3[1].unwrap().abs() < 1e-6, "遊脚に接地力が乗っている: {:?}", fz3[1]);
+        // 脚の重力だけ: 接地力 0。
+        let legs_only = e.gravity_feedforward(&q, [true; 4], weight, false);
+        let mut tl = [[None; 3]; 4];
+        for slot in 0..4 {
+            for k in 0..3 {
+                tl[slot][k] = Some(legs_only.legs[slot][k]);
+            }
+        }
+        let fz0 = e.foot_forces_from_torque(&q, &JointVec::zeros(), &tl, [0.0; 3], 0.005);
+        assert!(fz0.iter().all(|f| f.unwrap().abs() < 1e-6));
     }
 
     /// **静的に立っているときの関節トルクから、足 1 本あたり体重の 1/4 が戻る。**

@@ -270,6 +270,9 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         None => crate::wbc::WbcRunner::new_dormant(&robot, &cfg.wbc),
     };
     let mut estimator = crate::estimator::BodyEstimator::with_passive_scale(&robot, cfg.gait.estimator, cfg.gait.contact_passive_scale);
+    // 開ループの重力補償（`[control] gravity_feedforward`）に使う体重。WBC と同じ
+    // 出どころ（モデルの慣性の和。根リンクは `Robot::load` が補っている）。
+    let weight_n = robot.model.inertias.iter().map(|i| i.mass).sum::<f64>() * 9.81;
     let mut controller = Controller::with_arm(robot, cfg.clone(), head_driven);
     // **可動域は `dump` と同じ表で、同じ関数で見る。**
     //
@@ -513,6 +516,15 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         let plan = wbc
             .as_mut()
             .and_then(|w| w.tick(&out, &obs, &measured, &measured_qd, &body, dt));
+        // WBC が解いていない周期だけ、開ループの重力補償を τ_ff に載せる。
+        let gravity_ff = (plan.is_none() && cfg.control.gravity_feedforward.is_on()).then(|| {
+            estimator.gravity_feedforward(
+                &out.targets,
+                out.stance,
+                weight_n,
+                cfg.control.gravity_feedforward.with_weight(),
+            )
+        });
         // 調査用: WBC の τ と Plant が実際に掛けたトルクを脚ごとに並べる
         // （README「調べ方」）。位置出力で立ち止まらせれば Plant 側は重力補償
         // そのものなので、モデルの検算になる。
@@ -549,6 +561,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             out.leg_mode == misa_hal::joint::JointMode::Idle,
             cfg.hardware.mit_gains(),
             plan.as_ref(),
+            gravity_ff.as_ref(),
         );
         if let Some(rec) = recorder.as_ref() {
             let mut shadow = outgoing.clone();

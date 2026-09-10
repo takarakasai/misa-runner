@@ -588,6 +588,16 @@ pub fn run(
             ));
         }
     }
+    // 開ループの重力補償（`[control] gravity_feedforward`）に使う体重。WBC と同じ
+    // 出どころ（モデルの慣性の和）。
+    let weight_n = robot.model.inertias.iter().map(|i| i.mass).sum::<f64>() * 9.81;
+    if cfg.control.gravity_feedforward.is_on() {
+        log::info!(
+            "開ループの重力補償を τ_ff に載せます（{}、体重 {:.1} N）。WBC が回っているあいだは WBC の解が優先",
+            cfg.control.gravity_feedforward.label(),
+            weight_n
+        );
+    }
     let mut controller = Controller::with_arm(robot, cfg.clone(), arm_app_driven);
 
     let mut warned_unread = false;
@@ -794,6 +804,15 @@ pub fn run(
                     last_tick.elapsed().as_secs_f64(),
                 )
             });
+        // WBC が解いていない周期だけ、開ループの重力補償を τ_ff に載せる。
+        let gravity_ff = (plan.is_none() && cfg.control.gravity_feedforward.is_on()).then(|| {
+            estimator.gravity_feedforward(
+                &out.targets,
+                out.stance,
+                weight_n,
+                cfg.control.gravity_feedforward.with_weight(),
+            )
+        });
         // 状態行に出す用。**解いていない周期は `None`** なので、
         // 「WBC 有効だが歩容が回っていない」と「解けている」が潰れない。
         wbc_status = plan
@@ -806,6 +825,7 @@ pub fn run(
             out.leg_mode == JointMode::Idle,
             cfg.hardware.mit_gains(),
             plan.as_ref(),
+            gravity_ff.as_ref(),
         );
 
         // **ここが指令を書き換えてよい唯一の場所。** `dt` は実測を渡す
