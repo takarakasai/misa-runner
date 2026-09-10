@@ -627,6 +627,14 @@ pub fn check(cfg: &AppConfig) -> Result<(), String> {
         Ok(None) => {}
         Err(e) => println!("**WBC を組み立てられません**（run は起動しません）: {e}"),
     }
+    if cfg.control.gravity_feedforward.is_on() {
+        let weight = robot.model.inertias.iter().map(|i| i.mass).sum::<f64>() * 9.81;
+        println!(
+            "重力補償（開ループ）: {}（体重 {:.1} N を τ_ff に。実測は見ない。WBC が回れば WBC が優先）",
+            cfg.control.gravity_feedforward.label(),
+            weight
+        );
+    }
     // **どの歩容コントローラで回るかを実機の前に見せる。** MPC を選んだ
     // つもりで `auto` のままだった、が起動ログだけでは分かりにくい。
     {

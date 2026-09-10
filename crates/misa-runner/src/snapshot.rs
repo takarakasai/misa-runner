@@ -312,6 +312,7 @@ pub fn command(
     relaxed: bool,
     gains: Option<misa_hal::config::MitGains>,
     wbc: Option<&crate::wbc::WbcPlan>,
+    feedforward: Option<&JointVec>,
 ) -> Command {
     let mut cmd = Command::idle(layout.table.len());
     let mode = if relaxed {
@@ -339,6 +340,11 @@ pub fn command(
                     ControlMode::Velocity | ControlMode::Impedance => p.velocity_rad_s,
                     _ => max_speed_rad_s,
                 };
+            } else if let (Some(ff), false) = (feedforward, relaxed) {
+                // **開ループの重力補償。** 位置は歩容の目標そのまま、τ_ff だけ
+                // 添える（`[control] gravity_feedforward`）。WBC が回っていれば
+                // そちらの解が優先で、ここには来ない。
+                a.torque_ff_nm = ff.legs[leg][k];
             }
             // **MIT の機体には kp/kd を毎周期載せる。** 無いと τ が恒等的に
             // 0 になり、位置を指令しているのに脱力したまま崩れる。
@@ -454,7 +460,7 @@ mod tests {
             kp: [40.0, 60.0, 70.0],
             kd: [1.0, 1.5, 2.0],
         };
-        let cmd = command(&layout(), &JointVec::zeros(), 8.0, false, Some(g), None);
+        let cmd = command(&layout(), &JointVec::zeros(), 8.0, false, Some(g), None, None);
         let t = layout().table;
         for (name, kp, kd) in [
             ("FL_hip_joint", 40.0, 1.0),
@@ -492,7 +498,7 @@ mod tests {
         let lay = layout();
         let mut targets = JointVec::zeros();
         targets.arm = 0.42;
-        let cmd = command(&lay, &targets, 8.0, false, None, Some(&wbc_plan(ControlMode::Torque)));
+        let cmd = command(&lay, &targets, 8.0, false, None, Some(&wbc_plan(ControlMode::Torque)), None);
         let a = cmd.get(AxisId::new(0)).unwrap();
         assert_eq!(a.mode, ControlMode::Torque);
         assert_eq!(a.torque_ff_nm, 0.3);
@@ -507,10 +513,10 @@ mod tests {
     fn only_the_velocity_output_puts_a_target_in_the_velocity_field() {
         let lay = layout();
         let q = JointVec::zeros();
-        let vel = command(&lay, &q, 8.0, false, None, Some(&wbc_plan(ControlMode::Velocity)));
+        let vel = command(&lay, &q, 8.0, false, None, Some(&wbc_plan(ControlMode::Velocity)), None);
         assert_eq!(vel.get(AxisId::new(0)).unwrap().velocity_rad_s, 0.2);
 
-        let pos = command(&lay, &q, 8.0, false, None, Some(&wbc_plan(ControlMode::Position)));
+        let pos = command(&lay, &q, 8.0, false, None, Some(&wbc_plan(ControlMode::Position)), None);
         let a = pos.get(AxisId::new(0)).unwrap();
         assert_eq!(a.velocity_rad_s, 8.0);
         assert_eq!(a.position_rad, 0.1);
@@ -530,6 +536,7 @@ mod tests {
             true,
             None,
             Some(&wbc_plan(ControlMode::Torque)),
+            None,
         );
         assert_eq!(cmd.get(AxisId::new(0)).unwrap().mode, ControlMode::Idle);
     }
@@ -537,7 +544,7 @@ mod tests {
     /// **シリアルの機体には載せない。** あちらはサーボが内部で持つ。
     #[test]
     fn a_serial_command_leaves_the_gains_alone() {
-        let cmd = command(&layout(), &JointVec::zeros(), 8.0, false, None, None);
+        let cmd = command(&layout(), &JointVec::zeros(), 8.0, false, None, None, None);
         let a = cmd.get(AxisId::new(0)).unwrap();
         assert_eq!((a.kp_nm_per_rad, a.kd_nm_s_per_rad), (0.0, 0.0));
     }
@@ -592,7 +599,7 @@ mod tests {
         let lay = wheeled_layout();
         let mut q = JointVec::zeros();
         q.legs[0][1] = 0.9;
-        let cmd = command(&lay, &q, 8.0, false, None, None);
+        let cmd = command(&lay, &q, 8.0, false, None, None, None);
 
         assert_eq!(cmd.len(), 16);
         assert_eq!(cmd.get(AxisId::new(1)).unwrap().mode, ControlMode::Position);
@@ -744,7 +751,7 @@ mod tests {
         let mut q = JointVec::zeros();
         q.legs[2][1] = 0.75; // RL_thigh
         q.arm = -0.25;
-        let cmd = command(&layout(), &q, 8.0, false, None, None);
+        let cmd = command(&layout(), &q, 8.0, false, None, None, None);
 
         let t = layout().table;
         let id = t.id_of("RL_thigh_joint").unwrap();
@@ -758,7 +765,7 @@ mod tests {
     fn relaxing_keeps_the_targets_it_was_holding() {
         let mut q = JointVec::zeros();
         q.legs[0][1] = 1.0;
-        let cmd = command(&layout(), &q, 8.0, true, None, None);
+        let cmd = command(&layout(), &q, 8.0, true, None, None, None);
         let a = cmd.get(AxisId::new(1)).unwrap();
         assert_eq!(a.mode, ControlMode::Idle);
         assert_eq!(a.position_rad, 1.0);
