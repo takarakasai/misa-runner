@@ -186,6 +186,12 @@ impl AppConfig {
         if self.name.is_empty() {
             return Err("name が空です。ロボット名を書いてください".into());
         }
+        let sc = self.control.gravity_feedforward_scale;
+        if !(0.0..=1.5).contains(&sc) || !sc.is_finite() {
+            return Err(format!(
+                "control.gravity_feedforward_scale = {sc} は [0, 1.5] の範囲で書いてください（1.0 が自重どおり）"
+            ));
+        }
         if !self
             .name
             .chars()
@@ -804,6 +810,12 @@ pub struct ControlConfig {
     /// WBC が有効なあいだは WBC の解が優先され、こちらは使われない。
     #[serde(default)]
     pub gravity_feedforward: GravityFeedforward,
+    /// 重力補償の前置トルクに掛ける倍率。既定 1.0。**実機で段階的に入れる用**
+    /// （0.25 → 0.5 → 0.75 → 1.0。1 未満なら足りないぶんを PD が持つので、
+    /// 従来の挙動との間を連続に渡れる）。0 なら off と同じ。1 を超える値は
+    /// 自重より強く押す — 検証以外では使わない。範囲 [0, 1.5]。
+    #[serde(default = "default_gravity_feedforward_scale")]
+    pub gravity_feedforward_scale: f64,
     /// ロボットモデル (`.misa`)。ポーズ・シーケンスもここから読む。
     #[serde(default = "default_model_path")]
     pub model: String,
@@ -920,8 +932,13 @@ impl Default for ControlConfig {
             // 省略 = 姿勢指令の上限から導く（`AppConfig::max_tilt_rad`）。
             max_tilt_rad: None,
             gravity_feedforward: GravityFeedforward::Off,
+            gravity_feedforward_scale: default_gravity_feedforward_scale(),
         }
     }
+}
+
+fn default_gravity_feedforward_scale() -> f64 {
+    1.0
 }
 
 /// 歩容のチューニング。プロポで選ぶ 3 種（Crawl / Walk / Trot）の共通部分と、

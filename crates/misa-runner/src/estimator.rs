@@ -695,6 +695,13 @@ mod tests {
         let fz3 = e.foot_forces_from_torque(&q, &JointVec::zeros(), &tau3, [0.0; 3], 0.005);
         assert!((fz3[0].unwrap() - weight / 3.0).abs() < 1e-6);
         assert!(fz3[1].unwrap().abs() < 1e-6, "遊脚に接地力が乗っている: {:?}", fz3[1]);
+        // 倍率 0.5 なら成分がちょうど半分（`JointVec::scaled`）。
+        let half = ff.scaled(0.5);
+        for slot in 0..4 {
+            for k in 0..3 {
+                assert!((half.legs[slot][k] - 0.5 * ff.legs[slot][k]).abs() < 1e-12);
+            }
+        }
         // 脚の重力だけ: 接地力 0。
         let legs_only = e.gravity_feedforward(&q, [true; 4], weight, false);
         let mut tl = [[None; 3]; 4];
