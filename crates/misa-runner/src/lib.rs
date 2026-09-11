@@ -430,6 +430,8 @@ fn print_help() {
          [--knee-script S]         膝の向きを時刻ごとに替える。"5:>>,12:<<"
                                    （立って止まっているときだけ効く。振り付けを通る）
          [--knee-style stand|rest] 反転のやり方を上書き（gait.knee_flip_style）
+         [--hold-start]            初期姿勢（control.start_pose）で止めたまま回す
+                                   （姿勢と接触を描いて確かめる用）
          [--cycle S] [--swing M]   **歩容パラメータを上書きする。** 与えな
          [--step-length M]         かった項目はプロファイルのまま。周期は
          [--duty D]                揺れに、歩幅は速度の出方に効く
@@ -602,6 +604,7 @@ const VALUE_FLAGS: &[&str] = &[
     "wbc-script",
     "knee-script",
     "knee-style",
+    "hold-start",
     "vy",
     "wz",
     "every",

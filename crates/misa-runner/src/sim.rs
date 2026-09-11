@@ -141,7 +141,9 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let mut pilot: Box<dyn misa_core::Pilot> = match cli.str("pilot").unwrap_or("script") {
         "script" => Box::new({
             let mut p = crate::pilot::ScriptPilot::new(Intent {
-            mode: ModeRequest::Walk,
+            // `--hold-start` は初期姿勢（control.start_pose）で止めたまま回す。
+            // 姿勢の見た目や接触（どこが床に着くか）を描いて確かめる用。
+            mode: if cli.flag("hold-start") { ModeRequest::Stand } else { ModeRequest::Walk },
             gait,
             aux_rad: vec![None],
             link_ok: true,
