@@ -313,6 +313,7 @@ pub fn command(
     gains: Option<misa_hal::config::MitGains>,
     wbc: Option<&crate::wbc::WbcPlan>,
     feedforward: Option<&JointVec>,
+    target_qd: Option<&JointVec>,
 ) -> Command {
     let mut cmd = Command::idle(layout.table.len());
     let mode = if relaxed {
@@ -345,6 +346,15 @@ pub fn command(
                 // 添える（`[control] gravity_feedforward`）。WBC が回っていれば
                 // そちらの解が優先で、ここには来ない。
                 a.torque_ff_nm = ff.legs[leg][k];
+            }
+            // **MIT の機体に目標速度を載せる**（`[hardware] mit_velocity_feedforward`）。
+            // 位置指令の `velocity_rad_s` は「上限」なので、目標速度として渡すには
+            // モードを Impedance にする（ブリッジは MIT しか持たないので実体は同じ。
+            // シムは Position と同じ PD に q̇_d が入る）。WBC の解が載っている周期は
+            // そちらの速度が正。
+            if let (Some(qd), Some(_), false, None) = (target_qd, gains, relaxed, wbc) {
+                a.mode = ControlMode::Impedance;
+                a.velocity_rad_s = qd.legs[leg][k];
             }
             // **MIT の機体には kp/kd を毎周期載せる。** 無いと τ が恒等的に
             // 0 になり、位置を指令しているのに脱力したまま崩れる。
@@ -460,7 +470,7 @@ mod tests {
             kp: [40.0, 60.0, 70.0],
             kd: [1.0, 1.5, 2.0],
         };
-        let cmd = command(&layout(), &JointVec::zeros(), 8.0, false, Some(g), None, None);
+        let cmd = command(&layout(), &JointVec::zeros(), 8.0, false, Some(g), None, None, None);
         let t = layout().table;
         for (name, kp, kd) in [
             ("FL_hip_joint", 40.0, 1.0),
@@ -498,7 +508,7 @@ mod tests {
         let lay = layout();
         let mut targets = JointVec::zeros();
         targets.arm = 0.42;
-        let cmd = command(&lay, &targets, 8.0, false, None, Some(&wbc_plan(ControlMode::Torque)), None);
+        let cmd = command(&lay, &targets, 8.0, false, None, Some(&wbc_plan(ControlMode::Torque)), None, None);
         let a = cmd.get(AxisId::new(0)).unwrap();
         assert_eq!(a.mode, ControlMode::Torque);
         assert_eq!(a.torque_ff_nm, 0.3);
@@ -513,10 +523,10 @@ mod tests {
     fn only_the_velocity_output_puts_a_target_in_the_velocity_field() {
         let lay = layout();
         let q = JointVec::zeros();
-        let vel = command(&lay, &q, 8.0, false, None, Some(&wbc_plan(ControlMode::Velocity)), None);
+        let vel = command(&lay, &q, 8.0, false, None, Some(&wbc_plan(ControlMode::Velocity)), None, None);
         assert_eq!(vel.get(AxisId::new(0)).unwrap().velocity_rad_s, 0.2);
 
-        let pos = command(&lay, &q, 8.0, false, None, Some(&wbc_plan(ControlMode::Position)), None);
+        let pos = command(&lay, &q, 8.0, false, None, Some(&wbc_plan(ControlMode::Position)), None, None);
         let a = pos.get(AxisId::new(0)).unwrap();
         assert_eq!(a.velocity_rad_s, 8.0);
         assert_eq!(a.position_rad, 0.1);
@@ -537,14 +547,41 @@ mod tests {
             None,
             Some(&wbc_plan(ControlMode::Torque)),
             None,
+            None,
         );
         assert_eq!(cmd.get(AxisId::new(0)).unwrap().mode, ControlMode::Idle);
+    }
+
+    /// **目標速度は MIT の機体にだけ、Impedance として載る。** シリアル（gains 無し）
+    /// では位置指令のまま（`velocity_rad_s` は上限の意味なので触らない）。
+    #[test]
+    fn a_target_velocity_rides_on_mit_commands_as_impedance() {
+        let lay = layout();
+        let g = misa_hal::config::MitGains { kp: [300.0; 3], kd: [3.0; 3] };
+        let mut qd = JointVec::zeros();
+        qd.legs[1][2] = -1.5;
+        let cmd = command(&lay, &JointVec::zeros(), 8.0, false, Some(g), None, None, Some(&qd));
+        let a = cmd.get(AxisId::new(5)).unwrap();
+        assert_eq!(a.mode, ControlMode::Impedance);
+        assert_eq!(a.velocity_rad_s, -1.5);
+        assert_eq!(a.kp_nm_per_rad, 300.0);
+        // 速度 0 の軸も Impedance（モードが軸ごとに混ざらない）。
+        assert_eq!(cmd.get(AxisId::new(0)).unwrap().mode, ControlMode::Impedance);
+        assert_eq!(cmd.get(AxisId::new(0)).unwrap().velocity_rad_s, 0.0);
+        // シリアル: 位置指令のまま、速度は上限。
+        let cmd = command(&lay, &JointVec::zeros(), 8.0, false, None, None, None, Some(&qd));
+        let a = cmd.get(AxisId::new(5)).unwrap();
+        assert_eq!(a.mode, ControlMode::Position);
+        assert_eq!(a.velocity_rad_s, 8.0);
+        // 脱力が勝つ。
+        let cmd = command(&lay, &JointVec::zeros(), 8.0, true, Some(g), None, None, Some(&qd));
+        assert_eq!(cmd.get(AxisId::new(5)).unwrap().mode, ControlMode::Idle);
     }
 
     /// **シリアルの機体には載せない。** あちらはサーボが内部で持つ。
     #[test]
     fn a_serial_command_leaves_the_gains_alone() {
-        let cmd = command(&layout(), &JointVec::zeros(), 8.0, false, None, None, None);
+        let cmd = command(&layout(), &JointVec::zeros(), 8.0, false, None, None, None, None);
         let a = cmd.get(AxisId::new(0)).unwrap();
         assert_eq!((a.kp_nm_per_rad, a.kd_nm_s_per_rad), (0.0, 0.0));
     }
@@ -599,7 +636,7 @@ mod tests {
         let lay = wheeled_layout();
         let mut q = JointVec::zeros();
         q.legs[0][1] = 0.9;
-        let cmd = command(&lay, &q, 8.0, false, None, None, None);
+        let cmd = command(&lay, &q, 8.0, false, None, None, None, None);
 
         assert_eq!(cmd.len(), 16);
         assert_eq!(cmd.get(AxisId::new(1)).unwrap().mode, ControlMode::Position);
@@ -751,7 +788,7 @@ mod tests {
         let mut q = JointVec::zeros();
         q.legs[2][1] = 0.75; // RL_thigh
         q.arm = -0.25;
-        let cmd = command(&layout(), &q, 8.0, false, None, None, None);
+        let cmd = command(&layout(), &q, 8.0, false, None, None, None, None);
 
         let t = layout().table;
         let id = t.id_of("RL_thigh_joint").unwrap();
@@ -765,7 +802,7 @@ mod tests {
     fn relaxing_keeps_the_targets_it_was_holding() {
         let mut q = JointVec::zeros();
         q.legs[0][1] = 1.0;
-        let cmd = command(&layout(), &q, 8.0, true, None, None, None);
+        let cmd = command(&layout(), &q, 8.0, true, None, None, None, None);
         let a = cmd.get(AxisId::new(1)).unwrap();
         assert_eq!(a.mode, ControlMode::Idle);
         assert_eq!(a.position_rad, 1.0);

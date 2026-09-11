@@ -274,6 +274,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // 開ループの重力補償（`[control] gravity_feedforward`）に使う体重。WBC と同じ
     // 出どころ（モデルの慣性の和。根リンクは `Robot::load` が補っている）。
     let weight_n = robot.model.inertias.iter().map(|i| i.mass).sum::<f64>() * 9.81;
+    let mut prev_targets: Option<crate::jointvec::JointVec> = None;
     let mut controller = Controller::with_arm(robot, cfg.clone(), head_driven);
     // **可動域は `dump` と同じ表で、同じ関数で見る。**
     //
@@ -333,6 +334,17 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // `contact_in_swing` は計画が遊脚なのに乗っている周期（早い着地・遅い離地）。
     let mut plan_stance_no_contact = [0usize; 4];
     let mut contact_in_swing = [0usize; 4];
+    // **着地の衝撃。** 接地が false → true になった周期の足の鉛直速度（直前の
+    // 周期との差分）と、その後 50 ms の最大鉛直力。計画上の着地速度は 0
+    // （遊脚の山は sin² で終端速度 0）なので、ここが大きければ「計画より早く
+    // 地面に当たっている」= 自重の沈みや目標の遅れ。足音の当たり。
+    let mut td_vz_sum = [0.0f64; 4];
+    let mut td_vz_max = [0.0f64; 4];
+    let mut td_n = [0usize; 4];
+    let mut td_fmax_sum = [0.0f64; 4];
+    let mut td_fmax_cur = [0.0f64; 4];
+    let mut td_window = [0usize; 4];
+    let mut prev_contact = [false; 4];
     // **トルクからの接地推定の答え合わせ**（`gait.contact_from_torque`）。
     // MuJoCo の接地（力 5 N で切った真偽値）との一致率と、真の垂直力に対する
     // 推定の誤差（RMS）。
@@ -517,6 +529,26 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         let plan = wbc
             .as_mut()
             .and_then(|w| w.tick(&out, &obs, &measured, &measured_qd, &body, dt));
+        // **目標の関節速度**（1 周期差分 × `[hardware] mit_velocity_feedforward`）。
+        // MIT の q̇_d に載せて追従の遅れを消す。最初の周期は 0。
+        let target_qd = {
+            let k = cfg.hardware.mit_velocity_feedforward();
+            let qd = match (k > 0.0, prev_targets, dt > 1e-6) {
+                (true, Some(prev), true) => {
+                    let mut v = crate::jointvec::JointVec::zeros();
+                    for leg in 0..4 {
+                        for j in 0..3 {
+                            v.legs[leg][j] = k * (out.targets.legs[leg][j] - prev.legs[leg][j]) / dt;
+                        }
+                    }
+                    Some(v)
+                }
+                (true, _, _) => Some(crate::jointvec::JointVec::zeros()),
+                _ => None,
+            };
+            prev_targets = Some(out.targets);
+            qd
+        };
         // WBC が解いていない周期だけ、開ループの重力補償を τ_ff に載せる。
         let gravity_ff = (plan.is_none() && cfg.control.gravity_feedforward.is_on()).then(|| {
             estimator
@@ -565,6 +597,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             cfg.hardware.mit_gains(),
             plan.as_ref(),
             gravity_ff.as_ref(),
+            target_qd.as_ref(),
         );
         if let Some(rec) = recorder.as_ref() {
             let mut shadow = outgoing.clone();
@@ -624,11 +657,36 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         // 追従誤差と並べて見る値。
         {
             let fp = plant.foot_positions();
+            let truth_f = plant.foot_forces();
             for (i, p) in fp.iter().enumerate() {
                 let (Some(p), Some(prev)) = (p, foot_prev[i]) else {
                     foot_prev[i] = *p;
                     continue;
                 };
+                // 着地の瞬間と、その後 50 ms の最大鉛直力。
+                let now_contact = obs.contacts.get(i).copied().flatten() == Some(true);
+                if out.state == State::Active && now_contact && !prev_contact[i] && dt > 0.0 {
+                    let vz = (p[2] - prev[2]) / dt;
+                    td_vz_sum[i] += vz.abs();
+                    td_vz_max[i] = td_vz_max[i].max(vz.abs());
+                    td_n[i] += 1;
+                    if td_window[i] > 0 {
+                        td_fmax_sum[i] += td_fmax_cur[i];
+                    }
+                    td_fmax_cur[i] = 0.0;
+                    td_window[i] = (0.05 / dt).round().max(1.0) as usize;
+                }
+                if td_window[i] > 0 {
+                    if let Some(f) = truth_f.map(|f| f[i]) {
+                        td_fmax_cur[i] = td_fmax_cur[i].max(f);
+                    }
+                    td_window[i] -= 1;
+                    if td_window[i] == 0 {
+                        td_fmax_sum[i] += td_fmax_cur[i];
+                        td_fmax_cur[i] = 0.0;
+                    }
+                }
+                prev_contact[i] = now_contact;
                 if out.state == State::Active && obs.contacts.get(i).copied().flatten() == Some(true)
                 {
                     let d = ((p[0] - prev[0]).powi(2) + (p[1] - prev[1]).powi(2)).sqrt();
@@ -834,6 +892,21 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             })
             .collect();
         println!("遊脚で上がった高さ [m]（gait.swing_height_m に届いているか）  {s}");
+    }
+    if td_n.iter().any(|&n| n > 0) {
+        let s: String = (0..4)
+            .map(|i| {
+                let n = td_n[i].max(1) as f64;
+                format!(
+                    "{} {:.2}/{:.2} m/s {:.0} N  ",
+                    ["FL", "FR", "RL", "RR"][i],
+                    td_vz_sum[i] / n,
+                    td_vz_max[i],
+                    td_fmax_sum[i] / n
+                )
+            })
+            .collect();
+        println!("着地の衝撃（足の鉛直速度 平均/最大、着地後 50 ms の最大鉛直力の平均。計画は 0 m/s）  {s}");
     }
     if slip_n.iter().any(|&n| n > 0) {
         let s: String = (0..4)

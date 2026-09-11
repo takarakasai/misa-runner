@@ -600,6 +600,7 @@ pub fn run(
             cfg.control.gravity_feedforward_scale
         );
     }
+    let mut prev_targets: Option<JointVec> = None;
     let mut controller = Controller::with_arm(robot, cfg.clone(), arm_app_driven);
 
     let mut warned_unread = false;
@@ -806,6 +807,27 @@ pub fn run(
                     last_tick.elapsed().as_secs_f64(),
                 )
             });
+        // **目標の関節速度**（1 周期差分 × `[hardware] mit_velocity_feedforward`）。
+        // MIT の q̇_d に載せて追従の遅れを消す。最初の周期と、脱力からの復帰は 0。
+        let target_qd = {
+            let k = cfg.hardware.mit_velocity_feedforward();
+            let dt_now = last_tick.elapsed().as_secs_f64();
+            let qd = match (k > 0.0, prev_targets, dt_now > 1e-6) {
+                (true, Some(prev), true) => {
+                    let mut v = JointVec::zeros();
+                    for leg in 0..4 {
+                        for j in 0..3 {
+                            v.legs[leg][j] = k * (out.targets.legs[leg][j] - prev.legs[leg][j]) / dt_now;
+                        }
+                    }
+                    Some(v)
+                }
+                (true, _, _) => Some(JointVec::zeros()),
+                _ => None,
+            };
+            prev_targets = Some(out.targets);
+            qd
+        };
         // WBC が解いていない周期だけ、開ループの重力補償を τ_ff に載せる。
         let gravity_ff = (plan.is_none() && cfg.control.gravity_feedforward.is_on()).then(|| {
             estimator
@@ -830,6 +852,7 @@ pub fn run(
             cfg.hardware.mit_gains(),
             plan.as_ref(),
             gravity_ff.as_ref(),
+            target_qd.as_ref(),
         );
 
         // **ここが指令を書き換えてよい唯一の場所。** `dt` は実測を渡す

@@ -627,6 +627,12 @@ pub fn check(cfg: &AppConfig) -> Result<(), String> {
         Ok(None) => {}
         Err(e) => println!("**WBC を組み立てられません**（run は起動しません）: {e}"),
     }
+    if cfg.hardware.mit_velocity_feedforward() > 0.0 {
+        println!(
+            "MIT の速度前置: 目標の関節速度 × {:.2} を q̇_d に（指令は Impedance。追従の遅れ = 着地の速さを消す）",
+            cfg.hardware.mit_velocity_feedforward()
+        );
+    }
     if cfg.control.gravity_feedforward.is_on() {
         let weight = robot.model.inertias.iter().map(|i| i.mass).sum::<f64>() * 9.81;
         println!(

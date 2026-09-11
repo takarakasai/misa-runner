@@ -427,6 +427,17 @@ pub struct Ros2Hardware {
     /// 残る）。既定は 120 / 2.0。
     #[serde(default = "default_mit_gains")]
     pub mit_gains: MitGains,
+    /// **目標の関節速度を MIT の q̇_d に載せる倍率**（0 = 載せない、既定。1 = そのまま）。
+    ///
+    /// `τ = kp(q_d − q) + kd(q̇_d − q̇) + τ_ff` の q̇_d。0 だと PD は「動く目標を
+    /// 追いかける」形になり、追従に kd/kp 程度の遅れが残る。遊脚の終端は
+    /// 計画上は速度 0 で着くが、遅れたぶん足はまだ下向きに動いていて、
+    /// **その速度で地面に当たる**（keel、kp 500 / kd 5 で 0.7〜0.9 m/s。足音の正体）。
+    /// q̇_d を載せると kd 項が目標の動きを先回りし、遅れが消える。
+    /// 目標速度は歩容の目標角の 1 周期差分（`snapshot::command`）。
+    /// 実機では 0.5 から。1 を超える値は使わない。
+    #[serde(default)]
+    pub mit_velocity_feedforward: f64,
 }
 
 fn default_mit_gains() -> MitGains {
@@ -483,6 +494,7 @@ impl Default for Ros2Hardware {
             default_max_speed_rad_s: default_max_speed(),
             max_target_rate_rad_s: default_max_target_rate(),
             mit_gains: default_mit_gains(),
+            mit_velocity_feedforward: 0.0,
         }
     }
 }
@@ -555,6 +567,15 @@ impl HardwareConfig {
         match self {
             HardwareConfig::Serial(_) => None,
             HardwareConfig::Ros2(h) => Some(h.mit_gains),
+        }
+    }
+
+    /// 目標の関節速度を MIT の q̇_d に載せる倍率（[`Ros2Hardware::mit_velocity_feedforward`]）。
+    /// シリアル構成は 0。
+    pub fn mit_velocity_feedforward(&self) -> f64 {
+        match self {
+            HardwareConfig::Serial(_) => 0.0,
+            HardwareConfig::Ros2(h) => h.mit_velocity_feedforward.clamp(0.0, 1.0),
         }
     }
 

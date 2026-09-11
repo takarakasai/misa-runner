@@ -504,6 +504,9 @@ impl Plant for MujocoPlant {
                         self.model.joints[ji].actuator_kv = self.position_kv;
                     }
                     self.sim.set_position_target(ji, a.position_rad);
+                    // Impedance のときだけ `velocity_rad_s` は目標速度（Position では上限）。
+                    let qd_d = if a.mode == ControlMode::Impedance { a.velocity_rad_s } else { 0.0 };
+                    self.sim.set_position_target_velocity(ji, qd_d);
                     self.sim.set_torque_feedforward(ji, a.torque_ff_nm);
                 }
             }

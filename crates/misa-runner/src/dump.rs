@@ -190,6 +190,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                 // 接触力を解いても、それが正しいかを確かめる相手がいない。
                 None,
                 None,
+                None,
             );
             let verdict = shadow_gate.apply(&mut shadow, &obs, period);
             rec.push(misa_core::record::Frame {
