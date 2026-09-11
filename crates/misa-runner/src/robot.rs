@@ -421,7 +421,7 @@ impl Robot {
         }
     }
 
-    fn kin_with_feet(&self, feet: [Vector3<f64>; 4]) -> KinematicsConfig {
+    pub(crate) fn kin_with_feet(&self, feet: [Vector3<f64>; 4]) -> KinematicsConfig {
         let mut kin = self.kin.clone();
         kin.fl.nominal_foot_body = feet[0];
         kin.fr.nominal_foot_body = feet[1];
@@ -705,7 +705,7 @@ pub fn gait_type_of(select: GaitSelect) -> GaitType {
 /// 「前後・左右・旋回をプロポで操る」という要件には合わない。直進の
 /// 安定性を追い込みたいときだけ `gait.crawl_use_linear = true` で選ぶ。
 /// 設定の膝の向き → 歩容ライブラリの型。
-fn knee_pattern_of(shape: KneeShape) -> KneePattern {
+pub(crate) fn knee_pattern_of(shape: KneeShape) -> KneePattern {
     match shape {
         KneeShape::BothBack => KneePattern::BothBack,
         KneeShape::MammalianForward => KneePattern::MammalianForward,
@@ -902,7 +902,7 @@ impl StanceReport {
 }
 
 /// 膝の向き（前向き = true）を脚ごとに。`slot` は FL / FR / RL / RR。
-fn knee_forward_for(shape: KneeShape, slot: usize) -> bool {
+pub(crate) fn knee_forward_for(shape: KneeShape, slot: usize) -> bool {
     let front = slot < 2;
     match shape {
         KneeShape::BothBack => false,

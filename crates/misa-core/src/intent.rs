@@ -176,6 +176,47 @@ pub enum GaitControllerRequest {
     Mpc,
 }
 
+/// 膝の曲がる向きの切り替え要求（前 2 脚・後 2 脚の向き）。
+///
+/// 表記は前から見た `前方: >> >< <> <<: 後方` — `<` が膝を後ろへ、`>` が前へ。
+/// **立って止まっているときだけ**受け付け、脚を浮かせて膝を伸ばし切る
+/// 振り付けを通って切り替わる（misa-runner の `Controller`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KneePatternRequest {
+    /// `<<` 4 脚とも後ろ向き。
+    BothBack,
+    /// `<>` 前が後ろ向き・後ろが前向き。
+    MammalianForward,
+    /// `><` 前が前向き・後ろが後ろ向き。
+    MammalianReverse,
+    /// `>>` 4 脚とも前向き。
+    BothForward,
+}
+
+impl KneePatternRequest {
+    pub const ALL: [Self; 4] = [Self::BothBack, Self::MammalianForward, Self::MammalianReverse, Self::BothForward];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::BothBack => "<<",
+            Self::MammalianForward => "<>",
+            Self::MammalianReverse => "><",
+            Self::BothForward => ">>",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|k| k.label() == s.trim())
+    }
+    /// `<<` → `<>` → `><` → `>>` → `<<`。
+    pub fn next(self) -> Self {
+        let i = Self::ALL.iter().position(|k| *k == self).unwrap_or(0);
+        Self::ALL[(i + 1) % 4]
+    }
+    pub fn prev(self) -> Self {
+        let i = Self::ALL.iter().position(|k| *k == self).unwrap_or(0);
+        Self::ALL[(i + 3) % 4]
+    }
+}
+
 /// 1 周期ぶんの意図。
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Intent {
@@ -212,6 +253,10 @@ pub struct Intent {
     /// 歩容コントローラの切り替え。`None` で今のまま。
     #[serde(default)]
     pub gait_controller: Option<GaitControllerRequest>,
+    /// 膝の曲がる向きの切り替え。`None` で今のまま。操縦系が状態として
+    /// 持ち続けて毎周期送る（いまと同じ向きなら何も起きない）。
+    #[serde(default)]
+    pub knee_pattern: Option<KneePatternRequest>,
 }
 
 impl Intent {

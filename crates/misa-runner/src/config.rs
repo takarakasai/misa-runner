@@ -194,6 +194,23 @@ impl AppConfig {
                 return Err(format!("{name} = {hz} は 0 以上の Hz で書いてください（0 で無し）"));
             }
         }
+        if !(self.gait.knee_flip_phase_s > 0.05 && self.gait.knee_flip_phase_s.is_finite()) {
+            return Err(format!("gait.knee_flip_phase_s = {} は 0.05 s より長く", self.gait.knee_flip_phase_s));
+        }
+        if !self.gait.knee_flip_out_z_m.is_finite() {
+            return Err(format!("gait.knee_flip_out_z_m = {} が数でない", self.gait.knee_flip_out_z_m));
+        }
+        if self.gait.knee_flip_style == KneeFlipStyle::Rest && self.gait.knee_flip_rest_height_m.is_none() {
+            return Err("gait.knee_flip_style = \"rest\" には knee_flip_rest_height_m（車輪・腹に載ったときの胴体高さ）が要ります".into());
+        }
+        if let Some(h) = self.gait.knee_flip_rest_height_m {
+            if !(h > 0.0 && h.is_finite()) {
+                return Err(format!("gait.knee_flip_rest_height_m = {h} は正の高さで"));
+            }
+        }
+        if !(self.gait.knee_flip_shift_m >= 0.0 && self.gait.knee_flip_shift_m < 0.2) {
+            return Err(format!("gait.knee_flip_shift_m = {} は 0〜0.2 m で", self.gait.knee_flip_shift_m));
+        }
         let sc = self.control.gravity_feedforward_scale;
         if !(0.0..=1.5).contains(&sc) || !sc.is_finite() {
             return Err(format!(
@@ -276,6 +293,32 @@ pub enum KneeShape {
     MammalianReverse,
     /// `>>` 4 脚とも前向き。
     BothForward,
+}
+
+impl KneeShape {
+    /// `<<` / `<>` / `><` / `>>`（前方が左）。
+    pub fn label(self) -> &'static str {
+        self.to_request().label()
+    }
+    pub fn to_request(self) -> misa_core::KneePatternRequest {
+        use misa_core::KneePatternRequest as R;
+        match self {
+            KneeShape::BothBack => R::BothBack,
+            KneeShape::MammalianForward => R::MammalianForward,
+            KneeShape::MammalianReverse => R::MammalianReverse,
+            KneeShape::BothForward => R::BothForward,
+        }
+    }
+    pub fn from_request(r: misa_core::KneePatternRequest) -> Self {
+        use misa_core::KneePatternRequest as R;
+        match r {
+            R::BothBack => KneeShape::BothBack,
+            R::MammalianForward => KneeShape::MammalianForward,
+            R::MammalianReverse => KneeShape::MammalianReverse,
+            R::BothForward => KneeShape::BothForward,
+        }
+    }
+    pub const ALL: [Self; 4] = [Self::BothBack, Self::MammalianForward, Self::MammalianReverse, Self::BothForward];
 }
 
 /// WBC（全身制御）の出力の出し方。
@@ -949,6 +992,49 @@ fn default_gravity_feedforward_scale() -> f64 {
     1.0
 }
 
+fn default_knee_flip_phase_s() -> f64 {
+    0.8
+}
+
+fn default_knee_flip_out_z_m() -> f64 {
+    0.0
+}
+
+fn default_knee_flip_foot_lift_m() -> f64 {
+    0.02
+}
+
+fn default_knee_flip_shift_m() -> f64 {
+    0.05
+}
+
+/// 膝を反転するときに荷重を外すやり方（[`GaitTuning::knee_flip_style`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KneeFlipStyle {
+    /// 立ったまま 1 脚ずつ（3 脚支持、胴体を対角へ寄せる）。
+    #[default]
+    Stand,
+    /// 胴体を車輪・腹に載せて 4 脚とも浮かせ、まとめて。
+    Rest,
+}
+
+impl KneeFlipStyle {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stand => "立ったまま 1 脚ずつ",
+            Self::Rest => "車輪・腹に載せてまとめて",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "stand" => Some(Self::Stand),
+            "rest" => Some(Self::Rest),
+            _ => None,
+        }
+    }
+}
+
 /// 歩容のチューニング。プロポで選ぶ 3 種（Crawl / Walk / Trot）の共通部分と、
 /// 種別ごとの上書きを分けてある。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1124,6 +1210,42 @@ pub struct GaitTuning {
     /// 平均しただけの生値なので、関節速度のノイズがそのまま乗る。
     #[serde(default)]
     pub estimator_velocity_lpf_hz: f64,
+    /// **膝の向きを実行中に切り替える振り付け**（`Intent.knee_pattern`）のやり方。
+    ///
+    /// 膝を反転するには脚を伸ばし切る（特異点を通る）ので、その脚に荷重が
+    /// あってはいけない。荷重を外す方法が 2 つ:
+    ///
+    /// - `stand`（既定）: **立ったまま 1 脚ずつ**。他の 3 脚で支え、胴体を
+    ///   反対の対角へ `knee_flip_shift_m` 寄せて重心を支持三角形に入れ、
+    ///   その脚だけ浮かせて反転する。FL → RR → FR → RL の順。車輪や腹が
+    ///   無い機体でも使える。1 脚あたり 6 段。
+    /// - `rest`: **胴体を車輪・腹に載せて 4 脚とも浮かせ**、まとめて反転する。
+    ///   `knee_flip_rest_height_m`（載ったときの胴体高さ）が要る。7 段。
+    #[serde(default)]
+    pub knee_flip_style: KneeFlipStyle,
+    /// `rest` で、胴体が車輪・腹に載って止まる高さ [m]（地面から胴体原点）。
+    /// keel は MuJoCo で 0.155〜0.16。**ここを実機の値より高く書くと足が地面を
+    /// 押したまま反転に入る**（胴体が落ちて揺れる）。低く書くと足が浮かない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knee_flip_rest_height_m: Option<f64>,
+    /// `rest` で、載ったあと足を地面から浮かす量 [m]。既定 0.02。
+    #[serde(default = "default_knee_flip_foot_lift_m")]
+    pub knee_flip_foot_lift_m: f64,
+    /// `stand` で、反転する脚の対角へ胴体を寄せる量 [m]。既定 0.05
+    /// （keel の足パターン ±0.245 × ±0.197 で、重心が対角線から約 5 cm 内側に入る）。
+    #[serde(default = "default_knee_flip_shift_m")]
+    pub knee_flip_shift_m: f64,
+    /// 振り付けの 1 段の時間 [s]。胴体を下ろす・上げる・寄せる段はこの 2 倍。既定 0.8。
+    #[serde(default = "default_knee_flip_phase_s")]
+    pub knee_flip_phase_s: f64,
+    /// 膝を伸ばし切るときに脚を向ける方向。**胴体座標で足先が hip より
+    /// これだけ下**になる角度に腿を振る（前脚は前へ、後脚は後ろへ）。
+    /// 0 なら水平（既定）。下げると、畳んだ calf を伸ばす途中で下腿が真下を
+    /// 向く瞬間の足先が出発した面より下がる（keel は 0.08 で 9 mm 下がって
+    /// 振り付けが組めない）。伸ばした脚は前脚なら前、後脚なら後ろへ
+    /// 腿 + 下腿ぶん突き出る。
+    #[serde(default = "default_knee_flip_out_z_m")]
+    pub knee_flip_out_z_m: f64,
     /// MPC の接地力のコスト（`SrbdMpcConfig::r_diag`）。`None`（既定）なら
     /// 質量から決める: namiashi（2.4 kg）で詰めた 1e-3 を `(2.4 g / m g)²` で
     /// 伸ばし、力を体重で割った無次元量に対して同じ罰にする。重い機体で
@@ -1320,6 +1442,12 @@ impl Default for GaitTuning {
             contact_passive_scale: default_contact_passive_scale(),
             imu_gyro_lpf_hz: 0.0,
             estimator_velocity_lpf_hz: 0.0,
+            knee_flip_style: KneeFlipStyle::default(),
+            knee_flip_rest_height_m: None,
+            knee_flip_foot_lift_m: default_knee_flip_foot_lift_m(),
+            knee_flip_shift_m: default_knee_flip_shift_m(),
+            knee_flip_phase_s: default_knee_flip_phase_s(),
+            knee_flip_out_z_m: default_knee_flip_out_z_m(),
             mpc_force_cost: None,
             estimator: EstimatorKind::LegOdometry,
             velocity_ramp_s: default_velocity_ramp_s(),

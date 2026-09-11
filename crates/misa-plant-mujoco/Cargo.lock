@@ -54,6 +54,7 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 [[package]]
 name = "articara"
 version = "0.1.0"
+source = "git+https://github.com/takarakasai/articara.git#49a28c4429b0da5d326013294c20685c57015532"
 dependencies = [
  "legged-estimation",
  "log",
@@ -733,6 +734,7 @@ dependencies = [
  "log",
  "misa-core",
  "mujoco-rs",
+ "nalgebra",
 ]
 
 [[package]]

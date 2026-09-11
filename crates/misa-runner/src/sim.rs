@@ -29,6 +29,16 @@ use crate::viz;
 use crate::Cli;
 
 pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
+    // `--knee-style` はプロファイルの反転のやり方を上書きする（試験用）。
+    let mut cfg_local = cfg.clone();
+    if let Some(style) = cli.str("knee-style") {
+        cfg_local.gait.knee_flip_style = crate::config::KneeFlipStyle::parse(style)
+            .ok_or_else(|| format!("--knee-style {style:?} は stand / rest のどちらか"))?;
+        if cfg_local.gait.knee_flip_style == crate::config::KneeFlipStyle::Rest && cfg_local.gait.knee_flip_rest_height_m.is_none() {
+            return Err("--knee-style rest には gait.knee_flip_rest_height_m が要ります".into());
+        }
+    }
+    let cfg = &cfg_local;
     let gait = match cli.str("gait").unwrap_or("trot") {
         "crawl" => GaitSelect::Crawl,
         "walk" => GaitSelect::Walk,
@@ -60,6 +70,25 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     };
     // `--wbc-script "4:position,8:torque,12:off"` — 歩容中の経過秒で WBC の出力を
     // 替える台本。切り替えの連続性（跳ばないか）を実機なしで見る用。
+    // `--knee-script "5:>>,12:<<"` — 歩容中の経過秒で膝の向きを替える（立って
+    // 止まっているときだけ効く。歩いていれば警告して無視される）。
+    let knee_script: Vec<(f64, misa_core::KneePatternRequest)> = match cli.str("knee-script") {
+        None => Vec::new(),
+        Some(spec) => {
+            let mut v = Vec::new();
+            for item in spec.split(',').filter(|s| !s.trim().is_empty()) {
+                let (at, pat) = item
+                    .split_once(':')
+                    .ok_or_else(|| format!("--knee-script の項 {item:?} は 秒:<<|<>|><|>> の形で"))?;
+                let at: f64 = at.trim().parse().map_err(|e| format!("--knee-script の秒 {at:?}: {e}"))?;
+                let req = misa_core::KneePatternRequest::parse(pat)
+                    .ok_or_else(|| format!("--knee-script の向き {pat:?}（<<|<>|><|>>）"))?;
+                v.push((at, req));
+            }
+            v.sort_by(|a, b| a.0.total_cmp(&b.0));
+            v
+        }
+    };
     let wbc_script: Vec<(f64, misa_core::WbcRequest)> = match cli.str("wbc-script") {
         None => Vec::new(),
         Some(text) => {
@@ -418,6 +447,11 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                     .filter(|(at, _)| *at <= elapsed)
                     .last()
                     .map(|(_, req)| *req);
+                cmd.knee_pattern = knee_script
+                    .iter()
+                    .filter(|(at, _)| *at <= elapsed)
+                    .last()
+                    .map(|(_, req)| *req);
             }
         }
         // 操縦（キー）か台本からの WBC の切り替え要求。台本が `cmd.wbc` を
@@ -550,7 +584,9 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             qd
         };
         // WBC が解いていない周期だけ、開ループの重力補償を τ_ff に載せる。
-        let gravity_ff = (plan.is_none() && cfg.control.gravity_feedforward.is_on()).then(|| {
+        // 歩容中と膝の反転中だけ（反転中は浮かせている脚が立脚フラグから
+        // 外れているので、残りの脚に体重が配られる）。
+        let gravity_ff = (plan.is_none() && matches!(out.state, State::Active | State::FlippingKnees) && cfg.control.gravity_feedforward.is_on()).then(|| {
             estimator
                 .gravity_feedforward(
                     &out.targets,

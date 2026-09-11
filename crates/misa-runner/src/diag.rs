@@ -627,6 +627,29 @@ pub fn check(cfg: &AppConfig) -> Result<(), String> {
         Ok(None) => {}
         Err(e) => println!("**WBC を組み立てられません**（run は起動しません）: {e}"),
     }
+    // **膝の向きの候補。** 実行中に `[` / `]` で反転できるのは、その向きの立ち姿勢に
+    // IK が届き可動域に収まるものだけ。実機の前にどれが使えるかを見せる。
+    {
+        let mut parts = Vec::new();
+        for shape in crate::config::KneeShape::ALL {
+            let mut t = cfg.gait.clone();
+            t.knee_pattern = shape;
+            let rep = robot.stance_report(&t);
+            let mark = if rep.errors.is_empty() { "可".to_string() } else { format!("不可（{}）", rep.errors[0]) };
+            parts.push(format!("{}{} {}", if shape == cfg.gait.knee_pattern { "*" } else { "" }, shape.label(), mark));
+        }
+        println!(
+            "膝の向き（* がいま。反転: {}{} / 1 段 {:.1} s / 伸ばす向き hip から {:+.2} m 下）: {}",
+            cfg.gait.knee_flip_style.label(),
+            match (cfg.gait.knee_flip_style, cfg.gait.knee_flip_rest_height_m) {
+                (crate::config::KneeFlipStyle::Rest, Some(h)) => format!("、胴体 {h:.3} m に載せて足を {:.3} m 浮かす", cfg.gait.knee_flip_foot_lift_m),
+                (crate::config::KneeFlipStyle::Stand, _) => format!("、胴体を対角へ {:.2} m 寄せる", cfg.gait.knee_flip_shift_m),
+                _ => String::new(),
+            },
+            cfg.gait.knee_flip_phase_s, cfg.gait.knee_flip_out_z_m,
+            parts.join(" / ")
+        );
+    }
     if cfg.hardware.mit_velocity_feedforward() > 0.0 {
         println!(
             "MIT の速度前置: 目標の関節速度 × {:.2} を q̇_d に（指令は Impedance。追従の遅れ = 着地の速さを消す）",

@@ -234,6 +234,7 @@ impl Pilot for Ros2Pilot {
             // 足すなら実機で替えて良いかの判断が先）。
             wbc: None,
             gait_controller: None,
+            knee_pattern: None,
         }
     }
 }

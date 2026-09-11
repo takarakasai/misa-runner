@@ -66,6 +66,9 @@ pub enum Key {
     WbcCycle,
     /// 歩容コントローラを MPC ↔ CHAMP で切り替える（立っているときだけ効く）。
     ControllerToggle,
+    /// 膝の向きを次へ / 前へ（`<<` → `<>` → `><` → `>>`。立って止まっているときだけ効く）。
+    KneeNext,
+    KneePrev,
     Help,
     Quit,
 }
@@ -141,6 +144,8 @@ pub fn decode(c: u8) -> Option<Key> {
         b',' => Key::Tune(Knob::Duty, -1),
         b'm' => Key::TuneReset,
         b'o' => Key::WbcCycle,
+        b']' => Key::KneeNext,
+        b'[' => Key::KneePrev,
         b'p' => Key::ControllerToggle,
         b'h' | b'?' => Key::Help,
         // **Ctrl-C も自分で拾う。** raw モードでは端末が SIGINT を出さない
@@ -166,6 +171,8 @@ pub struct Limits {
     /// 起動時の WBC / 歩容コントローラ。`o` / `p` の巡回はここから数える。
     pub wbc_initial: WbcRequest,
     pub controller_initial: GaitControllerRequest,
+    /// 起動時の膝の向き。`[` / `]` の巡回はここから数える。
+    pub knee_initial: misa_core::KneePatternRequest,
 }
 
 /// 歩容 → `base_tune` の添字。
@@ -192,6 +199,7 @@ impl Limits {
                 (true, crate::config::WbcOutput::Torque) => WbcRequest::Torque,
                 (true, _) => WbcRequest::Position,
             },
+            knee_initial: cfg.gait.knee_pattern.to_request(),
             controller_initial: match cfg.gait.controller {
                 crate::config::GaitControllerKind::Mpc
                 | crate::config::GaitControllerKind::Centroidal => GaitControllerRequest::Mpc,
@@ -321,6 +329,12 @@ pub fn apply(intent: &mut Intent, key: Key, lim: &Limits) {
                 GaitControllerRequest::Mpc => GaitControllerRequest::Champ,
             })
         }
+        Key::KneeNext => {
+            intent.knee_pattern = Some(intent.knee_pattern.unwrap_or(lim.knee_initial).next());
+        }
+        Key::KneePrev => {
+            intent.knee_pattern = Some(intent.knee_pattern.unwrap_or(lim.knee_initial).prev());
+        }
         Key::Help | Key::Quit => {}
     }
 }
@@ -354,6 +368,7 @@ pub fn help(lim: &Limits, gait: GaitSelect) -> String {
          　**制御の構成（走らせながら替えられます）**\n\
          　  o        全身制御の出力を巡回  OFF → 位置 → トルク → OFF\n\
          　  p        歩容コントローラ MPC ↔ CHAMP（**立って止まっているときだけ**効く）\n\
+         　  ] / [    膝の向きを次へ / 前へ  << → <> → >< → >>（**立って止まっているときだけ**。脚を浮かせて膝を伸ばし切る振り付けを通る）\n\
          \n\
          　  h / ?    この一覧    Esc / Ctrl-C    終了（脱力して抜けます）\n",
         lim.max_vx,
@@ -614,6 +629,7 @@ mod tests {
             attitude_max: 0.20,
             base_tune: [base_tune(0.85), base_tune(0.75), base_tune(0.5)],
             wbc_initial: WbcRequest::Off,
+            knee_initial: misa_core::KneePatternRequest::BothBack,
             controller_initial: GaitControllerRequest::Champ,
         }
     }

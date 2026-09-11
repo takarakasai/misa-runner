@@ -37,7 +37,9 @@ use crate::time::Time;
 // 丸めたことを記録に残すため。
 //
 // **`Intent` に `wbc` / `gait_controller`（実行中の切り替え要求）が増えたので 4。**
-pub const FORMAT_VERSION: u32 = 4;
+//
+// **`Intent` に `knee_pattern`（膝の向きの切り替え要求）が増えたので 5。**
+pub const FORMAT_VERSION: u32 = 5;
 
 /// 記録の先頭に 1 度だけ置く見出し。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

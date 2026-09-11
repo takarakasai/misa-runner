@@ -433,6 +433,7 @@ impl Teleop {
             // プロポには WBC / コントローラの切り替えを割り当てていない。
             wbc: None,
             gait_controller: None,
+            knee_pattern: None,
             // **プロポは歩容パラメータを触らない。** チャンネルが足りない
             // し、飛びながら周期を変えたい要件も無い。
             gait_tune: misa_core::GaitTune::default(),

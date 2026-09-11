@@ -829,7 +829,7 @@ pub fn run(
             qd
         };
         // WBC が解いていない周期だけ、開ループの重力補償を τ_ff に載せる。
-        let gravity_ff = (plan.is_none() && cfg.control.gravity_feedforward.is_on()).then(|| {
+        let gravity_ff = (plan.is_none() && matches!(out.state, State::Active | State::FlippingKnees) && cfg.control.gravity_feedforward.is_on()).then(|| {
             estimator
                 .gravity_feedforward(
                     &out.targets,

@@ -173,6 +173,20 @@ impl PosePlayer {
 
     /// `dt` 進めて、その時点の目標関節角を返す。
     /// 終了後に呼び続けても安全（`evaluate` が終点でクランプする）。
+    /// 任意の段の列から。**`steps` は空でないこと。**
+    pub fn from_steps(from: JointVec, steps: Vec<PoseStep>) -> Self {
+        assert!(!steps.is_empty(), "段が 1 つも無い");
+        let transition = transition_for(from, &steps[0]);
+        let current = JointVec::from_slice(&transition.evaluate(0.0));
+        Self {
+            steps,
+            index: 0,
+            t: 0.0,
+            transition,
+            current,
+        }
+    }
+
     pub fn tick(&mut self, dt: f64) -> JointVec {
         self.t += dt;
         self.current = JointVec::from_slice(&self.transition.evaluate(self.t));
@@ -196,6 +210,11 @@ impl PosePlayer {
     #[allow(dead_code)]
     pub fn current(&self) -> JointVec {
         self.current
+    }
+
+    /// 再生中の段の番号（0 から）。
+    pub fn step_index(&self) -> usize {
+        self.index
     }
 
     /// 再生中の段の名前（表示用）。
