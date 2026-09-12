@@ -504,7 +504,9 @@ impl KeyPilot {
         print!("{}", help(&limits, gait));
         if let Some(d) = deadman {
             print!(
-                "\r　**デッドマン {:.1} s**: キーが来なければ速度 0。歩き続けるには方向キーを押し続ける\n\r\n",
+                "\r　**デッドマン {:.1} s**: キーが来なければ速度 0。歩き続けるには方向キーを押し続ける\n\r\
+                 　  端末のオートリピートの**最初の待ち**（X11 の既定 660 ms）より短いと、押し続けて\n\r\
+                 　  いるのに速度が 0 に落ちて上がり直す（脈動）。`control.keys_deadman_ms` で替える\n\r\n",
                 d.as_secs_f64()
             );
         }
@@ -664,6 +666,66 @@ mod tests {
     }
 
     /// **デッドマンはキーが途切れたら速度だけ 0 にし、モードは触らない。**
+    #[test]
+    /// **端末のオートリピートでデッドマンが落ちない。** リピートは「最初の 1 回が
+    /// 遅れて、あとは速い」（X11 の既定は 660 ms → 25 Hz）。デッドマンがその
+    /// 最初の待ちより短いと、押し続けているのに速度が 0 に落ちて上がり直す
+    /// （実機で「脈動する」として出た、2026-09-16）。
+    #[test]
+    fn holding_a_key_does_not_trip_the_deadman_with_a_slow_auto_repeat() {
+        let l = lim();
+        let repeat_delay = Duration::from_millis(660);
+        let repeat_period = Duration::from_millis(40);
+        for (deadman, want_trip) in [(Duration::from_millis(500), true), (Duration::from_millis(1000), false)] {
+            let mut sh = shared();
+            let t0 = Instant::now();
+            on_key(&mut sh, Key::Forward, t0, &l);
+            let fast = sh.intent.velocity.vx_m_s;
+            assert!(fast > 0.0);
+            // 最初のリピートが来るまでの間にデッドマンを見る。
+            let mut tripped = false;
+            let mut t = Duration::from_millis(0);
+            while t < repeat_delay {
+                t += Duration::from_millis(5);
+                if deadman_check(&mut sh, t0 + t, deadman) {
+                    tripped = true;
+                }
+            }
+            assert_eq!(tripped, want_trip, "デッドマン {deadman:?} で落ちたか");
+            // リピートが届き始めたあとは、どちらでも落ちない。
+            on_key(&mut sh, Key::Forward, t0 + repeat_delay, &l);
+            let mut t = repeat_delay;
+            for _ in 0..50 {
+                t += repeat_period;
+                assert!(!deadman_check(&mut sh, t0 + t, deadman), "リピート中に落ちた");
+                on_key(&mut sh, Key::Forward, t0 + t, &l);
+            }
+            assert!(sh.intent.velocity.vx_m_s > 0.0);
+        }
+    }
+
+    /// **人が連打して歩かせるときも、連打の間隔より長いこと。**
+    #[test]
+    fn tapping_every_700ms_does_not_trip_a_one_second_deadman() {
+        let l = lim();
+        let mut sh = shared();
+        let t0 = Instant::now();
+        let deadman = Duration::from_millis(1000);
+        let mut t = Duration::from_millis(0);
+        on_key(&mut sh, Key::Forward, t0, &l);
+        for _ in 0..10 {
+            let next = t + Duration::from_millis(700);
+            let mut u = t;
+            while u < next {
+                u += Duration::from_millis(5);
+                assert!(!deadman_check(&mut sh, t0 + u, deadman), "700 ms の連打で落ちた");
+            }
+            t = next;
+            on_key(&mut sh, Key::Forward, t0 + t, &l);
+        }
+        assert!(sh.intent.velocity.vx_m_s > 0.0);
+    }
+
     #[test]
     fn the_deadman_zeroes_the_velocity_when_keys_stop() {
         let l = lim();

@@ -535,12 +535,18 @@ pub fn run(
     // ゼロ点、伏せ姿勢の照合）は機体の Plant / Pilot で済ませ、操縦だけを
     // 端末に替える。実機なのでデッドマン付き。
     if opts.pilot_keys {
+        let deadman = Duration::from_millis(cfg.control.keys_deadman_ms);
         pilot = Box::new(crate::pilot_keys::KeyPilot::open_with(
             &cfg,
             misa_core::GaitSelect::Crawl,
-            Some(Duration::from_millis(500)),
+            Some(deadman),
         )?);
-        log::info!("操縦はキーボード（デッドマン 0.5 s）。Esc / Ctrl-C で脱力して抜けます");
+        log::info!(
+            "操縦はキーボード（デッドマン {:.1} s。端末のオートリピートの最初の待ちより長いこと。\
+             短いと押し続けているのに速度が 0 に落ちて脈動する。control.keys_deadman_ms）。\
+             Esc / Ctrl-C で脱力して抜けます",
+            deadman.as_secs_f64()
+        );
     }
 
     let stop = install_signal_handler();

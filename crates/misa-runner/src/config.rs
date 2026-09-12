@@ -211,6 +211,10 @@ impl AppConfig {
         if !(self.gait.knee_flip_shift_m >= 0.0 && self.gait.knee_flip_shift_m < 0.2) {
             return Err(format!("gait.knee_flip_shift_m = {} は 0〜0.2 m で", self.gait.knee_flip_shift_m));
         }
+        let dm = self.control.keys_deadman_ms;
+        if !(100..=5000).contains(&dm) {
+            return Err(format!("control.keys_deadman_ms = {dm} は 100〜5000 ms で"));
+        }
         let b = self.control.gravity_feedforward_blend_s;
         if !(b >= 0.0 && b < 5.0) {
             return Err(format!("control.gravity_feedforward_blend_s = {b} は 0〜5 s で（0 で無効）"));
@@ -871,6 +875,20 @@ pub struct ControlConfig {
     /// 自重より強く押す — 検証以外では使わない。範囲 [0, 1.5]。
     #[serde(default = "default_gravity_feedforward_scale")]
     pub gravity_feedforward_scale: f64,
+    /// `run --pilot keys` のデッドマン [ms]。キーがこれだけ来なければ速度を 0 に
+    /// 落とす（モードと姿勢は触らない）。既定 1000。
+    ///
+    /// **端末のオートリピートより長くすること。** リピートは「最初の 1 回だけ
+    /// 遅れて、あとは速い」（X11 の既定は 660 ms 待ってから 25 Hz、Linux の
+    /// コンソールは 250 ms から 30 Hz）。デッドマンがこの最初の待ちより短いと、
+    /// キーを押し続けているのに一度速度が 0 に落ちて上がり直す = **脈動する**
+    /// （2026-09-16 の実機で発生）。人が連打して歩かせるときも、連打の間隔より
+    /// 短いと同じことが起きる。
+    ///
+    /// 短いほど安全側（手を離してから止まるまでが速い）。落ちたことは WARN で
+    /// 1 回ずつ出るので、脈動したらログを見る。
+    #[serde(default = "default_keys_deadman_ms")]
+    pub keys_deadman_ms: u64,
     /// 前置トルクの接地の重みを鈍らせる時間 [s]。既定 0.1。
     ///
     /// 前置トルクは**計画上の接地**に体重を配る。0/1 で切り替えると、脚が
@@ -1001,6 +1019,7 @@ impl Default for ControlConfig {
             gravity_feedforward: GravityFeedforward::Off,
             gravity_feedforward_scale: default_gravity_feedforward_scale(),
             gravity_feedforward_blend_s: default_gravity_feedforward_blend_s(),
+            keys_deadman_ms: default_keys_deadman_ms(),
         }
     }
 }
@@ -1011,6 +1030,10 @@ fn default_gravity_feedforward_scale() -> f64 {
 
 fn default_gravity_feedforward_blend_s() -> f64 {
     0.1
+}
+
+fn default_keys_deadman_ms() -> u64 {
+    1000
 }
 
 fn default_knee_flip_phase_s() -> f64 {
