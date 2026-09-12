@@ -427,6 +427,9 @@ fn print_help() {
                                    （歩容が始まってからの秒 : 差 [m]）
          [--wbc-script S]          WBC の出力を時刻ごとに替える。
                                    "4:position,8:torque,12:off"
+         [--vx-script S]           前進速度を時刻ごとに替える。"0:0.12,6:0"
+                                   （歩容が始まってからの秒 : m/s。**止まるときの
+                                   跳びを見る**のに使う）
          [--knee-script S]         膝の向きを時刻ごとに替える。"5:>>,12:<<"
                                    （立って止まっているときだけ効く。振り付けを通る）
          [--knee-style stand|rest] 反転のやり方を上書き（gait.knee_flip_style）
@@ -602,6 +605,7 @@ const VALUE_FLAGS: &[&str] = &[
     "height-offset",
     "height-script",
     "wbc-script",
+    "vx-script",
     "knee-script",
     "knee-style",
     "hold-start",

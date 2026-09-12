@@ -70,6 +70,24 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     };
     // `--wbc-script "4:position,8:torque,12:off"` — 歩容中の経過秒で WBC の出力を
     // 替える台本。切り替えの連続性（跳ばないか）を実機なしで見る用。
+    // `--vx-script "0:0.12,6:0"` — 歩容中の経過秒で前進速度を替える。**止まる
+    // ときの跳びを見る**のに要る（`--vx` は一定値しか出せない）。
+    let vx_script: Vec<(f64, f64)> = match cli.str("vx-script") {
+        None => Vec::new(),
+        Some(spec) => {
+            let mut v = Vec::new();
+            for item in spec.split(',').filter(|s| !s.trim().is_empty()) {
+                let (at, val) = item
+                    .split_once(':')
+                    .ok_or_else(|| format!("--vx-script の項 {item:?} は 秒:速度 の形で"))?;
+                let at: f64 = at.trim().parse().map_err(|e| format!("--vx-script の秒 {at:?}: {e}"))?;
+                let val: f64 = val.trim().parse().map_err(|e| format!("--vx-script の速度 {val:?}: {e}"))?;
+                v.push((at, val));
+            }
+            v.sort_by(|a, b| a.0.total_cmp(&b.0));
+            v
+        }
+    };
     // `--knee-script "5:>>,12:<<"` — 歩容中の経過秒で膝の向きを替える（立って
     // 止まっているときだけ効く。歩いていれば警告して無視される）。
     let knee_script: Vec<(f64, misa_core::KneePatternRequest)> = match cli.str("knee-script") {
@@ -365,6 +383,11 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // `contact_in_swing` は計画が遊脚なのに乗っている周期（早い着地・遅い離地）。
     let mut plan_stance_no_contact = [0usize; 4];
     let mut contact_in_swing = [0usize; 4];
+    // **目標角がどれだけ速く動いたか**（安全ゲートに入る前の生の指令）。
+    // 「指令が飛んだ」は追従誤差では見えない（機体は素直に追う）ので別に測る。
+    let mut tgt_rate_max = [0.0f64; 12];
+    let mut tgt_rate_at = [0.0f64; 12];
+    let mut prev_targets: Option<crate::jointvec::JointVec> = None;
     // **着地の衝撃。** 接地が false → true になった周期の足の鉛直速度（直前の
     // 周期との差分）と、その後 50 ms の最大鉛直力。計画上の着地速度は 0
     // （遊脚の山は sin² で終端速度 0）なので、ここが大きければ「計画より早く
@@ -426,8 +449,15 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         // 台本のときだけ、立ち上がってから速度を入れる。プロポのときは
         // 操縦者が入れるので触らない。
         if scripted && controller.state() == State::Active {
+            let since = *active_since.get_or_insert(t);
+            let vx_now = vx_script
+                .iter()
+                .filter(|(at, _)| *at <= t - since)
+                .last()
+                .map(|(_, v)| *v)
+                .unwrap_or(vx);
             script_velocity = Velocity {
-                vx_m_s: vx,
+                vx_m_s: vx_now,
                 vy_m_s: vy,
                 wz_rad_s: wz,
             };
@@ -502,6 +532,20 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             }
         }
         let mut out = controller.tick(&cmd, &measured, attitude, dt);
+        // **目標角の変化率**（安全ゲートの前）。歩容が飛んだかはここにしか出ない。
+        if let (Some(prev), true) = (prev_targets, dt > 1e-9) {
+            for leg in 0..4 {
+                for k in 0..3 {
+                    let r = ((out.targets.legs[leg][k] - prev.legs[leg][k]) / dt).abs();
+                    let i = leg * 3 + k;
+                    if r > tgt_rate_max[i] {
+                        tgt_rate_max[i] = r;
+                        tgt_rate_at[i] = t;
+                    }
+                }
+            }
+        }
+        prev_targets = Some(out.targets);
         if cfg.wbc.use_measured_contact {
             out.stance = crate::estimator::stance_with_measured_contact(out.stance, &obs);
         }
@@ -930,6 +974,23 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             })
             .collect();
         println!("遊脚で上がった高さ [m]（gait.swing_height_m に届いているか）  {s}");
+    }
+    if tgt_rate_max.iter().any(|r| *r > 0.0) {
+        let mut idx: Vec<usize> = (0..12).collect();
+        idx.sort_by(|a, b| tgt_rate_max[*b].total_cmp(&tgt_rate_max[*a]));
+        let s: String = idx
+            .iter()
+            .take(4)
+            .map(|&i| {
+                format!(
+                    "{} {:.1} ({:.2} s)  ",
+                    misa_hal::joint::JOINT_NAMES[i / 3][i % 3].trim_end_matches("_joint"),
+                    tgt_rate_max[i],
+                    tgt_rate_at[i]
+                )
+            })
+            .collect();
+        println!("目標角の最大変化率 [rad/s]（安全ゲートの前。上位 4 軸）  {s}");
     }
     if td_n.iter().any(|&n| n > 0) {
         let s: String = (0..4)

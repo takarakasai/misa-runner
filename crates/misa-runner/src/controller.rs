@@ -175,6 +175,8 @@ pub struct Controller {
     applied_offset: [nalgebra::Vector3<f64>; 4],
     /// 反転が終わったら採用する立ち位置のずらし。
     knee_flip_next_offset: Option<[nalgebra::Vector3<f64>; 4]>,
+    /// 止まる要求が来たとき空中だった脚（[`Self::ramp_velocity`] の待ち）。
+    settling_airborne: Option<[bool; 4]>,
 }
 
 impl Controller {
@@ -222,6 +224,7 @@ impl Controller {
             stance_xy_offset: [nalgebra::Vector3::zeros(); 4],
             applied_offset: [nalgebra::Vector3::zeros(); 4],
             knee_flip_next_offset: None,
+            settling_airborne: None,
         };
         // `rest` の反転を使う機体は、いまの膝の向きで車輪に載って立ち上がれる
         // 足の位置を立ち位置にしておく（置き替えの段を省くため）。
@@ -1477,24 +1480,38 @@ impl Controller {
         // 跳ぶ時刻がランプ終了へ移るだけだった。0.001 m/s を渡し続けた
         // 場合は 3.34 rad/s で収まる ＝ **跳びの原因は 0 への分岐そのもの**。
         //
-        // なので全脚が接地している瞬間まで微速で歩かせ、そこで 0 に落とす。
+        // なので足が地面に着くまで微速で歩かせ、そこで 0 に落とす。
+        //
+        // **待つ条件は「いま空中の脚が着地したか」で、「4 脚とも接地」ではない。**
+        // trot（接地比 0.5）は 4 脚が同時に接地する瞬間が無いので、全脚接地を
+        // 待つと `stop_settle_s` の時間切れまで待ってから結局跳んでいた
+        // （実機の keel で「w を一瞬押して止めると calf / thigh が急峻に動く」
+        // として出た。2026-09-14。MuJoCo で 61.3 rad/s → 4.9 rad/s）。
+        // 止まる要求が来た周期に空中だった脚が全部接地すれば、残りの脚は
+        // 離地したばかりで足はまだ地面の高さにいる ＝ どの足も飛ばない。
         const CREEP_M_S: f64 = 1e-3;
         let settle_timeout_s = self.cfg.gait.stop_settle_s;
         let stopping = want.iter().all(|v| *v == 0.0);
         let nearly_stopped = self.ramped_v.iter().all(|v| v.abs() <= CREEP_M_S);
         if stopping && nearly_stopped {
             // 接地フラグは前周期の歩容出力（`body_view`）から取る。
-            let all_stance = self.body_view.stance.iter().all(|&s| s);
-            if all_stance || self.settling_s >= settle_timeout_s {
+            let stance = self.body_view.stance;
+            let airborne = *self
+                .settling_airborne
+                .get_or_insert_with(|| std::array::from_fn(|i| !stance[i]));
+            let landed = (0..4).all(|i| !airborne[i] || stance[i]);
+            if landed || self.settling_s >= settle_timeout_s {
                 self.settling_s = 0.0;
+                self.settling_airborne = None;
                 self.ramped_v = [0.0; 3];
                 return self.ramped_v;
             }
-            // 待っている間だけ微速。**保持しない**ので、接地した次の周期で 0 になる。
+            // 待っている間だけ微速。**保持しない**ので、着地した次の周期で 0 になる。
             self.settling_s += dt;
             return [CREEP_M_S, 0.0, 0.0];
         }
         self.settling_s = 0.0;
+        self.settling_airborne = None;
         self.ramped_v
     }
 
@@ -1611,19 +1628,14 @@ mod tests {
                 worst[0],
                 (worst[0] * dt).to_degrees()
             );
-            // **停止側は跳びを残してある。意図的なトレードオフ。**
-            //
-            // 歩容は `v = 0` で静止姿勢へ分岐し遊脚を一気に接地させる。
-            // 全脚接地まで待てば消えるが、**trot は 4 脚が同時に接地しない
-            // ことがあり、待つと停止に 2.5 s かかる**（実機で「スティックを
-            // 戻しても数秒止まらない」として出た）。リング外へ出る方が
-            // 危険なので、`gait.stop_settle_s` を短くして跳びを受け入れた。
-            //
-            // **実際の関節運動は `max_target_rate_rad_s` で頭打ちされる。**
-            // 0.19 rad を 3 rad/s で追うので約 62 ms の動き。
+            // **停止側も跳ばない**（2026-09-14）。かつては「trot は 4 脚が
+            // 同時に接地しないので待てない」として跳びを受け入れていたが、
+            // 待つ条件を**「いま空中の脚が着地したか」**に替えれば trot でも
+            // 半周期で揃う（[`Controller::ramp_velocity`]）。実機の keel で
+            // 「w を一瞬押して止めると calf / thigh が急峻に動く」として出た。
             assert!(
-                worst[1] < 45.0,
-                "{} の停止で目標が {:.2} rad/s 跳んだ（想定より大きい）",
+                worst[1] < 6.0,
+                "{} の停止で目標が {:.2} rad/s 跳んだ（着地を待っているはず）",
                 select.label(),
                 worst[1]
             );
@@ -2151,6 +2163,61 @@ mod tests {
             GaitSelect::Trot,
             "歩行中に歩容が切り替わった（踏み替えが飛ぶ）"
         );
+    }
+
+    /// **止めるときに目標角が飛ばない。** 速度を 0 にした瞬間に歩容が
+    /// `holding`（全脚接地・位相 0）へ落ちると、空中にいた足の目標が接地位置へ
+    /// 飛ぶ。[`Controller::ramp_velocity`] は**そのとき空中だった脚が着地する
+    /// まで**微速で歩かせてから 0 に落とす。trot は 4 脚が同時に接地しないので、
+    /// 「全脚接地」を待つ作りでは時間切れまで待って結局飛んでいた。
+    #[test]
+    fn stopping_waits_for_the_airborne_legs_to_land() {
+        let dt = 0.005;
+        for select in [GaitSelect::Walk, GaitSelect::Trot] {
+            let cfg = AppConfig::default();
+            let robot = Robot::load(&test_model_path(), &cfg.control.kinematics_pose).expect("テスト用モデル");
+            let mut c = Controller::new(robot, cfg);
+            let mut walk = cmd(ModeRequest::Walk);
+            walk.gait = select;
+            walk.velocity.vx_m_s = 0.10;
+            run_until(&mut c, &walk, State::Active, 20.0);
+            let mut prev = JointVec::zeros();
+            for _ in 0..400 {
+                prev = c.tick(&walk, &JointVec::zeros(), imu(), dt).targets;
+            }
+            assert!(
+                !c.body_view.stance.iter().all(|&s| s),
+                "{} なのに全脚接地のまま（試験が歩いていない）",
+                select.label()
+            );
+            // 速度 0。止まりきるまでの目標角の最大変化率を測る。
+            let mut stop = walk;
+            stop.velocity.vx_m_s = 0.0;
+            let mut worst = 0.0f64;
+            let mut stopped_at = None;
+            for i in 0..600 {
+                let out = c.tick(&stop, &JointVec::zeros(), imu(), dt);
+                for leg in 0..4 {
+                    for k in 0..3 {
+                        worst = worst.max(((out.targets.legs[leg][k] - prev.legs[leg][k]) / dt).abs());
+                    }
+                }
+                if stopped_at.is_none()
+                    && out.targets.max_abs_diff(&prev) < 1e-12
+                    && c.ramped_v.iter().all(|v| *v == 0.0)
+                {
+                    stopped_at = Some(i as f64 * dt);
+                }
+                prev = out.targets;
+            }
+            let t = stopped_at.expect("止まりきっていない");
+            assert!(
+                worst < 12.0,
+                "{} を止めたときに目標角が {worst:.1} rad/s 飛んだ（着地を待っているはず）",
+                select.label()
+            );
+            assert!(t < 0.6, "{} の停止に {t:.2} s かかった", select.label());
+        }
     }
 
     /// **膝の向きは立って止まっているときだけ反転でき、振り付けの足先は地面に
