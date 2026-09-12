@@ -198,16 +198,16 @@ impl BodyEstimator {
 
     /// **開ループの重力補償トルク**（[`crate::config::GravityFeedforward`]）。
     ///
-    /// 計画上の目標角 `q_plan` と計画上の接地 `stance` だけから
+    /// 計画上の目標角 `q_plan` と計画上の接地の重み `share`（脚ごと 0〜1）だけから
     /// `τ = τ_g(q) − Jᵀ f` を作る。`τ_g` は胴体を固定した脚の重力トルク
-    /// （RNEA、q̇ = q̈ = 0）、`f` は体重 `weight_n` を接地脚に等分した
+    /// （RNEA、q̇ = q̈ = 0）、`f` は体重 `weight_n` を重みの比で配った
     /// 鉛直上向きの接地力（胴体は水平と仮定。`with_weight` が false なら 0）。
-    /// 接地脚が無ければ `f = 0`。**実測は見ない**ので、これを τ_ff に載せても
+    /// 重みの合計が 0 なら `f = 0`。**実測は見ない**ので、これを τ_ff に載せても
     /// ホスト側に帰還ループは増えない。
     pub fn gravity_feedforward(
         &self,
         q_plan: &JointVec,
-        stance: [bool; 4],
+        share: [f64; 4],
         weight_n: f64,
         with_weight: bool,
     ) -> JointVec {
@@ -218,7 +218,11 @@ impl BodyEstimator {
             }
         }
         let g = misarta::rnea::compute_gravity(&self.model, q.as_slice());
-        let n_stance = stance.iter().filter(|s| **s).count();
+        // **接地は 0/1 ではなく重みで受け取る。** 遊脚 ↔ 立脚の切り替えで
+        // 配分が階段状に変わると、τ_ff が 1 周期で体重の半分ぶん跳ぶ
+        // （keel の trot で 41 N·m/周期。実機で「ビクン」となる）。呼び出し側が
+        // 鈍らせた重みを渡し、ここは合計で割って配る。
+        let total: f64 = share.iter().map(|w| w.clamp(0.0, 1.0)).sum();
         let mut out = JointVec::zeros();
         for slot in 0..4 {
             let s = self.signs[slot];
@@ -226,11 +230,12 @@ impl BodyEstimator {
             for k in 0..3 {
                 tau[k] = g[self.leg_v_idx[slot][k]];
             }
-            if with_weight && stance[slot] && n_stance > 0 && weight_n > 0.0 {
+            let w = share[slot].clamp(0.0, 1.0);
+            if with_weight && w > 0.0 && total > 1e-9 && weight_n > 0.0 {
                 let kin = self.kin.legs()[slot];
                 let q_ik: Vec<f64> = (0..3).map(|k| q_plan.legs[slot][k] * s[k]).collect();
                 let j = foot_jacobian_body(kin, q_ik[0], q_ik[1], q_ik[2]);
-                let jt_f = j.transpose() * na::Vector3::new(0.0, 0.0, weight_n / n_stance as f64);
+                let jt_f = j.transpose() * na::Vector3::new(0.0, 0.0, weight_n * w / total);
                 for k in 0..3 {
                     // IK 座標系の Jᵀf をモデル座標系へ（`foot_forces_from_torque` の逆）。
                     tau[k] -= jt_f[k] * s[k];
@@ -776,7 +781,7 @@ mod tests {
         let mut e = BodyEstimator::new(&r, EstimatorKind::LegOdometry);
         let q = stance_pose(&r);
         let weight = 28.0;
-        let ff = e.gravity_feedforward(&q, [true; 4], weight, true);
+        let ff = e.gravity_feedforward(&q, [1.0; 4], weight, true);
         let mut tau = [[None; 3]; 4];
         for slot in 0..4 {
             for k in 0..3 {
@@ -789,7 +794,7 @@ mod tests {
             assert!((f - weight / 4.0).abs() < 1e-6, "脚 {slot}: {f} ≠ {}", weight / 4.0);
         }
         // 3 脚接地なら 1/3 ずつ、遊脚は重力だけ（接地力 0）。
-        let ff3 = e.gravity_feedforward(&q, [true, false, true, true], weight, true);
+        let ff3 = e.gravity_feedforward(&q, [1.0, 0.0, 1.0, 1.0], weight, true);
         let mut tau3 = [[None; 3]; 4];
         for slot in 0..4 {
             for k in 0..3 {
@@ -799,6 +804,18 @@ mod tests {
         let fz3 = e.foot_forces_from_torque(&q, &JointVec::zeros(), &tau3, [0.0; 3], 0.005);
         assert!((fz3[0].unwrap() - weight / 3.0).abs() < 1e-6);
         assert!(fz3[1].unwrap().abs() < 1e-6, "遊脚に接地力が乗っている: {:?}", fz3[1]);
+        // **重みは連続に効く。** 半分の重みなら接地力も半分（切り替えの鈍らせ用）。
+        let half_w = e.gravity_feedforward(&q, [0.5, 1.0, 1.0, 1.0], weight, true);
+        let mut tau_h = [[None; 3]; 4];
+        for slot in 0..4 {
+            for k in 0..3 {
+                tau_h[slot][k] = Some(half_w.legs[slot][k]);
+            }
+        }
+        let fz_h = e.foot_forces_from_torque(&q, &JointVec::zeros(), &tau_h, [0.0; 3], 0.005);
+        let want_half = weight * 0.5 / 3.5;
+        assert!((fz_h[0].unwrap() - want_half).abs() < 1e-6, "{:?} ≠ {want_half}", fz_h[0]);
+        assert!((fz_h[1].unwrap() - 2.0 * want_half).abs() < 1e-6);
         // 倍率 0.5 なら成分がちょうど半分（`JointVec::scaled`）。
         let half = ff.scaled(0.5);
         for slot in 0..4 {
@@ -807,7 +824,7 @@ mod tests {
             }
         }
         // 脚の重力だけ: 接地力 0。
-        let legs_only = e.gravity_feedforward(&q, [true; 4], weight, false);
+        let legs_only = e.gravity_feedforward(&q, [1.0; 4], weight, false);
         let mut tl = [[None; 3]; 4];
         for slot in 0..4 {
             for k in 0..3 {

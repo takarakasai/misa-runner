@@ -323,7 +323,6 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // 開ループの重力補償（`[control] gravity_feedforward`）に使う体重。WBC と同じ
     // 出どころ（モデルの慣性の和。根リンクは `Robot::load` が補っている）。
     let weight_n = robot.model.inertias.iter().map(|i| i.mass).sum::<f64>() * 9.81;
-    let mut prev_targets: Option<crate::jointvec::JointVec> = None;
     let mut controller = Controller::with_arm(robot, cfg.clone(), head_driven);
     // **可動域は `dump` と同じ表で、同じ関数で見る。**
     //
@@ -388,6 +387,14 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let mut tgt_rate_max = [0.0f64; 12];
     let mut tgt_rate_at = [0.0f64; 12];
     let mut prev_targets: Option<crate::jointvec::JointVec> = None;
+    // 前置トルクの接地の重み（脚ごと 0〜1、鈍らせたもの）。
+    let mut contact_share = [0.0f64; 4];
+    // 前置トルク全体の入り具合（脱力 → 通電で鈍らせる）。
+    let mut ff_engage = 0.0f64;
+    // 前置トルクの段差。**目標角が滑らかでも τ_ff が階段状に入れば機体は跳ねる。**
+    let mut tau_step_max = [0.0f64; 12];
+    let mut tau_step_at = [0.0f64; 12];
+    let mut prev_tau = [0.0f64; 12];
     // **着地の衝撃。** 接地が false → true になった周期の足の鉛直速度（直前の
     // 周期との差分）と、その後 50 ms の最大鉛直力。計画上の着地速度は 0
     // （遊脚の山は sin² で終端速度 0）なので、ここが大きければ「計画より早く
@@ -632,15 +639,39 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         // WBC が解いていない周期だけ、開ループの重力補償を τ_ff に載せる。
         // 歩容中と膝の反転中だけ（反転中は浮かせている脚が立脚フラグから
         // 外れているので、残りの脚に体重が配られる）。
-        let gravity_ff = (plan.is_none() && matches!(out.state, State::Active | State::FlippingKnees) && cfg.control.gravity_feedforward.is_on()).then(|| {
+        // **接地の重みは鈍らせる。** 0/1 で切り替えると τ_ff が階段状に入り、
+        // 歩容の出入りと踏み替えのたびに機体が跳ねる（`gravity_feedforward_blend_s`）。
+        // 歩容が回っていない相（起立・姿勢の遷移）は全脚接地として配る。
+        {
+            let want: [f64; 4] = match out.state {
+                State::Relaxed => [0.0; 4],
+                State::Active | State::FlippingKnees => std::array::from_fn(|i| out.stance[i] as u8 as f64),
+                _ => [1.0; 4],
+            };
+            let blend = cfg.control.gravity_feedforward_blend_s;
+            let step = if blend > 1e-6 { dt / blend } else { 1.0 };
+            for i in 0..4 {
+                let d = (want[i] - contact_share[i]).clamp(-step, step);
+                contact_share[i] += d;
+            }
+            // 脱力から通電したときに**脚自身の重力ぶん**が階段状に入るのも
+            // 同じ時定数で鈍らせる（接地の配分とは別。遊脚にも要る項なので
+            // 脚ごとの重みでは割れない）。
+            let want_engage = if out.state == State::Relaxed { 0.0 } else { 1.0 };
+            ff_engage += (want_engage - ff_engage).clamp(-step, step);
+        }
+        let gravity_ff = (plan.is_none()
+            && ff_engage > 0.0
+            && cfg.control.gravity_feedforward.is_on())
+        .then(|| {
             estimator
                 .gravity_feedforward(
                     &out.targets,
-                    out.stance,
+                    contact_share,
                     weight_n,
                     cfg.control.gravity_feedforward.with_weight(),
                 )
-                .scaled(cfg.control.gravity_feedforward_scale)
+                .scaled(cfg.control.gravity_feedforward_scale * ff_engage)
         });
         // 調査用: WBC の τ と Plant が実際に掛けたトルクを脚ごとに並べる
         // （README「調べ方」）。位置出力で立ち止まらせれば Plant 側は重力補償
@@ -681,6 +712,18 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             gravity_ff.as_ref(),
             target_qd.as_ref(),
         );
+        for i in 0..12 {
+            let tau = outgoing
+                .get(misa_core::AxisId::new(i as u16))
+                .map(|a| a.torque_ff_nm)
+                .unwrap_or(0.0);
+            let d = (tau - prev_tau[i]).abs();
+            if d > tau_step_max[i] {
+                tau_step_max[i] = d;
+                tau_step_at[i] = t;
+            }
+            prev_tau[i] = tau;
+        }
         if let Some(rec) = recorder.as_ref() {
             let mut shadow = outgoing.clone();
             let verdict =
@@ -991,6 +1034,23 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             })
             .collect();
         println!("目標角の最大変化率 [rad/s]（安全ゲートの前。上位 4 軸）  {s}");
+    }
+    if tau_step_max.iter().any(|r| *r > 1e-9) {
+        let mut idx: Vec<usize> = (0..12).collect();
+        idx.sort_by(|a, b| tau_step_max[*b].total_cmp(&tau_step_max[*a]));
+        let s: String = idx
+            .iter()
+            .take(4)
+            .map(|&i| {
+                format!(
+                    "{} {:.1} ({:.2} s)  ",
+                    misa_hal::joint::JOINT_NAMES[i / 3][i % 3].trim_end_matches("_joint"),
+                    tau_step_max[i],
+                    tau_step_at[i]
+                )
+            })
+            .collect();
+        println!("前置トルクの最大段差 [N·m/周期]（歩容の出入りで階段状に入っていないか。上位 4 軸）  {s}");
     }
     if td_n.iter().any(|&n| n > 0) {
         let s: String = (0..4)

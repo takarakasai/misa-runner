@@ -211,6 +211,10 @@ impl AppConfig {
         if !(self.gait.knee_flip_shift_m >= 0.0 && self.gait.knee_flip_shift_m < 0.2) {
             return Err(format!("gait.knee_flip_shift_m = {} は 0〜0.2 m で", self.gait.knee_flip_shift_m));
         }
+        let b = self.control.gravity_feedforward_blend_s;
+        if !(b >= 0.0 && b < 5.0) {
+            return Err(format!("control.gravity_feedforward_blend_s = {b} は 0〜5 s で（0 で無効）"));
+        }
         let sc = self.control.gravity_feedforward_scale;
         if !(0.0..=1.5).contains(&sc) || !sc.is_finite() {
             return Err(format!(
@@ -867,6 +871,18 @@ pub struct ControlConfig {
     /// 自重より強く押す — 検証以外では使わない。範囲 [0, 1.5]。
     #[serde(default = "default_gravity_feedforward_scale")]
     pub gravity_feedforward_scale: f64,
+    /// 前置トルクの接地の重みを鈍らせる時間 [s]。既定 0.1。
+    ///
+    /// 前置トルクは**計画上の接地**に体重を配る。0/1 で切り替えると、脚が
+    /// 離地・着地するたびに τ_ff が階段状に変わる（keel の trot で 1 周期に
+    /// 41 N·m。歩容の出入りでも 0 ↔ 満載で同じ段差になり、実機では「ビクン」と
+    /// なる。2026-09-14）。ここで脚ごとの重みを 0 → 1 に鈍らせて、配分を
+    /// 連続にする。0 で無効（従来どおりの階段）。
+    ///
+    /// **長くすると効きが遅れる。** trot 0.4 s なら 1 相 0.2 s なので、0.1 で
+    /// 立脚の半ばに満載になる。歩容の周期より長くしないこと。
+    #[serde(default = "default_gravity_feedforward_blend_s")]
+    pub gravity_feedforward_blend_s: f64,
     /// ロボットモデル (`.misa`)。ポーズ・シーケンスもここから読む。
     #[serde(default = "default_model_path")]
     pub model: String,
@@ -984,12 +1000,17 @@ impl Default for ControlConfig {
             max_tilt_rad: None,
             gravity_feedforward: GravityFeedforward::Off,
             gravity_feedforward_scale: default_gravity_feedforward_scale(),
+            gravity_feedforward_blend_s: default_gravity_feedforward_blend_s(),
         }
     }
 }
 
 fn default_gravity_feedforward_scale() -> f64 {
     1.0
+}
+
+fn default_gravity_feedforward_blend_s() -> f64 {
+    0.1
 }
 
 fn default_knee_flip_phase_s() -> f64 {

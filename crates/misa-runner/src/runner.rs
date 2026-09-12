@@ -601,6 +601,10 @@ pub fn run(
         );
     }
     let mut prev_targets: Option<JointVec> = None;
+    // 前置トルクの接地の重み（脚ごと 0〜1、鈍らせたもの）。
+    let mut contact_share = [0.0f64; 4];
+    // 前置トルク全体の入り具合（脱力 → 通電で鈍らせる）。
+    let mut ff_engage = 0.0f64;
     let mut controller = Controller::with_arm(robot, cfg.clone(), arm_app_driven);
 
     let mut warned_unread = false;
@@ -829,15 +833,39 @@ pub fn run(
             qd
         };
         // WBC が解いていない周期だけ、開ループの重力補償を τ_ff に載せる。
-        let gravity_ff = (plan.is_none() && matches!(out.state, State::Active | State::FlippingKnees) && cfg.control.gravity_feedforward.is_on()).then(|| {
+        // **接地の重みは鈍らせる。** 0/1 で切り替えると τ_ff が階段状に入り、
+        // 歩容の出入りと踏み替えのたびに機体が跳ねる（`gravity_feedforward_blend_s`）。
+        // 歩容が回っていない相（起立・姿勢の遷移）は全脚接地として配る。
+        {
+            let want: [f64; 4] = match out.state {
+                State::Relaxed => [0.0; 4],
+                State::Active | State::FlippingKnees => std::array::from_fn(|i| out.stance[i] as u8 as f64),
+                _ => [1.0; 4],
+            };
+            let blend = cfg.control.gravity_feedforward_blend_s;
+            let step = if blend > 1e-6 { last_tick.elapsed().as_secs_f64() / blend } else { 1.0 };
+            for i in 0..4 {
+                let d = (want[i] - contact_share[i]).clamp(-step, step);
+                contact_share[i] += d;
+            }
+            // 脱力から通電したときに**脚自身の重力ぶん**が階段状に入るのも
+            // 同じ時定数で鈍らせる（接地の配分とは別。遊脚にも要る項なので
+            // 脚ごとの重みでは割れない）。
+            let want_engage = if out.state == State::Relaxed { 0.0 } else { 1.0 };
+            ff_engage += (want_engage - ff_engage).clamp(-step, step);
+        }
+        let gravity_ff = (plan.is_none()
+            && ff_engage > 0.0
+            && cfg.control.gravity_feedforward.is_on())
+        .then(|| {
             estimator
                 .gravity_feedforward(
                     &out.targets,
-                    out.stance,
+                    contact_share,
                     weight_n,
                     cfg.control.gravity_feedforward.with_weight(),
                 )
-                .scaled(cfg.control.gravity_feedforward_scale)
+                .scaled(cfg.control.gravity_feedforward_scale * ff_engage)
         });
         // 状態行に出す用。**解いていない周期は `None`** なので、
         // 「WBC 有効だが歩容が回っていない」と「解けている」が潰れない。
