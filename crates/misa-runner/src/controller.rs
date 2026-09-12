@@ -790,10 +790,16 @@ impl Controller {
     /// 立ち上がれる足の位置と、基準の立ち位置との差（xy、脚ごと）。曲げ限界で足を hip の
     /// 真下に置けない向き（keel の `>>`）は外へずらす。届くなら 0。
     fn rest_park_offsets(&self, pattern: crate::config::KneeShape) -> Result<[nalgebra::Vector3<f64>; 4], String> {
+        let h = self.cfg.gait.knee_flip_rest_height_m.ok_or("knee_flip_rest_height_m が無い")?;
+        self.park_offsets_at(pattern, h)
+    }
+
+    /// 胴体高さ `h_body` で膝 `pattern` の脚を置ける足先の xy（基準の立ち位置との差）。
+    fn park_offsets_at(&self, pattern: crate::config::KneeShape, h_body: f64) -> Result<[nalgebra::Vector3<f64>; 4], String> {
         use crate::robot::knee_forward_for;
         use quadruped_gait::{forward_leg_kinematics, solve_leg_ik};
         let g = &self.cfg.gait;
-        let h_rest = g.knee_flip_rest_height_m.ok_or("knee_flip_rest_height_m が無い")?;
+        let h_rest = h_body;
         let h_ref = self.robot.reference_height_m(g);
         let kin_ref = self.robot.stance_kinematics_at_height(g, h_ref);
         let names = misa_hal::joint::JOINT_NAMES;
@@ -1277,6 +1283,88 @@ impl Controller {
                 }
                 cur_floor.set(-h_ref);
                 // 5. 立ち上がった足の位置がそのまま新しい立ち位置になる（置き替え無し）。
+            }
+            KneeFlipStyle::Trot => {
+                // **trot と同じ対角 2 脚ずつ。** 支えるのは残りの対角 2 脚だけで、
+                // 重心は支持線から 9 mm しか離れていない（keel）ので静的には
+                // 釣り合わない。**傾きを車輪で受け止める**ために、胴体を車輪が
+                // 床すれすれになる高さまで下げてから行う。
+                let h_rest = g
+                    .knee_flip_rest_height_m
+                    .ok_or("knee_flip_rest_height_m（車輪・腹に載ったときの胴体高さ）が無い")?;
+                let h_flip = (h_rest + g.knee_flip_trot_margin_m).min(h_ref);
+                if h_flip >= h_ref - 1e-9 {
+                    return Err(format!(
+                        "反転の高さ {h_flip:.3} が立ち高さ {h_ref:.3} 以上。knee_flip_rest_height_m / trot_margin を見直す"
+                    ));
+                }
+                let floor = -h_flip;
+                let z_float = floor + g.knee_flip_foot_lift_m;
+                let at = |xy: &[nalgebra::Vector3<f64>; 4], z: f64| -> [nalgebra::Vector3<f64>; 4] {
+                    std::array::from_fn(|s| nalgebra::Vector3::new(xy[s].x, xy[s].y, z))
+                };
+                // 下げた高さで足を置ける所（膝の向きごと）。
+                let off_old = self.park_offsets_at(old, h_flip)?;
+                let off_new = self.park_offsets_at(new, h_flip)?;
+                let xy_old: [nalgebra::Vector3<f64>; 4] = std::array::from_fn(|s| feet_nominal[s] + off_old[s]);
+                let xy_new: [nalgebra::Vector3<f64>; 4] = std::array::from_fn(|s| feet_nominal[s] + off_new[s]);
+                next_offset = off_new;
+                let _ = &park;
+
+                // 1. 3 段で鉛直に下ろす（車輪が床から margin のところまで）。
+                for i in 1..=3 {
+                    let h = h_ref + (h_flip - h_ref) * i as f64 / 3.0;
+                    let feet = at(&xy_old, -h);
+                    for slot in 0..4 {
+                        cur.legs[slot] = ik(slot, feet[slot], knee_forward_for(old, slot))?;
+                    }
+                    push(format!("下ろす {i}/3"), cur, 2.0 * phase / 3.0, [true; 4]);
+                }
+                cur_floor.set(floor);
+
+                // 2. 対角ずつ。**歩容と同じ順**（FL + RR → FR + RL）。
+                let mut done = [false; 4];
+                for pair in [[0usize, 3], [1, 2]] {
+                    let slots: Vec<usize> = pair.iter().copied().filter(|s| flip[*s]).collect();
+                    if slots.is_empty() {
+                        continue;
+                    }
+                    let tag = format!(" {}+{}", leg_name(pair[0]), leg_name(pair[1]));
+                    let mut stance = [true; 4];
+                    for &s in &slots {
+                        stance[s] = false;
+                    }
+                    // いまの各脚の足先（反転を終えた脚は新しい所）。
+                    let now: [nalgebra::Vector3<f64>; 4] =
+                        std::array::from_fn(|s| if done[s] { xy_new[s] } else { xy_old[s] });
+                    // 浮かす。
+                    for &slot in &slots {
+                        let p = nalgebra::Vector3::new(now[slot].x, now[slot].y, z_float);
+                        cur.legs[slot] = ik(slot, p, knee_forward_for(old, slot))?;
+                    }
+                    push(format!("浮かす{tag}"), cur, phase, stance);
+                    // 反転して、新しい向きで置ける所へ。
+                    let land = at(&xy_new, z_float);
+                    flip_legs(&mut cur, &slots, stance, &land, floor, true, &mut push, &tag)?;
+                    // 着ける。
+                    for &slot in &slots {
+                        let p = nalgebra::Vector3::new(xy_new[slot].x, xy_new[slot].y, floor);
+                        cur.legs[slot] = ik(slot, p, knee_forward_for(new, slot))?;
+                        done[slot] = true;
+                    }
+                    push(format!("着ける{tag}"), cur, phase, [true; 4]);
+                }
+
+                // 3. 3 段で鉛直に上げる。
+                for i in 1..=3 {
+                    let h = h_flip + (h_ref - h_flip) * i as f64 / 3.0;
+                    let feet = at(&xy_new, -h);
+                    for slot in 0..4 {
+                        cur.legs[slot] = ik(slot, feet[slot], knee_forward_for(new, slot))?;
+                    }
+                    push(format!("上げる {i}/3"), cur, 2.0 * phase / 3.0, [true; 4]);
+                }
+                cur_floor.set(-h_ref);
             }
             KneeFlipStyle::Stand => {
                 let shift = g.knee_flip_shift_m;

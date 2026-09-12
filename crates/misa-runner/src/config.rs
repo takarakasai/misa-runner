@@ -200,8 +200,19 @@ impl AppConfig {
         if !self.gait.knee_flip_out_z_m.is_finite() {
             return Err(format!("gait.knee_flip_out_z_m = {} が数でない", self.gait.knee_flip_out_z_m));
         }
-        if self.gait.knee_flip_style == KneeFlipStyle::Rest && self.gait.knee_flip_rest_height_m.is_none() {
-            return Err("gait.knee_flip_style = \"rest\" には knee_flip_rest_height_m（車輪・腹に載ったときの胴体高さ）が要ります".into());
+        if matches!(self.gait.knee_flip_style, KneeFlipStyle::Rest | KneeFlipStyle::Trot)
+            && self.gait.knee_flip_rest_height_m.is_none()
+        {
+            return Err(format!(
+                "gait.knee_flip_style = {:?} には knee_flip_rest_height_m（車輪・腹に載ったときの胴体高さ）が要ります",
+                self.gait.knee_flip_style
+            ));
+        }
+        if !(self.gait.knee_flip_trot_margin_m >= 0.0 && self.gait.knee_flip_trot_margin_m < 0.1) {
+            return Err(format!(
+                "gait.knee_flip_trot_margin_m = {} は 0〜0.1 m で",
+                self.gait.knee_flip_trot_margin_m
+            ));
         }
         if let Some(h) = self.gait.knee_flip_rest_height_m {
             if !(h > 0.0 && h.is_finite()) {
@@ -1052,6 +1063,10 @@ fn default_knee_flip_shift_m() -> f64 {
     0.05
 }
 
+fn default_knee_flip_trot_margin_m() -> f64 {
+    0.0
+}
+
 /// 膝を反転するときに荷重を外すやり方（[`GaitTuning::knee_flip_style`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1061,6 +1076,14 @@ pub enum KneeFlipStyle {
     Stand,
     /// 胴体を車輪・腹に載せて 4 脚とも浮かせ、まとめて。
     Rest,
+    /// **trot の歩容と同じ対角 2 脚ずつ。** FL + RR → FR + RL。
+    ///
+    /// 支えるのは残りの対角 2 脚だけで、重心は支持線から 9 mm しか離れて
+    /// いない（keel）ので**静的には釣り合わない**。傾きを車輪で受け止めるため、
+    /// 胴体を `knee_flip_rest_height_m + knee_flip_trot_margin_m` まで下げてから
+    /// 行う（keel の既定 0.18 m で、傾いても 6° で車輪が着く）。
+    /// 1 脚ずつ（`stand`）の半分の段数で済む。
+    Trot,
 }
 
 impl KneeFlipStyle {
@@ -1068,12 +1091,14 @@ impl KneeFlipStyle {
         match self {
             Self::Stand => "立ったまま 1 脚ずつ",
             Self::Rest => "車輪・腹に載せてまとめて",
+            Self::Trot => "対角 2 脚ずつ（trot と同じ順）",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim() {
             "stand" => Some(Self::Stand),
             "rest" => Some(Self::Rest),
+            "trot" => Some(Self::Trot),
             _ => None,
         }
     }
@@ -1275,6 +1300,17 @@ pub struct GaitTuning {
     /// `rest` で、載ったあと足を地面から浮かす量 [m]。既定 0.02。
     #[serde(default = "default_knee_flip_foot_lift_m")]
     pub knee_flip_foot_lift_m: f64,
+    /// `trot` で、反転中に車輪を床から浮かせておく高さ [m]。**既定 0**（車輪に
+    /// 載せる）。
+    ///
+    /// 対角 2 脚で支えるあいだは静的に釣り合わない（keel は重心が支持線から
+    /// 9 mm）ので、**傾きを車輪で受け止める**。胴体は
+    /// `knee_flip_rest_height_m + これ` まで下げる。0 なら最初から車輪が
+    /// 着いていて、傾きは 2〜4° で収まる。**浮かせるほど大きく傾いてから
+    /// 車輪に落ちる**（keel の MuJoCo で 0.01 → 10°、0.02 → 27°）ので、
+    /// 支持脚に荷重を残したい理由が無ければ 0 のままにする。
+    #[serde(default = "default_knee_flip_trot_margin_m")]
+    pub knee_flip_trot_margin_m: f64,
     /// `stand` で、反転する脚の対角へ胴体を寄せる量 [m]。既定 0.05
     /// （keel の足パターン ±0.245 × ±0.197 で、重心が対角線から約 5 cm 内側に入る）。
     #[serde(default = "default_knee_flip_shift_m")]
@@ -1490,6 +1526,7 @@ impl Default for GaitTuning {
             knee_flip_rest_height_m: None,
             knee_flip_foot_lift_m: default_knee_flip_foot_lift_m(),
             knee_flip_shift_m: default_knee_flip_shift_m(),
+            knee_flip_trot_margin_m: default_knee_flip_trot_margin_m(),
             knee_flip_phase_s: default_knee_flip_phase_s(),
             knee_flip_out_z_m: default_knee_flip_out_z_m(),
             mpc_force_cost: None,
