@@ -513,11 +513,11 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         );
         if controller.is_standing_still() {
             let feet = controller.robot().feet_from_posture(&measured);
-            if let Some((com_xy, fz_sum)) = crate::estimator::com_from_foot_forces(&feet, &fz) {
+            if let Some((com_xy, fz_each)) = crate::estimator::com_from_foot_forces(&feet, &fz) {
                 let model = controller.robot().body_inertia_at(&measured).com_body;
                 if let Some(line) = com_report.push(
                     com_xy,
-                    fz_sum,
+                    fz_each,
                     nalgebra::Vector2::new(model.x, model.y),
                     cfg.gait.com_offset_body_m,
                     weight_n,
