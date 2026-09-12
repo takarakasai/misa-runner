@@ -207,9 +207,17 @@ impl PosePlayer {
     }
 
     /// 現在の目標姿勢。
-    #[allow(dead_code)]
     pub fn current(&self) -> JointVec {
         self.current
+    }
+
+    /// 再生中の段の始点を `from` に置き替える（終点・所要時間はそのまま）。
+    ///
+    /// 呼び出し側が段の途中で目標を書き替えていた（膝の反転の釣り合いで
+    /// 立脚をずらしていた）とき、次の段へ**いまの目標から**滑らかに繋ぐ。
+    pub fn rebase(&mut self, from: JointVec) {
+        self.transition = transition_for(from, &self.steps[self.index]);
+        self.current = JointVec::from_slice(&self.transition.evaluate(self.t));
     }
 
     /// 再生中の段の番号（0 から）。

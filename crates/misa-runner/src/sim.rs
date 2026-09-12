@@ -33,7 +33,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let mut cfg_local = cfg.clone();
     if let Some(style) = cli.str("knee-style") {
         cfg_local.gait.knee_flip_style = crate::config::KneeFlipStyle::parse(style)
-            .ok_or_else(|| format!("--knee-style {style:?} は stand / rest のどちらか"))?;
+            .ok_or_else(|| format!("--knee-style {style:?} は stand / rest / trot のどれか"))?;
         if cfg_local.gait.knee_flip_style == crate::config::KneeFlipStyle::Rest && cfg_local.gait.knee_flip_rest_height_m.is_none() {
             return Err("--knee-style rest には gait.knee_flip_rest_height_m が要ります".into());
         }
@@ -323,6 +323,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // 開ループの重力補償（`[control] gravity_feedforward`）に使う体重。WBC と同じ
     // 出どころ（モデルの慣性の和。根リンクは `Robot::load` が補っている）。
     let weight_n = robot.model.inertias.iter().map(|i| i.mass).sum::<f64>() * 9.81;
+    let mut com_report = crate::estimator::ComReport::default();
     let mut controller = Controller::with_arm(robot, cfg.clone(), head_driven);
     // **可動域は `dump` と同じ表で、同じ関数で見る。**
     //
@@ -501,14 +502,35 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         let measured = jointvec_from(&obs);
         let attitude = obs.imu.map(|m| m.rpy_rad).unwrap_or([0.0; 3]);
         let measured_qd = crate::estimator::velocities_from(&obs);
+        // 関節トルクからの各足の鉛直力。接地推定（`contact_from_torque`）と、立って
+        // 止まっているときの**重心の実測**に使う。
+        let fz = estimator.foot_forces_from_torque(
+            &measured,
+            &measured_qd,
+            &crate::estimator::torques_from(&obs),
+            attitude,
+            dt,
+        );
+        if controller.is_standing_still() {
+            let feet = controller.robot().feet_from_posture(&measured);
+            if let Some((com_xy, fz_sum)) = crate::estimator::com_from_foot_forces(&feet, &fz) {
+                let model = controller.robot().body_inertia_at(&measured).com_body;
+                if let Some(line) = com_report.push(
+                    com_xy,
+                    fz_sum,
+                    nalgebra::Vector2::new(model.x, model.y),
+                    cfg.gait.com_offset_body_m,
+                    weight_n,
+                    dt,
+                    5.0,
+                ) {
+                    log::info!("{line}");
+                }
+            }
+        } else {
+            com_report.reset();
+        }
         if cfg.gait.contact_from_torque {
-            let fz = estimator.foot_forces_from_torque(
-                &measured,
-                &measured_qd,
-                &crate::estimator::torques_from(&obs),
-                attitude,
-                dt,
-            );
             let flags = estimator.contacts_from_forces(&fz, cfg.wbc.contact_force_threshold_n);
             if controller.state() == State::Active {
                 est_contact_n += 1;
@@ -557,7 +579,10 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             out.stance = crate::estimator::stance_with_measured_contact(out.stance, &obs);
         }
         let gyro = obs.imu.map(|m| m.gyro_rad_s).unwrap_or([0.0; 3]);
-        if controller.state() != State::Active {
+        // 膝の反転中も推定器は走らせたまま（2 脚支持の釣り合いがジャイロの一次遅れを
+        // 見る。毎周期 reset するとフィルタが効かず、生の角速度の 1 周期ごとの
+        // 揺れ ±7 mrad/s が速度項で ±4 mm の指令になり、立脚が 100 Hz で震えた）。
+        if !matches!(controller.state(), State::Active | State::FlippingKnees) {
             estimator.reset();
         }
         let body = estimator.estimate(

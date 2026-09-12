@@ -177,6 +177,24 @@ pub struct Controller {
     knee_flip_next_offset: Option<[nalgebra::Vector3<f64>; 4]>,
     /// 止まる要求が来たとき空中だった脚（[`Self::ramp_velocity`] の待ち）。
     settling_airborne: Option<[bool; 4]>,
+    /// 段ごとの膝の向き（前向き = true）。`trot` の釣り合いで立脚を IK し直すのに使う。
+    knee_flip_forward: Vec<[bool; 4]>,
+    /// `trot` の釣り合い: 立脚の足先の基準位置（胴体座標、立ち高さ）と、いま掛けている
+    /// 胴体の横移動 [m]（支持線と直角）。最大値はログ用。
+    knee_flip_feet: [nalgebra::Vector3<f64>; 4],
+    /// 段ごとの、計画に織り込んだ胴体の寄せ [m]（2 脚支持に入るときの初期値）。
+    knee_flip_plan_shift: Vec<f64>,
+    /// 段ごとの床の高さ（胴体座標）。trot は反転中だけ胴体を上げるので立脚の z に使う。
+    knee_flip_floor: Vec<f64>,
+    knee_flip_prev_idx: usize,
+    knee_flip_shift_m: f64,
+    knee_flip_tilt_max_rad: f64,
+    knee_flip_shift_max_m: f64,
+    /// 実測の重心の支持線からの距離（前回値）と、その速度の一次遅れ。
+    knee_flip_s_prev: Option<f64>,
+    knee_flip_sdot: f64,
+    /// 帰還の指令（上限で丸めたあと）の一次遅れ。
+    knee_flip_want_lpf: f64,
 }
 
 impl Controller {
@@ -225,6 +243,17 @@ impl Controller {
             applied_offset: [nalgebra::Vector3::zeros(); 4],
             knee_flip_next_offset: None,
             settling_airborne: None,
+            knee_flip_forward: Vec::new(),
+            knee_flip_feet: [nalgebra::Vector3::zeros(); 4],
+            knee_flip_plan_shift: Vec::new(),
+            knee_flip_floor: Vec::new(),
+            knee_flip_prev_idx: 0,
+            knee_flip_shift_m: 0.0,
+            knee_flip_tilt_max_rad: 0.0,
+            knee_flip_shift_max_m: 0.0,
+            knee_flip_s_prev: None,
+            knee_flip_sdot: 0.0,
+            knee_flip_want_lpf: 0.0,
         };
         // `rest` の反転を使う機体は、いまの膝の向きで車輪に載って立ち上がれる
         // 足の位置を立ち位置にしておく（置き替えの段を省くため）。
@@ -259,7 +288,18 @@ impl Controller {
         self.cfg.gait.controller
     }
 
-    #[allow(dead_code)]
+    /// 立って止まっているか（歩行モードで速度 0、4 脚接地）。膝の反転や重心の
+    /// 実測はこのときだけ。
+    pub fn is_standing_still(&self) -> bool {
+        self.state == State::Active && self.can_switch_gait()
+    }
+
+    /// 姿勢 `q` での全身重心（胴体座標）。モデルの値に `gait.com_offset_body_m` を足す。
+    pub fn com_body_at(&self, q: &JointVec) -> nalgebra::Vector3<f64> {
+        let o = self.cfg.gait.com_offset_body_m;
+        self.robot.body_inertia_at(q).com_body + nalgebra::Vector3::new(o[0], o[1], 0.0)
+    }
+
     pub fn robot(&self) -> &Robot {
         &self.robot
     }
@@ -370,7 +410,7 @@ impl Controller {
             State::GoingToStance => self.tick_transition(dt, State::Active),
             State::Active => self.tick_active(cmd, attitude_rad, dt),
             State::PlayingPose => self.tick_pose(cmd, dt),
-            State::FlippingKnees => self.tick_knee_flip(cmd, dt),
+            State::FlippingKnees => self.tick_knee_flip(cmd, measured, attitude_rad, dt),
         }
 
         // 脱力要求はどの状態からでも即座に効く。
@@ -890,7 +930,7 @@ impl Controller {
             return;
         }
         match self.plan_knee_flip(shape) {
-            Ok((steps, stance, next_offset)) => {
+            Ok((steps, stance, forwards, plan_shift, floors, next_offset)) => {
                 let total: f64 = steps.iter().map(|st| st.duration_s).sum();
                 log::info!(
                     "膝の向きを {} → {} に反転します（{}、{} 段 / {:.1} s: {}）",
@@ -903,8 +943,21 @@ impl Controller {
                 );
                 self.player = Some(PosePlayer::from_steps(self.targets, steps));
                 self.knee_flip_stance = stance;
+                self.knee_flip_forward = forwards;
+                self.knee_flip_plan_shift = plan_shift;
+                self.knee_flip_floor = floors;
+                self.knee_flip_prev_idx = 0;
+                self.knee_flip_s_prev = None;
+                self.knee_flip_sdot = 0.0;
                 self.knee_flip_next_offset = Some(next_offset);
                 self.knee_flip_target = Some(shape);
+                // `trot` の釣り合いに使う立脚の基準（立ち高さ、いまの立ち位置）。
+                let h = self.robot.reference_height_m(&self.cfg.gait);
+                let kin = self.stance_kinematics_with_offset(h);
+                self.knee_flip_feet = std::array::from_fn(|s| kin.legs()[s].nominal_foot_body);
+                self.knee_flip_shift_m = 0.0;
+                self.knee_flip_tilt_max_rad = 0.0;
+                self.knee_flip_shift_max_m = 0.0;
                 self.state = State::FlippingKnees;
             }
             Err(e) => {
@@ -932,7 +985,10 @@ impl Controller {
     fn plan_knee_flip(
         &self,
         new: crate::config::KneeShape,
-    ) -> Result<(Vec<crate::pose::PoseStep>, Vec<[bool; 4]>, [nalgebra::Vector3<f64>; 4]), String> {
+    ) -> Result<
+        (Vec<crate::pose::PoseStep>, Vec<[bool; 4]>, Vec<[bool; 4]>, Vec<f64>, Vec<f64>, [nalgebra::Vector3<f64>; 4]),
+        String,
+    > {
         use crate::config::KneeFlipStyle;
         use crate::pose::PoseStep;
         use crate::robot::knee_forward_for;
@@ -1021,6 +1077,9 @@ impl Controller {
         let feet_nominal: [nalgebra::Vector3<f64>; 4] = std::array::from_fn(|s| kin_ref.legs()[s].nominal_foot_body);
         let feet_ref: [nalgebra::Vector3<f64>; 4] = std::array::from_fn(|s| feet_nominal[s] + self.stance_xy_offset[s]);
         let mut next_offset = self.stance_xy_offset;
+        let at_z_all = |xy: &[nalgebra::Vector3<f64>; 4], z: f64| -> [nalgebra::Vector3<f64>; 4] {
+            std::array::from_fn(|s| nalgebra::Vector3::new(xy[s].x, xy[s].y, z))
+        };
         // 可動域の内側か（モデル座標）。
         let within = |slot: usize, q: &[f64; 3]| -> bool {
             (0..3).all(|k| {
@@ -1075,11 +1134,19 @@ impl Controller {
         let mut stances: Vec<[bool; 4]> = Vec::new();
         // 段ごとの床の高さ（胴体座標）。rest では下ろしたあと −h_rest、上げたら −h_ref。
         let mut floors: Vec<f64> = Vec::new();
+        let mut forwards: Vec<[bool; 4]> = Vec::new();
         let cur_floor = std::cell::Cell::new(-h_ref);
+        // 段ごとの膝の向き。反転を終えた脚から新しい向きになる（`flip_legs` の戻すで更新）。
+        let cur_forward = std::cell::Cell::new(std::array::from_fn::<bool, 4, _>(|s| knee_forward_for(old, s)));
+        // 段ごとの、計画に織り込んだ胴体の寄せ（trot。支持線の法線方向、m）。
+        let mut plan_shifts: Vec<f64> = Vec::new();
+        let cur_shift = std::cell::Cell::new(0.0_f64);
         let mut push = |name: String, q: JointVec, dur: f64, stance: [bool; 4]| {
             steps.push(PoseStep { name, target: q, duration_s: dur, kind: InterpolationKind::QuinticSmooth });
             stances.push(stance);
             floors.push(cur_floor.get());
+            forwards.push(cur_forward.get());
+            plan_shifts.push(cur_shift.get());
         };
         let mut cur = self.targets;
 
@@ -1133,6 +1200,12 @@ impl Controller {
                 cur.legs[slot][2] = fold(slot, -sign_old[slot], roll_out);
             }
             push(format!("逆へ畳む{tag}"), *cur, phase, stance);
+            // 戻したところから膝の向きは新しいものになる。
+            let mut fwd_now = cur_forward.get();
+            for &slot in slots {
+                fwd_now[slot] = knee_forward_for(new, slot);
+            }
+            cur_forward.set(fwd_now);
             if roll_out {
                 // ロールを倒したまま腿だけ戻す（膝が真下を通る瞬間にロールで
                 // 逃がす）→ ロールと calf を戻す、の 2 段。
@@ -1285,86 +1358,143 @@ impl Controller {
                 // 5. 立ち上がった足の位置がそのまま新しい立ち位置になる（置き替え無し）。
             }
             KneeFlipStyle::Trot => {
-                // **trot と同じ対角 2 脚ずつ。** 支えるのは残りの対角 2 脚だけで、
-                // 重心は支持線から 9 mm しか離れていない（keel）ので静的には
-                // 釣り合わない。**傾きを車輪で受け止める**ために、胴体を車輪が
-                // 床すれすれになる高さまで下げてから行う。
-                let h_rest = g
-                    .knee_flip_rest_height_m
-                    .ok_or("knee_flip_rest_height_m（車輪・腹に載ったときの胴体高さ）が無い")?;
-                let h_flip = (h_rest + g.knee_flip_trot_margin_m).min(h_ref);
-                if h_flip >= h_ref - 1e-9 {
-                    return Err(format!(
-                        "反転の高さ {h_flip:.3} が立ち高さ {h_ref:.3} 以上。knee_flip_rest_height_m / trot_margin を見直す"
-                    ));
-                }
-                let floor = -h_flip;
-                let z_float = floor + g.knee_flip_foot_lift_m;
-                let at = |xy: &[nalgebra::Vector3<f64>; 4], z: f64| -> [nalgebra::Vector3<f64>; 4] {
-                    std::array::from_fn(|s| nalgebra::Vector3::new(xy[s].x, xy[s].y, z))
-                };
-                // 下げた高さで足を置ける所（膝の向きごと）。
-                let off_old = self.park_offsets_at(old, h_flip)?;
-                let off_new = self.park_offsets_at(new, h_flip)?;
-                let xy_old: [nalgebra::Vector3<f64>; 4] = std::array::from_fn(|s| feet_nominal[s] + off_old[s]);
-                let xy_new: [nalgebra::Vector3<f64>; 4] = std::array::from_fn(|s| feet_nominal[s] + off_new[s]);
-                next_offset = off_new;
+                // **対角 2 脚で支えて、残りの対角 2 脚をまとめて反転する。** 車輪には
+                // 頼らない。2 点接触では支持線まわりの回転を接地力で止められない
+                // （角運動量は重力でしか変わらない）ので、2 脚でいる時間を短くする：
+                //  1. 浮かす前に 4 脚のまま、**浮かせた姿勢の全身重心が支持線に乗る**
+                //     ところまで胴体を寄せる（モデルから前置。keel は 9 mm ほど）、
+                //  2. 浮かせながら hip のロールで脚を外へ倒し、**腿と calf を同時に逆へ
+                //     折り返す**（3 段。脚が真下で一直線になる瞬間の足先の下がりは
+                //     (上腿+下腿)·cos(ロール) なので、それが立ち高さを超える機体では
+                //     反転中だけ胴体を上げる）、
+                //  3. 2 脚で支えている間は `balance_on_two_legs` が IMU とエンコーダで
+                //     帰還して立脚の足先をずらす（この段の目標は初期値）、
+                //  4. 着けたら、ずらした位置から計画へ滑らかに戻す（`PosePlayer::rebase`）。
                 let _ = &park;
-
-                // 1. 3 段で鉛直に下ろす（車輪が床から margin のところまで）。
-                for i in 1..=3 {
-                    let h = h_ref + (h_flip - h_ref) * i as f64 / 3.0;
-                    let feet = at(&xy_old, -h);
-                    for slot in 0..4 {
-                        cur.legs[slot] = ik(slot, feet[slot], knee_forward_for(old, slot))?;
-                    }
-                    push(format!("下ろす {i}/3"), cur, 2.0 * phase / 3.0, [true; 4]);
-                }
-                cur_floor.set(floor);
-
-                // 2. 対角ずつ。**歩容と同じ順**（FL + RR → FR + RL）。
-                let mut done = [false; 4];
+                // 外向きのロール（IK 座標で左 + / 右 −、可動域の 0.02 rad 手前）。
+                let roll_out = |slot: usize| -> f64 {
+                    let (lo, hi) = limit(slot, 0);
+                    let out_ik = if is_left(slot) { 1.0 } else { -1.0 };
+                    (out_ik * (hi.min(-lo) - 0.02) * signs[slot][0]).clamp(lo + 0.02, hi - 0.02)
+                };
+                let leg0 = kin_ref.legs()[0];
+                let l_total = leg0.upper_leg_m + leg0.lower_leg_m;
+                let roll_mag = {
+                    let (lo, hi) = limit(0, 0);
+                    hi.min(-lo) - 0.02
+                };
+                // 反転中の胴体高さ。一直線の脚の下がり + 3 cm を床から確保する。
+                let h_flip = h_ref.max(l_total * roll_mag.cos() + 0.03);
+                let z_float = -h_flip + g.knee_flip_foot_lift_m;
+                cur_floor.set(-h_flip);
+                let shifted = |slot: usize, u: f64, n: nalgebra::Vector2<f64>, z: f64| {
+                    nalgebra::Vector3::new(feet_ref[slot].x - u * n.x, feet_ref[slot].y - u * n.y, z)
+                };
                 for pair in [[0usize, 3], [1, 2]] {
                     let slots: Vec<usize> = pair.iter().copied().filter(|s| flip[*s]).collect();
                     if slots.is_empty() {
                         continue;
                     }
+                    let support: [usize; 2] = if pair == [0, 3] { [1, 2] } else { [0, 3] };
                     let tag = format!(" {}+{}", leg_name(pair[0]), leg_name(pair[1]));
                     let mut stance = [true; 4];
                     for &s in &slots {
                         stance[s] = false;
                     }
-                    // いまの各脚の足先（反転を終えた脚は新しい所）。
-                    let now: [nalgebra::Vector3<f64>; 4] =
-                        std::array::from_fn(|s| if done[s] { xy_new[s] } else { xy_old[s] });
-                    // 浮かす。
+                    // 支持線（支える対角の足先を結ぶ線）とその法線 n。
+                    let (a, b) = (feet_ref[support[0]], feet_ref[support[1]]);
+                    let d = nalgebra::Vector2::new(b.x - a.x, b.y - a.y).normalize();
+                    let n = nalgebra::Vector2::new(-d.y, d.x);
+                    // 胴体を u だけ n へ寄せた（足先は −u·n）浮かせ姿勢の全身重心を、
+                    // 寄せた支持線から `target_s` の所へ置く u を求める。脚の質量も動く
+                    // ので 3 回まわす。
+                    //
+                    // 対角の 2 脚とも浮かせるなら target_s = 0（支持線の上）。**組の
+                    // 片方だけ反転する（他の 3 脚が接地）なら、支持線は支持三角形の
+                    // 辺**なので、その上に重心を置くと余裕が 0 になり、モデルの重心が
+                    // 1 cm ずれているだけで浮かせた脚の側へ倒れる。`stand` と同じく
+                    // 浮かせる脚の反対側へ `knee_flip_shift_m` 入れる。
+                    let target_s = if slots.len() == 1 {
+                        let f = feet_ref[slots[0]];
+                        let side = ((f.x - a.x) * n.x + (f.y - a.y) * n.y).signum();
+                        -side * g.knee_flip_shift_m
+                    } else {
+                        0.0
+                    };
+                    let mut u = 0.0;
+                    let mut lift = cur;
+                    for _ in 0..3 {
+                        for s in 0..4 {
+                            let z = if stance[s] { -h_flip } else { z_float };
+                            lift.legs[s] = ik(s, shifted(s, u, n, z), cur_forward.get()[s])?;
+                        }
+                        let com = self.com_body_at(&lift);
+                        let s0 = (com.x - (a.x - u * n.x)) * n.x + (com.y - (a.y - u * n.y)) * n.y;
+                        u -= s0 - target_s;
+                    }
+                    for s in 0..4 {
+                        cur.legs[s] = ik(s, shifted(s, u, n, -h_flip), cur_forward.get()[s])?;
+                    }
+                    // 釣り合いの諸元（設計の確認用）。支持線まわりの慣性は重心まわりの
+                    // 慣性を d に射影したもの、不安定極は √(m·g·h / (I_cm + m·h²))。
+                    {
+                        let bi = self.robot.body_inertia_at(&lift);
+                        let d3 = nalgebra::Vector3::new(d.x, d.y, 0.0);
+                        let i_cm = (d3.transpose() * bi.inertia_body * d3)[(0, 0)];
+                        let hz = -bi.com_body.z + h_flip; // 足先（−h_flip）から重心までの高さ
+                        let i_line = i_cm + bi.mass_kg * hz * hz;
+                        if slots.len() == 1 {
+                            log::info!(
+                                "3 脚支持{tag}（浮かすのは {} だけ）: 重心を支持線から反対側へ {:.3} m、胴体の寄せ {:+.4} m",
+                                leg_name(slots[0]), g.knee_flip_shift_m, u
+                            );
+                        } else {
+                            log::info!(
+                                "2 脚支持{tag}: 質量 {:.1} kg、重心の高さ {:.3} m（胴体 {:.3} m）、支持線まわりの慣性 I_cm {:.2} kg·m²（I_cm + m·h² = {:.2}）、不安定極 {:.1} rad/s、胴体の寄せ {:+.4} m",
+                                bi.mass_kg, hz, h_flip, i_cm, i_line,
+                                (bi.mass_kg * 9.81 * hz / i_line).sqrt(), u
+                            );
+                        }
+                    }
+                    cur_shift.set(u);
+                    push(format!("寄せる{tag}"), cur, 2.0 * phase, [true; 4]);
+                    // 浮かす + 倒す: 浮かせた角のまま hip のロールを外へ。
                     for &slot in &slots {
-                        let p = nalgebra::Vector3::new(now[slot].x, now[slot].y, z_float);
-                        cur.legs[slot] = ik(slot, p, knee_forward_for(old, slot))?;
+                        cur.legs[slot] = lift.legs[slot];
+                        cur.legs[slot][0] = roll_out(slot);
                     }
                     push(format!("浮かす{tag}"), cur, phase, stance);
-                    // 反転して、新しい向きで置ける所へ。
-                    let land = at(&xy_new, z_float);
-                    flip_legs(&mut cur, &slots, stance, &land, floor, true, &mut push, &tag)?;
-                    // 着ける。
+                    // 反転: ロールは外のまま、腿と calf を着地姿勢（新しい膝の向き）の角へ
+                    // 同時に。関節空間の直線なので途中で脚が一直線になる。
+                    let mut landed = [[0.0; 3]; 4];
                     for &slot in &slots {
-                        let p = nalgebra::Vector3::new(xy_new[slot].x, xy_new[slot].y, floor);
-                        cur.legs[slot] = ik(slot, p, knee_forward_for(new, slot))?;
-                        done[slot] = true;
+                        landed[slot] = ik(slot, shifted(slot, u, n, z_float), knee_forward_for(new, slot))?;
+                        cur.legs[slot][1] = landed[slot][1];
+                        cur.legs[slot][2] = landed[slot][2];
+                    }
+                    let mut fwd_now = cur_forward.get();
+                    for &slot in &slots {
+                        fwd_now[slot] = knee_forward_for(new, slot);
+                    }
+                    cur_forward.set(fwd_now);
+                    push(format!("反転{tag}"), cur, phase, stance);
+                    // 戻す: ロールを戻して足先を浮かせ位置へ。
+                    for &slot in &slots {
+                        cur.legs[slot] = landed[slot];
+                    }
+                    push(format!("戻す{tag}"), cur, phase, stance);
+                    for &slot in &slots {
+                        cur.legs[slot] = ik(slot, shifted(slot, u, n, -h_flip), knee_forward_for(new, slot))?;
                     }
                     push(format!("着ける{tag}"), cur, phase, [true; 4]);
                 }
-
-                // 3. 3 段で鉛直に上げる。
-                for i in 1..=3 {
-                    let h = h_flip + (h_ref - h_flip) * i as f64 / 3.0;
-                    let feet = at(&xy_new, -h);
-                    for slot in 0..4 {
-                        cur.legs[slot] = ik(slot, feet[slot], knee_forward_for(new, slot))?;
-                    }
-                    push(format!("上げる {i}/3"), cur, 2.0 * phase / 3.0, [true; 4]);
-                }
+                // 中央へ: 寄せていた胴体を基準の立ち位置・立ち高さへ戻す。
+                cur_shift.set(0.0);
                 cur_floor.set(-h_ref);
+                for s in 0..4 {
+                    cur.legs[s] = ik(s, feet_ref[s], cur_forward.get()[s])?;
+                }
+                push("中央へ".into(), cur, 2.0 * phase, [true; 4]);
             }
             KneeFlipStyle::Stand => {
                 let shift = g.knee_flip_shift_m;
@@ -1459,10 +1589,12 @@ impl Controller {
             }
             prev = st.target;
         }
-        Ok((steps, stances, next_offset))
+        Ok((steps, stances, forwards, plan_shifts, floors, next_offset))
     }
 
-    fn tick_knee_flip(&mut self, cmd: &Intent, dt: f64) {
+    fn tick_knee_flip(&mut self, cmd: &Intent, measured: &JointVec, attitude_rad: [f64; 3], dt: f64) {
+        let prev_idx = self.knee_flip_prev_idx;
+        let prev_targets = self.targets;
         let (done, idx) = match self.player.as_mut() {
             Some(player) => {
                 self.targets = player.tick(dt);
@@ -1470,9 +1602,32 @@ impl Controller {
             }
             None => (true, 0),
         };
+        if idx != prev_idx {
+            let legs = |i: usize| -> usize {
+                self.knee_flip_stance.get(i).map(|s| s.iter().filter(|x| **x).count()).unwrap_or(4)
+            };
+            let (was, now) = (legs(prev_idx), legs(idx));
+            if was == 2 && now == 4 {
+                // 釣り合いでずらしていた立脚の目標から、計画の段へ滑らかに繋ぐ。
+                if let Some(player) = self.player.as_mut() {
+                    player.rebase(prev_targets);
+                    self.targets = player.current();
+                }
+            }
+            if was == 4 && now == 2 {
+                self.knee_flip_shift_m = self.knee_flip_plan_shift.get(idx).copied().unwrap_or(0.0);
+                self.knee_flip_want_lpf = self.knee_flip_shift_m;
+                self.knee_flip_s_prev = None;
+                self.knee_flip_sdot = 0.0;
+            }
+            self.knee_flip_prev_idx = idx;
+        }
         // 浮かせている脚は立脚でない（前置トルク・WBC の接地の仮定に効く）。
         if let Some(st) = self.knee_flip_stance.get(idx) {
             self.body_view.stance = *st;
+        }
+        if self.cfg.gait.knee_flip_style == crate::config::KneeFlipStyle::Trot {
+            self.balance_on_two_legs(idx, measured, attitude_rad, dt);
         }
         if !self.arm_app_driven {
             if let Some(observed) = cmd.aux(0) {
@@ -1483,7 +1638,15 @@ impl Controller {
             return;
         }
         self.player = None;
+        if self.cfg.gait.knee_flip_style == crate::config::KneeFlipStyle::Trot {
+            log::info!(
+                "2 脚支持の釣り合い: 支持線まわりの傾き 最大 {:.1}°、胴体の横移動 最大 {:.3} m",
+                self.knee_flip_tilt_max_rad.to_degrees(),
+                self.knee_flip_shift_max_m
+            );
+        }
         self.knee_flip_stance.clear();
+        self.knee_flip_forward.clear();
         self.body_view.stance = [true; 4];
         if let Some(new) = self.knee_flip_target.take() {
             self.cfg.gait.knee_pattern = new;
@@ -1504,6 +1667,113 @@ impl Controller {
         self.apply_body_height(h);
         self.gait.reset();
         self.state = State::Active;
+    }
+
+    /// `trot` 型の反転で、対角 2 脚で支えているあいだ胴体を支持線の上に保つ。
+    ///
+    /// 点接触 2 つでは支持線まわりの回転を接地力で止められない（重力だけの
+    /// 倒立振子。keel で時定数 0.13 s）。代わりに**立脚で胴体を支持線と直角に
+    /// 動かして重心を線上に戻す**。
+    ///
+    /// ```text
+    ///   I·θ̈ = −m·g·(s₀ + u − h·θ)      θ: 支持線まわりの傾き、u: 胴体の横移動
+    ///   u = −s₀ + Kθ·θ + Kω·θ̇           Kθ > h で安定（重力の正帰還 m·g·h に勝つ）
+    /// ```
+    ///
+    /// `s₀` は計画姿勢での重心の支持線からの距離（モデルから毎周期求める。浮かせた
+    /// 脚が動くぶんの前置）。θ は IMU の roll / pitch を支持線の向きに投影したもの、
+    /// θ̇ は推定器の角速度。立脚が 2 本でないときは u を 0 へ戻す。
+    /// 2 脚支持の段で、立脚の足先を支持線と直角にずらして胴体を支持線の上に保つ。
+    ///
+    /// 状態は θ（IMU の傾きを支持線の向き d に射影。重心が +n へ動く向きを正）、
+    /// θ̇（ジャイロ）、s（**実測**の関節角から FK した全身重心の支持線からの距離）、
+    /// ṡ（差分の一次遅れ 20 Hz）。胴体の寄せ u = −s0 − k·x で、s0 は計画姿勢の
+    /// 重心の支持線からの距離（前置）。ゲインは [`GaitTuning::knee_flip_balance_gains`]。
+    fn balance_on_two_legs(&mut self, idx: usize, measured: &JointVec, attitude_rad: [f64; 3], dt: f64) {
+        use crate::robot::knee_forward_for;
+        use quadruped_gait::solve_leg_ik;
+        let g = &self.cfg.gait;
+        let Some(stance) = self.knee_flip_stance.get(idx).copied() else { return };
+        let support: Vec<usize> = (0..4).filter(|s| stance[*s]).collect();
+        if support.len() != 2 {
+            return;
+        }
+        let forward: [bool; 4] = self
+            .knee_flip_forward
+            .get(idx)
+            .copied()
+            .unwrap_or_else(|| std::array::from_fn(|s| knee_forward_for(g.knee_pattern, s)));
+        let h_ref = self.robot.reference_height_m(g);
+        let (a, b) = (self.knee_flip_feet[support[0]], self.knee_flip_feet[support[1]]);
+        let d = nalgebra::Vector2::new(b.x - a.x, b.y - a.y).normalize();
+        let n = nalgebra::Vector2::new(-d.y, d.x);
+        // 前置: 計画姿勢の全身重心の、（ずらす前の）支持線からの距離。
+        let com = self.com_body_at(&self.targets);
+        let s0 = (com.x - a.x) * n.x + (com.y - a.y) * n.y;
+        // 傾き・角速度。d まわりの右ねじの回転は胴体の上側を −n へ動かすので符号を返す。
+        let theta = -(attitude_rad[0] * d.x + attitude_rad[1] * d.y);
+        let (sy, cy) = attitude_rad[2].sin_cos();
+        let w = self.observed_omega_world;
+        let (wx, wy) = (cy * w.x + sy * w.y, -sy * w.x + cy * w.y);
+        let omega = -(wx * d.x + wy * d.y);
+        // 実測の重心の支持線からの距離。**立脚は実測の関節角**（脚のたわみ・胴体の
+        // 位置が入る）、**浮かせている脚は目標角**で重心を出す。浮かせた脚の実測を
+        // 使うと、kp 500 の追従遅れで脚の質量が計画から遅れるぶんが重心の速度に
+        // 出て、ṡ の項（1.4 m per m/s）が指令を上限まで振る（`<>` → `><` で 19°）。
+        // LQR の s は「胴体の位置」なので、脚の遅れは外乱として θ の側で受ける。
+        let feet_m = self.robot.feet_from_posture(measured);
+        let mut mixed = self.targets;
+        for &slot in &support {
+            mixed.legs[slot] = measured.legs[slot];
+        }
+        let com_m = self.com_body_at(&mixed);
+        let (am, bm) = (feet_m[support[0]], feet_m[support[1]]);
+        let dm = nalgebra::Vector2::new(bm.x - am.x, bm.y - am.y).normalize();
+        let nm = nalgebra::Vector2::new(-dm.y, dm.x);
+        let s_m = (com_m.x - am.x) * nm.x + (com_m.y - am.y) * nm.y;
+        let sdot_raw = match self.knee_flip_s_prev {
+            Some(p) if dt > 0.0 => (s_m - p) / dt,
+            _ => 0.0,
+        };
+        self.knee_flip_s_prev = Some(s_m);
+        let lpf = |dt: f64, hz: f64| dt / (dt + 1.0 / (2.0 * std::f64::consts::PI * hz));
+        self.knee_flip_sdot += lpf(dt, g.knee_flip_balance_sdot_lpf_hz) * (sdot_raw - self.knee_flip_sdot);
+        let k = g.knee_flip_balance_gains;
+        let fb = k[0] * theta + k[1] * omega + k[2] * s_m + k[3] * self.knee_flip_sdot;
+        let want = (-s0 - fb).clamp(-g.knee_flip_balance_max_m, g.knee_flip_balance_max_m);
+        // 一次遅れ → 変化率の上限。速度の項が拾う脚のたわみの振動を落とし、帰還が
+        // 上限の間でバンバンになっても足先目標は跳ばない。
+        if g.knee_flip_balance_lpf_hz > 0.0 {
+            self.knee_flip_want_lpf += lpf(dt, g.knee_flip_balance_lpf_hz) * (want - self.knee_flip_want_lpf);
+        } else {
+            self.knee_flip_want_lpf = want;
+        }
+        let step = g.knee_flip_balance_rate_m_s * dt;
+        let u = self.knee_flip_shift_m + (self.knee_flip_want_lpf - self.knee_flip_shift_m).clamp(-step, step);
+        self.knee_flip_tilt_max_rad = self.knee_flip_tilt_max_rad.max(theta.abs());
+        if std::env::var_os("MISA_BALANCE_TRACE").is_some() {
+            eprintln!(
+                "[balance] step {idx} support {:?} theta={:+.4} omega={:+.3} yaw={:+.3} s_m={:+.4} sdot={:+.3} s0={:+.4} fb={:+.4} want={:+.4} u={:+.4}",
+                support, theta, omega, attitude_rad[2], s_m, self.knee_flip_sdot, s0, fb, want, u
+            );
+        }
+        self.knee_flip_shift_m = u;
+        self.knee_flip_shift_max_m = self.knee_flip_shift_max_m.max(u.abs());
+        // 立脚の足先を −u·n（胴体が +u·n）へ。
+        let kin = self.stance_kinematics_with_offset(h_ref);
+        for &slot in &support {
+            let leg = kin.legs()[slot];
+            let f = self.knee_flip_feet[slot];
+            let z = self.knee_flip_floor.get(idx).copied().unwrap_or(f.z);
+            let target = nalgebra::Vector3::new(f.x - u * n.x, f.y - u * n.y, z);
+            let sol = solve_leg_ik(leg, target, forward[slot]);
+            if !sol.is_reachable() {
+                continue;
+            }
+            let (hh, t, c) = sol.angles();
+            let sg = self.robot.signs[slot];
+            self.targets.legs[slot] = [hh * sg[0], t * sg[1], c * sg[2]];
+        }
     }
 
     fn stance_targets(&mut self) -> JointVec {

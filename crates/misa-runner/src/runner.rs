@@ -598,6 +598,7 @@ pub fn run(
     // 開ループの重力補償（`[control] gravity_feedforward`）に使う体重。WBC と同じ
     // 出どころ（モデルの慣性の和）。
     let weight_n = robot.model.inertias.iter().map(|i| i.mass).sum::<f64>() * 9.81;
+    let mut com_report = crate::estimator::ComReport::default();
     if cfg.control.gravity_feedforward.is_on() {
         log::info!(
             "開ループの重力補償を τ_ff に載せます（{}、体重 {:.1} N、倍率 {:.2}）。WBC が回っているあいだは WBC の解が優先",
@@ -739,14 +740,35 @@ pub fn run(
         // **関節トルクから接地を推定する**（足裏センサが無い機体の唯一の道）。
         // 推定できた足だけ観測を上書きする。
         let measured_qd = crate::estimator::velocities_from(&obs);
+        // 関節トルクからの各足の鉛直力。接地推定（`contact_from_torque`）と、立って
+        // 止まっているときの**重心の実測**に使う。
+        let fz = estimator.foot_forces_from_torque(
+            &measured,
+            &measured_qd,
+            &crate::estimator::torques_from(&obs),
+            attitude,
+            period.as_secs_f64(),
+        );
+        if controller.is_standing_still() {
+            let feet = controller.robot().feet_from_posture(&measured);
+            if let Some((com_xy, fz_sum)) = crate::estimator::com_from_foot_forces(&feet, &fz) {
+                let model = controller.robot().body_inertia_at(&measured).com_body;
+                if let Some(line) = com_report.push(
+                    com_xy,
+                    fz_sum,
+                    nalgebra::Vector2::new(model.x, model.y),
+                    cfg.gait.com_offset_body_m,
+                    weight_n,
+                    period.as_secs_f64(),
+                    5.0,
+                ) {
+                    log::info!("{line}");
+                }
+            }
+        } else {
+            com_report.reset();
+        }
         if cfg.gait.contact_from_torque {
-            let fz = estimator.foot_forces_from_torque(
-                &measured,
-                &measured_qd,
-                &crate::estimator::torques_from(&obs),
-                attitude,
-                period.as_secs_f64(),
-            );
             let flags = estimator.contacts_from_forces(&fz, cfg.wbc.contact_force_threshold_n);
             for i in 0..4 {
                 if let (Some(c), Some(slot)) = (flags[i], obs.contacts.get_mut(i)) {
@@ -763,7 +785,10 @@ pub fn run(
         // **胴体の状態は歩容の出力が出てから測る**（立脚フラグと計画した
         // 関節角が要る）。測った結果は歩容へ返して**次の周期**で使わせる。
         let gyro = obs.imu.map(|i| i.gyro_rad_s).unwrap_or([0.0; 3]);
-        if controller.state() != State::Active {
+        // 膝の反転中も推定器は走らせたまま（2 脚支持の釣り合いがジャイロの一次遅れを
+        // 見る。毎周期 reset するとフィルタが効かず、生の角速度の 1 周期ごとの
+        // 揺れ ±7 mrad/s が速度項で ±4 mm の指令になり、立脚が 100 Hz で震えた）。
+        if !matches!(controller.state(), State::Active | State::FlippingKnees) {
             estimator.reset();
         }
         let body = estimator.estimate(

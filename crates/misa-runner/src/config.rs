@@ -200,18 +200,27 @@ impl AppConfig {
         if !self.gait.knee_flip_out_z_m.is_finite() {
             return Err(format!("gait.knee_flip_out_z_m = {} が数でない", self.gait.knee_flip_out_z_m));
         }
-        if matches!(self.gait.knee_flip_style, KneeFlipStyle::Rest | KneeFlipStyle::Trot)
-            && self.gait.knee_flip_rest_height_m.is_none()
-        {
+        if self.gait.knee_flip_style == KneeFlipStyle::Rest && self.gait.knee_flip_rest_height_m.is_none() {
             return Err(format!(
                 "gait.knee_flip_style = {:?} には knee_flip_rest_height_m（車輪・腹に載ったときの胴体高さ）が要ります",
                 self.gait.knee_flip_style
             ));
         }
-        if !(self.gait.knee_flip_trot_margin_m >= 0.0 && self.gait.knee_flip_trot_margin_m < 0.1) {
+        let bk = self.gait.knee_flip_balance_gains;
+        let bmax = self.gait.knee_flip_balance_max_m;
+        let brate = self.gait.knee_flip_balance_rate_m_s;
+        let (blpf, bslpf) = (self.gait.knee_flip_balance_lpf_hz, self.gait.knee_flip_balance_sdot_lpf_hz);
+        if !(bk.iter().all(|k| k.is_finite() && *k >= 0.0 && *k < 1000.0)
+            && bmax > 0.0
+            && bmax < 0.2
+            && brate > 0.0
+            && brate < 5.0
+            && (0.0..100.0).contains(&blpf)
+            && bslpf > 0.0
+            && bslpf < 100.0)
+        {
             return Err(format!(
-                "gait.knee_flip_trot_margin_m = {} は 0〜0.1 m で",
-                self.gait.knee_flip_trot_margin_m
+                "gait.knee_flip_balance_gains {bk:?}（0 以上）/ knee_flip_balance_max_m {bmax}（0〜0.2 m）/ knee_flip_balance_rate_m_s {brate}（0〜5 m/s）が範囲外"
             ));
         }
         if let Some(h) = self.gait.knee_flip_rest_height_m {
@@ -1063,8 +1072,24 @@ fn default_knee_flip_shift_m() -> f64 {
     0.05
 }
 
-fn default_knee_flip_trot_margin_m() -> f64 {
+fn default_knee_flip_balance_gains() -> [f64; 4] {
+    [2.8, 0.57, 7.3, 1.4]
+}
+
+fn default_knee_flip_balance_max_m() -> f64 {
+    0.10
+}
+
+fn default_knee_flip_balance_rate_m_s() -> f64 {
+    0.3
+}
+
+fn default_knee_flip_balance_lpf_hz() -> f64 {
     0.0
+}
+
+fn default_knee_flip_balance_sdot_lpf_hz() -> f64 {
+    20.0
 }
 
 /// 膝を反転するときに荷重を外すやり方（[`GaitTuning::knee_flip_style`]）。
@@ -1076,13 +1101,18 @@ pub enum KneeFlipStyle {
     Stand,
     /// 胴体を車輪・腹に載せて 4 脚とも浮かせ、まとめて。
     Rest,
-    /// **trot の歩容と同じ対角 2 脚ずつ。** FL + RR → FR + RL。
+    /// **trot の歩容と同じ対角 2 脚ずつ。** FL + RR → FR + RL。**2 脚で支える。**
     ///
-    /// 支えるのは残りの対角 2 脚だけで、重心は支持線から 9 mm しか離れて
-    /// いない（keel）ので**静的には釣り合わない**。傾きを車輪で受け止めるため、
-    /// 胴体を `knee_flip_rest_height_m + knee_flip_trot_margin_m` まで下げてから
-    /// 行う（keel の既定 0.18 m で、傾いても 6° で車輪が着く）。
-    /// 1 脚ずつ（`stand`）の半分の段数で済む。
+    /// 点接触の足は 2 点を結ぶ直線まわりのモーメントを作れないので、静的には
+    /// 釣り合わない（keel は重心が支持線から 9 mm、倒立振子の時定数 0.13 s）。
+    /// そこで、浮かす前に 4 脚のまま**全身重心が支持線に乗るところまで胴体を
+    /// 寄せ**（モデルから前置）、2 脚で支えている間は **IMU の傾きとエンコーダで
+    /// 測った重心の位置を見て胴体を支持線と直角に動かす**
+    /// （`knee_flip_balance_gains`、平均台のバランスと同じ）。それでも持つのは
+    /// 数秒なので、浮かせた脚は **hip のロールで外へ倒し、腿と calf を同時に逆へ
+    /// 折り返す**（浮かす → 反転 → 戻す の 3 段）。脚が一直線になる瞬間の足先の
+    /// 下がり (上腿+下腿)·cos(ロール) が立ち高さを超える機体では、反転中だけ胴体を
+    /// 上げる（keel は 0.30 → 0.34 m）。車輪には頼らない。
     Trot,
 }
 
@@ -1292,6 +1322,15 @@ pub struct GaitTuning {
     ///   `knee_flip_rest_height_m`（載ったときの胴体高さ）が要る。7 段。
     #[serde(default)]
     pub knee_flip_style: KneeFlipStyle,
+    /// 全身重心の、モデルに対する実機の ずれ [m]（胴体座標 x, y）。既定 0。
+    ///
+    /// 膝の反転（trot）の前置と釣り合いは**モデルの重心**を見るので、実機の重心が
+    /// モデルから 1 cm ずれていると、支持線に乗せたつもりの重心が外れて浮かせた
+    /// 脚の側へ倒れる（4 mm で 5° 傾く系）。立って止まっているとき `run` / `sim` が
+    /// 関節トルクから各足の鉛直力を出して重心を測り、5 s ごとに
+    /// 「実測の重心 … → gait.com_offset_body_m = [x, y]」と出すので、それを書く。
+    #[serde(default)]
+    pub com_offset_body_m: [f64; 2],
     /// `rest` で、胴体が車輪・腹に載って止まる高さ [m]（地面から胴体原点）。
     /// keel は MuJoCo で 0.155〜0.16。**ここを実機の値より高く書くと足が地面を
     /// 押したまま反転に入る**（胴体が落ちて揺れる）。低く書くと足が浮かない。
@@ -1300,17 +1339,40 @@ pub struct GaitTuning {
     /// `rest` で、載ったあと足を地面から浮かす量 [m]。既定 0.02。
     #[serde(default = "default_knee_flip_foot_lift_m")]
     pub knee_flip_foot_lift_m: f64,
-    /// `trot` で、反転中に車輪を床から浮かせておく高さ [m]。**既定 0**（車輪に
-    /// 載せる）。
+    /// `trot` の釣り合いの帰還ゲイン `[k_θ, k_ω, k_s, k_ṡ]`。胴体を支持線と直角に
+    /// 動かす量 [m] = −(k_θ·θ + k_ω·θ̇ + k_s·s + k_ṡ·ṡ)。θ は支持線まわりの傾き
+    /// [rad]（重心が動く向きを正）、s は**実測**（エンコーダの FK）の全身重心の
+    /// 支持線からの距離 [m]。
     ///
-    /// 対角 2 脚で支えるあいだは静的に釣り合わない（keel は重心が支持線から
-    /// 9 mm）ので、**傾きを車輪で受け止める**。胴体は
-    /// `knee_flip_rest_height_m + これ` まで下げる。0 なら最初から車輪が
-    /// 着いていて、傾きは 2〜4° で収まる。**浮かせるほど大きく傾いてから
-    /// 車輪に落ちる**（keel の MuJoCo で 0.01 → 10°、0.02 → 27°）ので、
-    /// 支持脚に荷重を残したい理由が無ければ 0 のままにする。
-    #[serde(default = "default_knee_flip_trot_margin_m")]
-    pub knee_flip_trot_margin_m: f64,
+    /// 既定は keel（m 53 kg、h 0.30 m、支持線まわりの慣性 I_cm ≈ 1.7 kg·m²、
+    /// 脚の横剛性 ω_a ≈ 22 rad/s）の LQR。モデルは
+    /// `I·θ̈ = m·g·(s + h·θ) − m·h·s̈`（**胴体を速く動かすとその反作用で逆へ
+    /// 回る**。2 点接触の支持線まわりでは接地力がモーメントを作れないので、
+    /// 角運動量は重力でしか変わらない）。設計は `scripts/knee_flip_balance_lqr.py`。
+    #[serde(default = "default_knee_flip_balance_gains")]
+    pub knee_flip_balance_gains: [f64; 4],
+    /// 胴体を横へ動かす量の上限 [m]。既定 0.10。足の可動域と摩擦の内側。**0.05 では
+    /// 上限に張り付いて倒れる向きがある**（keel `<>` → `><` で 19°、0.10 なら 4 通りの
+    /// 反転がどれも 8° 以内）。
+    #[serde(default = "default_knee_flip_balance_max_m")]
+    pub knee_flip_balance_max_m: f64,
+    /// 胴体を横へ動かす速さの上限 [m/s]。既定 0.3。**無いと帰還が上限の間で
+    /// バンバンになり**、立脚の足先目標が数 ms ごとに跳んで足が滑る（MuJoCo で
+    /// 片足を軸に yaw が回った）。
+    #[serde(default = "default_knee_flip_balance_rate_m_s")]
+    pub knee_flip_balance_rate_m_s: f64,
+    /// 帰還の指令に掛ける一次遅れの遮断周波数 [Hz]。既定 0（無し）。
+    ///
+    /// 速度の項（θ̇・ṡ）が 1 周期ごとの揺れを拾って指令が毎周期 ±数 mm〜2 cm 跳ね、
+    /// 変化率制限がそれを鋸波にして**立脚が震える**（MuJoCo、kp 500）。ところが
+    /// この一次遅れを 2〜10 Hz のどれにしても、ṡ の一次遅れを 10 Hz にしても、
+    /// 倒れる向きが出る（位相余裕がほとんど無い）。**震えを止めると立たない**のが
+    /// いまの釣り合いの実力で、実機に持ち込める状態ではない。
+    #[serde(default = "default_knee_flip_balance_lpf_hz")]
+    pub knee_flip_balance_lpf_hz: f64,
+    /// 実測の重心速度 ṡ の一次遅れ [Hz]。既定 20。
+    #[serde(default = "default_knee_flip_balance_sdot_lpf_hz")]
+    pub knee_flip_balance_sdot_lpf_hz: f64,
     /// `stand` で、反転する脚の対角へ胴体を寄せる量 [m]。既定 0.05
     /// （keel の足パターン ±0.245 × ±0.197 で、重心が対角線から約 5 cm 内側に入る）。
     #[serde(default = "default_knee_flip_shift_m")]
@@ -1523,10 +1585,15 @@ impl Default for GaitTuning {
             imu_gyro_lpf_hz: 0.0,
             estimator_velocity_lpf_hz: 0.0,
             knee_flip_style: KneeFlipStyle::default(),
+            com_offset_body_m: [0.0, 0.0],
             knee_flip_rest_height_m: None,
             knee_flip_foot_lift_m: default_knee_flip_foot_lift_m(),
             knee_flip_shift_m: default_knee_flip_shift_m(),
-            knee_flip_trot_margin_m: default_knee_flip_trot_margin_m(),
+            knee_flip_balance_gains: default_knee_flip_balance_gains(),
+            knee_flip_balance_rate_m_s: default_knee_flip_balance_rate_m_s(),
+            knee_flip_balance_lpf_hz: default_knee_flip_balance_lpf_hz(),
+            knee_flip_balance_sdot_lpf_hz: default_knee_flip_balance_sdot_lpf_hz(),
+            knee_flip_balance_max_m: default_knee_flip_balance_max_m(),
             knee_flip_phase_s: default_knee_flip_phase_s(),
             knee_flip_out_z_m: default_knee_flip_out_z_m(),
             mpc_force_cost: None,

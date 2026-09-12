@@ -572,6 +572,65 @@ pub fn stance_for_estimator(planned: [bool; 4], obs: &misa_core::Observation) ->
 }
 
 /// 観測の関節トルクを脚 4 本 × 3 軸へ。読めていない軸は `None`。
+/// 各足の鉛直力の重み付き平均で全身重心の xy（胴体座標）を出す。4 脚とも力が
+/// 読めていて合計が正のときだけ `Some`。立って止まっている 4 脚支持でだけ意味が
+/// ある（動いていれば加速度、脚が浮いていれば 3 点の平均になる）。
+pub fn com_from_foot_forces(feet_body: &[na::Vector3<f64>; 4], fz: &[Option<f64>; 4]) -> Option<(na::Vector2<f64>, f64)> {
+    let mut sum = 0.0;
+    let mut acc = na::Vector2::zeros();
+    for i in 0..4 {
+        let f = fz[i]?;
+        if f < 0.0 {
+            return None;
+        }
+        sum += f;
+        acc += f * na::Vector2::new(feet_body[i].x, feet_body[i].y);
+    }
+    (sum > 1.0).then(|| (acc / sum, sum))
+}
+
+/// 立って止まっている間の重心の実測を平均し、`period_s` ごとに 1 行のログにまとめる。
+///
+/// `run` と `sim` が同じ文面を出すためのもの。返す文字列は「実測の重心 … →
+/// gait.com_offset_body_m = [x, y]」で、そのままプロファイルに書ける。
+#[derive(Default)]
+pub struct ComReport {
+    acc: na::Vector2<f64>,
+    acc_model: na::Vector2<f64>,
+    acc_fz: f64,
+    n: usize,
+    t: f64,
+}
+
+impl ComReport {
+    /// 立って止まっている周期ごとに呼ぶ。動き出したら [`Self::reset`]。
+    /// 返り値が `Some` なら 1 行ログに出す。
+    #[allow(clippy::too_many_arguments)]
+    pub fn push(&mut self, measured: na::Vector2<f64>, fz_sum: f64, model: na::Vector2<f64>, offset_now: [f64; 2], weight_n: f64, dt: f64, period_s: f64) -> Option<String> {
+        self.acc += measured;
+        self.acc_model += model;
+        self.acc_fz += fz_sum;
+        self.n += 1;
+        self.t += dt;
+        if self.t < period_s || self.n == 0 {
+            return None;
+        }
+        let k = self.n as f64;
+        let (m, mo, fz) = (self.acc / k, self.acc_model / k, self.acc_fz / k);
+        let d = m - mo;
+        let line = format!(
+            "実測の重心（関節トルクから、{:.0} s 平均）: x {:+.4} y {:+.4} m / モデル x {:+.4} y {:+.4}（いまの ずれ設定 [{:+.4}, {:+.4}]）/ 差 x {:+.4} y {:+.4} m → gait.com_offset_body_m = [{:.4}, {:.4}]（鉛直力の合計 {:.0} N / 体重 {:.0} N）",
+            period_s, m.x, m.y, mo.x, mo.y, offset_now[0], offset_now[1], d.x, d.y, d.x, d.y, fz, weight_n
+        );
+        self.reset();
+        Some(line)
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 pub fn torques_from(obs: &misa_core::Observation) -> [[Option<f64>; 3]; 4] {
     let mut t = [[None; 3]; 4];
     for leg in 0..4 {
