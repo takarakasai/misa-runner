@@ -117,6 +117,9 @@ struct KneeFlipPlan {
     stances: Vec<[bool; 4]>,
     forwards: Vec<[bool; 4]>,
     plan_shifts: Vec<f64>,
+    /// 段ごとの、重心を支持線からどれだけ離して置くか [m]（3 脚支持の段は
+    /// 浮かせる脚の反対側へ `knee_flip_shift_m`、2 脚支持は 0）。
+    target_s: Vec<f64>,
     floors: Vec<f64>,
     kinds: Vec<KneeStepKind>,
     supports: Vec<[usize; 2]>,
@@ -210,6 +213,7 @@ pub struct Controller {
     knee_flip_feet: [nalgebra::Vector3<f64>; 4],
     /// 段ごとの、計画に織り込んだ胴体の寄せ [m]（2 脚支持に入るときの初期値）。
     knee_flip_plan_shift: Vec<f64>,
+    knee_flip_target_s: Vec<f64>,
     /// 段ごとの床の高さ（胴体座標）。trot は反転中だけ胴体を上げるので立脚の z に使う。
     knee_flip_floor: Vec<f64>,
     /// 段ごとの種類（[`KneeStepKind`]）と、その段が属する組の支持脚。
@@ -220,6 +224,13 @@ pub struct Controller {
     /// 探りの保持中に溜める (経過 s, θ̇, θ)。
     knee_flip_probe: Vec<(f64, f64, f64)>,
     knee_flip_probe_t: f64,
+    /// 関節トルクから推定した各足の鉛直力（`observe_foot_forces`、前周期の値）。
+    foot_fz: [Option<f64>; 4],
+    /// 寄せる段での CoP と支持線の残差 [m]（ログ用、最後の値）。
+    knee_flip_cop_err: Option<f64>,
+    /// 立って止まっている間に関節トルクから測った、重心のモデルからのずれ
+    /// （`observe_standing_com_offset`）。反転を始めるときに `knee_flip_com_est` の初期値にする。
+    standing_com_offset: Option<nalgebra::Vector2<f64>>,
     knee_flip_prev_idx: usize,
     knee_flip_shift_m: f64,
     knee_flip_tilt_max_rad: f64,
@@ -280,12 +291,16 @@ impl Controller {
             knee_flip_forward: Vec::new(),
             knee_flip_feet: [nalgebra::Vector3::zeros(); 4],
             knee_flip_plan_shift: Vec::new(),
+            knee_flip_target_s: Vec::new(),
             knee_flip_floor: Vec::new(),
             knee_flip_kind: Vec::new(),
             knee_flip_support: Vec::new(),
             knee_flip_com_est: nalgebra::Vector2::zeros(),
             knee_flip_probe: Vec::new(),
             knee_flip_probe_t: 0.0,
+            foot_fz: [None; 4],
+            knee_flip_cop_err: None,
+            standing_com_offset: None,
             knee_flip_prev_idx: 0,
             knee_flip_shift_m: 0.0,
             knee_flip_tilt_max_rad: 0.0,
@@ -325,6 +340,17 @@ impl Controller {
     /// いま使っている歩容コントローラの種類（実行中に替わり得る）。
     pub fn controller_kind(&self) -> crate::config::GaitControllerKind {
         self.cfg.gait.controller
+    }
+
+    /// 関節トルクから推定した各足の鉛直力を渡す（`trot` の寄せる段が CoP を見る）。
+    pub fn observe_foot_forces(&mut self, fz: [Option<f64>; 4]) {
+        self.foot_fz = fz;
+    }
+
+    /// 立って止まっている間に測った重心のずれ（実測 − モデル、胴体座標 xy）。
+    /// `None` は「まだ測れていない／動いている」。反転の前置の初期値になる。
+    pub fn observe_standing_com_offset(&mut self, off: Option<nalgebra::Vector2<f64>>) {
+        self.standing_com_offset = off;
     }
 
     /// 立って止まっているか（歩行モードで速度 0、4 脚接地）。膝の反転や重心の
@@ -969,8 +995,16 @@ impl Controller {
             }
             return;
         }
+        // 立って測った重心のずれを、計画（寄せる量）にも効かせるため先に入れる。
+        {
+            let o = self.cfg.gait.com_offset_body_m;
+            self.knee_flip_com_est = match self.standing_com_offset {
+                Some(m) => m - nalgebra::Vector2::new(o[0], o[1]),
+                None => nalgebra::Vector2::zeros(),
+            };
+        }
         match self.plan_knee_flip(shape) {
-            Ok(KneeFlipPlan { steps, stances: stance, forwards, plan_shifts: plan_shift, floors, kinds, supports, next_offset }) => {
+            Ok(KneeFlipPlan { steps, stances: stance, forwards, plan_shifts: plan_shift, target_s, floors, kinds, supports, next_offset }) => {
                 let total: f64 = steps.iter().map(|st| st.duration_s).sum();
                 log::info!(
                     "膝の向きを {} → {} に反転します（{}、{} 段 / {:.1} s: {}）",
@@ -985,6 +1019,16 @@ impl Controller {
                 self.knee_flip_stance = stance;
                 self.knee_flip_forward = forwards;
                 self.knee_flip_plan_shift = plan_shift;
+                self.knee_flip_target_s = target_s;
+                // 立って測った重心のずれを前置に。渡されるのは「実測 − モデルの素の重心」
+                // なので、プロファイルの `com_offset_body_m` ぶんを引いて推定に入れる。
+                if let Some(m) = self.standing_com_offset {
+                    let o = self.cfg.gait.com_offset_body_m;
+                    log::info!(
+                        "立って測った重心のずれ [{:+.4}, {:+.4}] m を反転の前置に使います（プロファイルの ずれ設定 [{:+.4}, {:+.4}] との差 [{:+.4}, {:+.4}]）",
+                        m.x, m.y, o[0], o[1], self.knee_flip_com_est.x, self.knee_flip_com_est.y
+                    );
+                }
                 self.knee_flip_floor = floors;
                 self.knee_flip_kind = kinds;
                 self.knee_flip_support = supports;
@@ -1184,8 +1228,10 @@ impl Controller {
         // 段の種類と、その段が属する組の支持脚（trot）。
         let mut kinds: Vec<KneeStepKind> = Vec::new();
         let mut supports: Vec<[usize; 2]> = Vec::new();
+        let mut target_ss: Vec<f64> = Vec::new();
         let cur_kind = std::cell::Cell::new(KneeStepKind::Normal);
         let cur_support = std::cell::Cell::new([1usize, 2]);
+        let cur_target_s = std::cell::Cell::new(0.0_f64);
         let mut push = |name: String, q: JointVec, dur: f64, stance: [bool; 4]| {
             steps.push(PoseStep { name, target: q, duration_s: dur, kind: InterpolationKind::QuinticSmooth });
             stances.push(stance);
@@ -1194,6 +1240,7 @@ impl Controller {
             plan_shifts.push(cur_shift.get());
             kinds.push(cur_kind.get());
             supports.push(cur_support.get());
+            target_ss.push(cur_target_s.get());
             cur_kind.set(KneeStepKind::Normal);
         };
         let mut cur = self.targets;
@@ -1473,6 +1520,7 @@ impl Controller {
                     } else {
                         0.0
                     };
+                    cur_target_s.set(target_s);
                     let mut u = 0.0;
                     let mut lift = cur;
                     for _ in 0..3 {
@@ -1529,17 +1577,23 @@ impl Controller {
                             push(format!("寄せ直し{tag} {round}"), cur, 0.6, [true; 4]);
                         }
                     }
-                    // 浮かす + 倒す: 浮かせた角のまま hip のロールを外へ。
-                    for &slot in &slots {
-                        cur.legs[slot] = lift.legs[slot];
-                        cur.legs[slot][0] = roll_out(slot);
-                    }
-                    push(format!("浮かす{tag}"), cur, phase, stance);
-                    // 反転: ロールは外のまま、腿と calf を着地姿勢（新しい膝の向き）の角へ
-                    // 同時に。関節空間の直線なので途中で脚が一直線になる。
+                    // 浮かす + 倒す + 折り返しの前半: 浮かせた角から hip のロールを外へ
+                    // 倒しながら、腿と calf を着地姿勢（新しい膝の向き）へ
+                    // `knee_flip_reverse_overlap` だけ進めておく（0.5 なら倒し切りと同時に
+                    // 脚が一直線になる）。
                     let mut landed = [[0.0; 3]; 4];
+                    let ov = g.knee_flip_reverse_overlap;
                     for &slot in &slots {
                         landed[slot] = ik(slot, shifted(slot, u, n, z_float), knee_forward_for(new, slot))?;
+                        cur.legs[slot] = lift.legs[slot];
+                        cur.legs[slot][0] = roll_out(slot);
+                        for k in 1..3 {
+                            cur.legs[slot][k] += ov * (landed[slot][k] - lift.legs[slot][k]);
+                        }
+                    }
+                    push(format!("浮かす{tag}"), cur, phase, stance);
+                    // 反転: ロールは外のまま、腿と calf を着地姿勢の角へ（残り）。
+                    for &slot in &slots {
                         cur.legs[slot][1] = landed[slot][1];
                         cur.legs[slot][2] = landed[slot][2];
                     }
@@ -1600,12 +1654,17 @@ impl Controller {
                     first = false;
                     let mut stance = [true; 4];
                     stance[slot] = false;
-                    // 浮かす + 倒す。
-                    cur.legs[slot] = ik(slot, at(feet_shift[slot], z_float), cur_forward.get()[slot])?;
-                    cur.legs[slot][0] = roll_out(slot);
-                    push(format!("浮かす{tag}"), cur, ph, stance);
-                    // 反転: ロールは外のまま、腿と calf を着地姿勢（新しい向き）の角へ同時に。
+                    // 浮かす + 倒す + 折り返しの前半（`knee_flip_reverse_overlap`）。
+                    let lifted = ik(slot, at(feet_shift[slot], z_float), cur_forward.get()[slot])?;
                     let landed = ik(slot, at(feet_shift[slot], z_float), knee_forward_for(new, slot))?;
+                    let ov = g.knee_flip_reverse_overlap;
+                    cur.legs[slot] = lifted;
+                    cur.legs[slot][0] = roll_out(slot);
+                    for k in 1..3 {
+                        cur.legs[slot][k] += ov * (landed[k] - lifted[k]);
+                    }
+                    push(format!("浮かす{tag}"), cur, ph, stance);
+                    // 反転: ロールは外のまま、腿と calf を着地姿勢（新しい向き）の角へ（残り）。
                     cur.legs[slot][1] = landed[1];
                     cur.legs[slot][2] = landed[2];
                     let mut fwd_now = cur_forward.get();
@@ -1682,7 +1741,7 @@ impl Controller {
             }
             prev = st.target;
         }
-        Ok(KneeFlipPlan { steps, stances, forwards, plan_shifts, floors, kinds, supports, next_offset })
+        Ok(KneeFlipPlan { steps, stances, forwards, plan_shifts, target_s: target_ss, floors, kinds, supports, next_offset })
     }
 
     fn tick_knee_flip(&mut self, cmd: &Intent, measured: &JointVec, attitude_rad: [f64; 3], dt: f64) {
@@ -1710,6 +1769,14 @@ impl Controller {
             let (kind_prev, kind_now) = (kind_of(&self.knee_flip_kind, prev_idx), kind_of(&self.knee_flip_kind, idx));
             if kind_prev == KneeStepKind::ProbeHold {
                 self.finish_probe(prev_idx);
+            }
+            if kind_prev == KneeStepKind::Adjust {
+                if let Some(e) = self.knee_flip_cop_err.take() {
+                    log::info!(
+                        "寄せる: CoP と支持線の残差 {:+.1} mm、重心のずれの推定 [{:+.4}, {:+.4}] m（胴体座標）",
+                        e * 1000.0, self.knee_flip_com_est.x, self.knee_flip_com_est.y
+                    );
+                }
             }
             if was == 4 && now == 2 {
                 // 4 脚の段で上書きしていなければ（計画どおり）、計画の寄せから始める。
@@ -1843,8 +1910,31 @@ impl Controller {
         };
         let floor = self.knee_flip_floor.get(idx).copied();
         if kind == KneeStepKind::Adjust {
-            // 4 脚のまま、推定込みの重心が支持線に乗る所へゆっくり（0.05 m/s）。
-            let want = (-s0).clamp(-g.knee_flip_balance_max_m, g.knee_flip_balance_max_m);
+            // **CoP を見て重心の推定を直す。** 4 脚の鉛直力（関節トルクから）の重み付き
+            // 平均 = CoP。静止して 4 脚で立っていれば CoP は重心の真下なので、CoP が
+            // 支持線（実測の足先で引く）からずれているぶんだけ、信じている重心も
+            // ずれている。一次遅れ `knee_flip_cop_tau_s` で `knee_flip_com_est` に足す。
+            if g.knee_flip_cop_tau_s > 0.0 && support.len() == 4 {
+                let feet_m = self.robot.feet_from_posture(measured);
+                if let Some((cop, _)) = crate::estimator::com_from_foot_forces(&feet_m, &self.foot_fz) {
+                    let (am, bm) = (feet_m[pair[0]], feet_m[pair[1]]);
+                    let dm = nalgebra::Vector2::new(bm.x - am.x, bm.y - am.y).normalize();
+                    let nm = nalgebra::Vector2::new(-dm.y, dm.x);
+                    let ts = self.knee_flip_target_s.get(idx).copied().unwrap_or(0.0);
+                    let e = (cop.x - am.x) * nm.x + (cop.y - am.y) * nm.y - ts;
+                    let alpha = dt / (dt + g.knee_flip_cop_tau_s);
+                    self.knee_flip_com_est += alpha * e * n;
+                    self.knee_flip_cop_err = Some(e);
+                    if std::env::var_os("MISA_BALANCE_TRACE").is_some() {
+                        eprintln!("[cop] step {idx} cop=({:+.4},{:+.4}) e={:+.4} com_est=({:+.4},{:+.4})", cop.x, cop.y, e, self.knee_flip_com_est.x, self.knee_flip_com_est.y);
+                    }
+                }
+            }
+            // 4 脚のまま、推定込みの重心が「支持線から target_s」の所へゆっくり（0.05 m/s）。
+            let com = self.com_body_at(&self.targets);
+            let s0 = (com.x - a.x) * n.x + (com.y - a.y) * n.y;
+            let ts = self.knee_flip_target_s.get(idx).copied().unwrap_or(0.0);
+            let want = (ts - s0).clamp(-g.knee_flip_balance_max_m, g.knee_flip_balance_max_m);
             let step = 0.05 * dt;
             let u = self.knee_flip_shift_m + (want - self.knee_flip_shift_m).clamp(-step, step);
             self.knee_flip_shift_m = u;

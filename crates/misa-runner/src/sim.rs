@@ -346,6 +346,8 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // 出どころ（モデルの慣性の和。根リンクは `Robot::load` が補っている）。
     let weight_n = robot.model.inertias.iter().map(|i| i.mass).sum::<f64>() * 9.81;
     let mut com_report = crate::estimator::ComReport::default();
+    // 立って止まっている間の重心のずれ（実測 − モデル）の一次遅れ（1 s）。反転の前置に渡す。
+    let mut standing_off: Option<(nalgebra::Vector2<f64>, f64)> = None;
     // MIT ゲインの切り替え（膝の反転中だけ `mit_gains_knee_flip`）。0〜1 のランプ。
     let mut gain_blend = 0.0f64;
     // 膝の反転中の胴体の傾き（roll / pitch の最大）と、そのときのゲイン。
@@ -543,10 +545,18 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             flip_tilt_max[0] = flip_tilt_max[0].max(attitude[0].abs());
             flip_tilt_max[1] = flip_tilt_max[1].max(attitude[1].abs());
         }
+        controller.observe_foot_forces(fz);
         if controller.is_standing_still() {
             let feet = controller.robot().feet_from_posture(&measured);
             if let Some((com_xy, fz_each)) = crate::estimator::com_from_foot_forces(&feet, &fz) {
                 let model = controller.robot().body_inertia_at(&measured).com_body;
+                let d = com_xy - nalgebra::Vector2::new(model.x, model.y);
+                let dtl = dt;
+                standing_off = Some(match standing_off {
+                    Some((v, t)) => (v + (dtl / (dtl + 1.0)) * (d - v), t + dtl),
+                    None => (d, dtl),
+                });
+                controller.observe_standing_com_offset(standing_off.filter(|(_, t)| *t >= 1.0).map(|(v, _)| v));
                 if let Some(line) = com_report.push(
                     com_xy,
                     fz_each,
@@ -561,6 +571,11 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             }
         } else {
             com_report.reset();
+            // 動き出したら測り直し（反転中はいま持っている値をそのまま使う）。
+            if controller.state() != State::FlippingKnees {
+                standing_off = None;
+                controller.observe_standing_com_offset(None);
+            }
         }
         if cfg.gait.contact_from_torque {
             let flags = estimator.contacts_from_forces(&fz, cfg.wbc.contact_force_threshold_n);

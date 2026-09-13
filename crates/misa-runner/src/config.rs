@@ -215,6 +215,12 @@ impl AppConfig {
         if !(0.2..3.0).contains(&sp) {
             return Err(format!("gait.knee_flip_stand_phase_s = {sp} は 0.2〜3 s で"));
         }
+        let (ov, ct) = (self.gait.knee_flip_reverse_overlap, self.gait.knee_flip_cop_tau_s);
+        if !((0.0..=0.9).contains(&ov) && (0.0..10.0).contains(&ct)) {
+            return Err(format!(
+                "gait.knee_flip_reverse_overlap {ov}（0〜0.9）/ knee_flip_cop_tau_s {ct}（0〜10 s）が範囲外"
+            ));
+        }
         let pm = self.gait.knee_flip_probe_move_s;
         if !((0.0..0.05).contains(&pl) && (0.0..2.0).contains(&ph) && (0.1..3.0).contains(&pm) && pr <= 5) {
             return Err(format!(
@@ -1083,6 +1089,14 @@ fn default_knee_flip_stand_phase_s() -> f64 {
     0.65
 }
 
+fn default_knee_flip_reverse_overlap() -> f64 {
+    0.2
+}
+
+fn default_knee_flip_cop_tau_s() -> f64 {
+    0.0
+}
+
 fn default_knee_flip_probe_lift_m() -> f64 {
     0.03
 }
@@ -1385,6 +1399,20 @@ pub struct GaitTuning {
     /// 回り**（0.3 s で ±2°）、重力で倒れ始める角加速度が読めない。
     #[serde(default = "default_knee_flip_probe_move_s")]
     pub knee_flip_probe_move_s: f64,
+    /// ロールで外へ倒しながら**腿と calf の折り返しをどこまで先に始めるか**（0〜0.9）。
+    /// 浮かす段の終わりに、折り返しをこの割合まで進めておく。反転の段に残る動きが
+    /// 減るので段を短くできる。**0.3 以上は途中で足先が床に近づく**（ロールが
+    /// 倒れ切る前に脚が伸び始める。計画時の検査で「組めません」になる）。既定 0.2。
+    /// 0 で従来どおり。
+    #[serde(default = "default_knee_flip_reverse_overlap")]
+    pub knee_flip_reverse_overlap: f64,
+    /// `trot` の寄せる段で、**関節トルクから推定した CoP**（4 脚の鉛直力の重み付き
+    /// 平均）が支持線に乗るように胴体を寄せ直す一次遅れの時定数 [s]。**既定 0 = 無し。**
+    /// MuJoCo では胴体が動いている間の CoP がまったく当てにならず（残差 ±50 mm、
+    /// 推定が発散）、正しい重心でも 27° 倒れた。代わりに**立って止まっている間に
+    /// 測った重心のずれ**（5 s 平均のログと同じ量）を反転の前置に使う（自動）。
+    #[serde(default = "default_knee_flip_cop_tau_s")]
+    pub knee_flip_cop_tau_s: f64,
     /// 探りの回数（1 回目の残差を 2 回目で詰める）。**既定 0 = 探らない（試験中）。**
     ///
     /// MuJoCo（kp 500）ではまだ測れていない: 上げの反動と脚の沈みで、モデルが正しい
@@ -1650,6 +1678,8 @@ impl Default for GaitTuning {
             com_offset_body_m: [0.0, 0.0],
             knee_flip_rest_height_m: None,
             knee_flip_foot_lift_m: default_knee_flip_foot_lift_m(),
+            knee_flip_reverse_overlap: default_knee_flip_reverse_overlap(),
+            knee_flip_cop_tau_s: default_knee_flip_cop_tau_s(),
             knee_flip_probe_lift_m: default_knee_flip_probe_lift_m(),
             knee_flip_probe_hold_s: default_knee_flip_probe_hold_s(),
             knee_flip_probe_move_s: default_knee_flip_probe_move_s(),
