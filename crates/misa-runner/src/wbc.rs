@@ -370,7 +370,7 @@ impl WbcLayer {
                 continue;
             }
             let declared = robot.effort_limits.get(&j.name).copied().unwrap_or(0.0);
-            let limit = cfg.torque_ceiling(declared);
+            let limit = cfg.torque_ceiling_for(declared, &j.name);
             if limit <= 0.0 {
                 return Err(format!(
                     "関節 {} にトルクの定格がありません。\

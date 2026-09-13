@@ -488,6 +488,23 @@ pub struct WbcConfig {
     /// ここを大きくしてもモデルの上には行かない — 上げるなら
     /// `torque_scale` のほう。
     pub max_torque_nm: f64,
+    /// 軸種別のトルク上限 `[hip, thigh, calf]` [N·m]。**脚 12 軸にだけ効く。**
+    ///
+    /// 指定すると [`Self::max_torque_nm`] より優先する（脚の軸のみ。補助軸は
+    /// 従来どおり）。legged_control の `torqueLimitsTask` も 3 要素で読んで
+    /// 4 脚に配る。
+    ///
+    /// # なぜ 1 つでは足りないか
+    ///
+    /// keel のモデルの定格は **calf 180 / hip・thigh 96 N·m**（比 1.875）で、
+    /// **一律の 1 つに潰すとこの比が消える。** 立ち上げ用に 40 を入れると
+    /// calf は定格の 22 %、hip / thigh は 42 % と、絞り方が軸で 2 倍違う。
+    ///
+    /// `torque_scale` なら比は保てるが、**あちらはシムのアクチュエータの
+    /// 上限も一緒に動かす**（`SimOptions::torque_scale`）ので、指令だけを
+    /// 絞りたいときに使うと交絡する。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_torque_nm_by_joint: Option<[f64; 3]>,
     /// **前置トルクが 1 秒あたり動いてよい量** [N·m/s]。`0` で無効。
     ///
     /// 安全ゲート（[`misa_core::AxisLimits::max_torque_rate_nm_s`]）へ
@@ -789,6 +806,7 @@ impl Default for WbcConfig {
             f_min_stance_n: 0.5,
             torque_scale: 1.0,
             max_torque_nm: 0.0,
+            max_torque_nm_by_joint: None,
             max_torque_rate_nm_s: 0.0,
             solution_check: true,
             check_grf_min_frac: 0.2,
@@ -836,11 +854,25 @@ impl WbcConfig {
     /// **モデル × 係数を、絶対値の上限で頭打ちにする。** どちらも無ければ
     /// `0`（＝制限しない）で、[`crate::wbc::WbcLayer::new`] はそれを拒む。
     pub fn torque_ceiling(&self, declared: f64) -> f64 {
+        self.torque_ceiling_with(declared, self.max_torque_nm)
+    }
+
+    /// 関節名つきの版。脚の軸なら [`Self::max_torque_nm_by_joint`] を使う。
+    pub fn torque_ceiling_for(&self, declared: f64, joint_name: &str) -> f64 {
+        let cap = self
+            .max_torque_nm_by_joint
+            .zip(misa_hal::joint::lookup(joint_name))
+            .map(|(by_joint, (_, k))| by_joint[k])
+            .unwrap_or(self.max_torque_nm);
+        self.torque_ceiling_with(declared, cap)
+    }
+
+    fn torque_ceiling_with(&self, declared: f64, cap: f64) -> f64 {
         let scaled = declared * self.torque_scale;
-        match (scaled > 0.0, self.max_torque_nm > 0.0) {
-            (true, true) => scaled.min(self.max_torque_nm),
+        match (scaled > 0.0, cap > 0.0) {
+            (true, true) => scaled.min(cap),
             (true, false) => scaled,
-            (false, true) => self.max_torque_nm,
+            (false, true) => cap,
             (false, false) => 0.0,
         }
     }
@@ -848,6 +880,11 @@ impl WbcConfig {
     pub fn validate(&self) -> Result<(), String> {
         if !self.enabled {
             return Ok(());
+        }
+        if let Some(v) = self.max_torque_nm_by_joint {
+            if v.iter().any(|x| *x < 0.0) {
+                return Err("wbc.max_torque_nm_by_joint に負の値があります".into());
+            }
         }
         if self.friction_mu <= 0.0 {
             return Err("wbc.friction_mu は正の値が必要です".into());
@@ -1924,6 +1961,38 @@ impl Default for PoseConfig {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// **軸種別の上限は脚 12 軸にだけ効く。** モデルの定格の比（keel は
+    /// calf 180 / hip・thigh 96）を一律の 1 つに潰さないための口。
+    #[test]
+    fn a_per_joint_ceiling_beats_the_flat_one_on_leg_axes() {
+        let cfg = WbcConfig {
+            torque_scale: 1.0,
+            max_torque_nm: 40.0,
+            max_torque_nm_by_joint: Some([40.0, 40.0, 75.0]),
+            ..WbcConfig::default()
+        };
+        assert_eq!(cfg.torque_ceiling_for(96.0, "FL_hip_joint"), 40.0);
+        assert_eq!(cfg.torque_ceiling_for(96.0, "RR_thigh_joint"), 40.0);
+        assert_eq!(cfg.torque_ceiling_for(180.0, "RL_calf_joint"), 75.0);
+        // 脚でない軸は一律のほうを使う。
+        assert_eq!(cfg.torque_ceiling_for(96.0, "arm_pitch_joint"), 40.0);
+        // **モデルの上には行かない。**
+        assert_eq!(cfg.torque_ceiling_for(30.0, "RL_calf_joint"), 30.0);
+    }
+
+    /// 指定が無ければ従来どおり。
+    #[test]
+    fn without_a_per_joint_ceiling_nothing_changes() {
+        let cfg = WbcConfig {
+            torque_scale: 1.0,
+            max_torque_nm: 40.0,
+            ..WbcConfig::default()
+        };
+        assert_eq!(cfg.torque_ceiling_for(180.0, "RL_calf_joint"), 40.0);
+        assert_eq!(cfg.torque_ceiling(180.0), 40.0);
+    }
 
     /// **モデルファイルを `--config` に渡せてしまってはいけない。**
     ///

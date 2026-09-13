@@ -132,12 +132,11 @@ pub fn safety_config(
     // どちらも無ければ 0 = 制限しない。**トルクを出す構成では必ず持たせる
     // こと。** 上限の無いトルク指令は、モデル誤差がそのまま脚の飛び出しになる。
     let torque_of = |id: AxisId| -> f64 {
-        let declared = layout
-            .table
-            .name(id)
-            .and_then(|n| model_efforts.get(n).copied())
-            .unwrap_or(0.0);
-        cfg.wbc.torque_ceiling(declared)
+        let Some(name) = layout.table.name(id) else {
+            return cfg.wbc.torque_ceiling(0.0);
+        };
+        let declared = model_efforts.get(name).copied().unwrap_or(0.0);
+        cfg.wbc.torque_ceiling_for(declared, name)
     };
     // **トルクの変化率はモデルに無い。** 機体の立ち姿勢のトルクから決める
     // ものなので設定だけが持つ（[`crate::config::WbcConfig`]）。
