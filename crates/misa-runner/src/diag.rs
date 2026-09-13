@@ -643,10 +643,18 @@ pub fn check(cfg: &AppConfig) -> Result<(), String> {
             cfg.gait.knee_flip_style.label(),
             match (cfg.gait.knee_flip_style, cfg.gait.knee_flip_rest_height_m) {
                 (crate::config::KneeFlipStyle::Rest, Some(h)) => format!("、胴体 {h:.3} m に載せて足を {:.3} m 浮かす", cfg.gait.knee_flip_foot_lift_m),
-                (crate::config::KneeFlipStyle::Stand, _) => format!("、胴体を対角へ {:.2} m 寄せる", cfg.gait.knee_flip_shift_m),
+                (crate::config::KneeFlipStyle::Stand, _) => format!(
+                    "、胴体を対角へ {:.2} m 寄せる（高さは `r` / `f` のいまの立ち高さのまま）",
+                    cfg.gait.knee_flip_shift_m
+                ),
                 _ => String::new(),
             },
-            cfg.gait.knee_flip_phase_s, cfg.gait.knee_flip_out_z_m,
+            // 1 段の時間はやり方ごとに別の設定。
+            match cfg.gait.knee_flip_style {
+                crate::config::KneeFlipStyle::Stand => cfg.gait.knee_flip_stand_phase_s,
+                _ => cfg.gait.knee_flip_phase_s,
+            },
+            cfg.gait.knee_flip_out_z_m,
             parts.join(" / ")
         );
     }

@@ -290,6 +290,11 @@ pub struct Intent {
     /// 反転の最中は無視される（次の反転から効く）。
     #[serde(default)]
     pub knee_flip_style: Option<KneeFlipStyleRequest>,
+    /// 膝の反転の 1 段の時間 [s]。`None` で今のまま。いま選んでいるやり方の
+    /// （stand なら `knee_flip_stand_phase_s`、trot / rest なら `knee_flip_phase_s`）値を
+    /// 置き替える。反転の最中は無視される。
+    #[serde(default)]
+    pub knee_flip_phase_s: Option<f64>,
 }
 
 impl Intent {

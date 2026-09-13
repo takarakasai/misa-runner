@@ -1325,9 +1325,9 @@ pub enum KneeFlipStyle {
 impl KneeFlipStyle {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Stand => "立ったまま 1 脚ずつ",
-            Self::Rest => "車輪・腹に載せてまとめて",
-            Self::Trot => "対角 2 脚ずつ（trot と同じ順）",
+            Self::Stand => "1 脚ずつ（3 脚支持、stand）",
+            Self::Rest => "4 脚まとめて（車輪・腹に載せる、rest）",
+            Self::Trot => "対角 2 脚ずつ（床を滑らせる、trot）",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -1568,16 +1568,20 @@ pub struct GaitTuning {
     /// 大きくできる。上限は脚長 0.426 の手前（腿が 15° は残る 0.41）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knee_flip_height_m: Option<f64>,
-    /// `stand` の反転中の胴体高さ [m]。無ければ脚長（上腿+下腿）の 94 %（keel 0.40、
-    /// 腿が 20° 残る）。**3 脚支持は釣り合いを取らないので高くしてよく**、脚が伸びた状態から
-    /// 始めると折り返しが短くなって反動が減る（1 段 0.5 s で傾き 8° → 3°、0.4 s なら
-    /// 9.2 s で 3.4°）。`trot` は逆で、高くすると釣り合いの効率が落ちて倒れる
-    /// （0.36 で 15°、0.38 以上で転倒）ので `knee_flip_height_m` は別。届かなければ
-    /// 計画時に IK のエラーで止まる。
+    /// `stand` の反転中の胴体高さ [m]。**無ければ `r` / `f` で指令している今の立ち高さを
+    /// そのまま保つ**（2026-09-17 のユーザー要望。脚を伸ばし切った高さ = 脚長の 94 %、
+    /// keel 0.40 m は実機で不安定だった）。書けばその高さを使う（届かなければ 5 mm 刻みで
+    /// 下げる）。
+    ///
+    /// 低い高さでは hip のロールだけでは脚が一直線になる瞬間に足先が床を掘るので、
+    /// **腿を胴体から離す向きへ振って一直線を通す 5 段**（2026-09-16 に実機で通った
+    /// 振り付け）へ自動で切り替わる。どちらを使ったかは反転を始めるときのログに出る。
+    /// `trot` の高さは別（`knee_flip_height_m`。高くすると釣り合いの効率が落ちて倒れる）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knee_flip_stand_height_m: Option<f64>,
     /// `stand` の折り返しの重ね合わせ（`knee_flip_reverse_overlap` の stand 用）。
-    /// 胴体 0.40 m なら床の余裕が 6 cm あるので 0.6 まで通る。既定 0.6。
+    /// **ロールで折り返す経路のときだけ効く。** 胴体 0.40 m なら床の余裕が 6 cm あるので
+    /// 0.6 まで通る。既定 0.6。
     #[serde(default = "default_knee_flip_stand_overlap")]
     pub knee_flip_stand_overlap: f64,
     /// `trot` で**浮かせる脚を床に滑らせる**。足を上げず（`knee_flip_foot_lift_m` を 0 に）、

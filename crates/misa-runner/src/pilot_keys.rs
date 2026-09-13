@@ -69,8 +69,10 @@ pub enum Key {
     /// 膝の向きを次へ / 前へ（`<<` → `<>` → `><` → `>>`。立って止まっているときだけ効く）。
     KneeNext,
     KneePrev,
-    /// 膝の反転のやり方を次へ（stand → trot → rest）。次の反転から効く。
+    /// 膝の反転のやり方を次へ（1 脚ずつ → 対角 2 脚 → 4 脚まとめて）。次の反転から効く。
     KneeStyleNext,
+    /// 膝の反転の 1 段の時間を ±0.05 s。次の反転から効く。
+    KneePhase(i8),
     Help,
     Quit,
 }
@@ -149,6 +151,8 @@ pub fn decode(c: u8) -> Option<Key> {
         b']' => Key::KneeNext,
         b'[' => Key::KneePrev,
         b';' => Key::KneeStyleNext,
+        b'=' => Key::KneePhase(1),
+        b'-' => Key::KneePhase(-1),
         b'p' => Key::ControllerToggle,
         b'h' | b'?' => Key::Help,
         // **Ctrl-C も自分で拾う。** raw モードでは端末が SIGINT を出さない
@@ -176,8 +180,10 @@ pub struct Limits {
     pub controller_initial: GaitControllerRequest,
     /// 起動時の膝の向き。`[` / `]` の巡回はここから数える。
     pub knee_initial: misa_core::KneePatternRequest,
-    /// 起動時の反転のやり方。`h` の巡回はここから数える。
+    /// 起動時の反転のやり方。`;` の巡回はここから数える。
     pub knee_style_initial: misa_core::KneeFlipStyleRequest,
+    /// 起動時の反転の 1 段の時間 [s]。`=` / `-` はここから数える。
+    pub knee_phase_initial: f64,
 }
 
 /// 歩容 → `base_tune` の添字。
@@ -205,6 +211,10 @@ impl Limits {
                 (true, _) => WbcRequest::Position,
             },
             knee_initial: cfg.gait.knee_pattern.to_request(),
+            knee_phase_initial: match cfg.gait.knee_flip_style {
+                crate::config::KneeFlipStyle::Stand => cfg.gait.knee_flip_stand_phase_s,
+                _ => cfg.gait.knee_flip_phase_s,
+            },
             knee_style_initial: match cfg.gait.knee_flip_style {
                 crate::config::KneeFlipStyle::Stand => misa_core::KneeFlipStyleRequest::Stand,
                 crate::config::KneeFlipStyle::Rest => misa_core::KneeFlipStyleRequest::Rest,
@@ -348,6 +358,10 @@ pub fn apply(intent: &mut Intent, key: Key, lim: &Limits) {
         Key::KneeStyleNext => {
             intent.knee_flip_style = Some(intent.knee_flip_style.unwrap_or(lim.knee_style_initial).next());
         }
+        Key::KneePhase(dir) => {
+            let now = intent.knee_flip_phase_s.unwrap_or(lim.knee_phase_initial);
+            intent.knee_flip_phase_s = Some((now + 0.05 * f64::from(dir)).clamp(0.2, 2.0));
+        }
         Key::Help | Key::Quit => {}
     }
 }
@@ -382,7 +396,9 @@ pub fn help(lim: &Limits, gait: GaitSelect) -> String {
          　  o        全身制御の出力を巡回  OFF → 位置 → トルク → OFF\n\
          　  p        歩容コントローラ MPC ↔ CHAMP（**立って止まっているときだけ**効く）\n\
          　  ] / [    膝の向きを次へ / 前へ  << → <> → >< → >>（**立って止まっているときだけ**。脚を浮かせて膝を伸ばし切る振り付けを通る）\n\
-         　  ;        反転のやり方を次へ  stand（3 脚支持で 1 脚ずつ）→ trot（対角 2 脚、床を滑らせる）→ rest（車輪に載せる）。次の反転から効く\n\
+         　  ;        反転を何脚ずつ行うか  1 脚ずつ（3 脚支持）→ 対角 2 脚（床を滑らせる）→ 4 脚まとめて（車輪に載せる）。次の反転から効く\n\
+         　  = / -    反転の 1 段の時間 ±0.05 s（0.2〜2.0。**腿を振り出す経路は 0.8 s 以上**。次の反転から効く）\n\
+         　  ※ 反転は **`r` / `f` で決めたいまの立ち高さのまま**行います（低いほど揺れません）\n\
          \n\
          　  h / ?    この一覧    Esc / Ctrl-C    終了（脱力して抜けます）\n",
         lim.max_vx,
@@ -636,9 +652,40 @@ impl Pilot for KeyPilot {
 mod tests {
     use super::*;
 
+    /// **`;` は反転を何脚ずつ行うかを巡回し、`=` / `-` は 1 段の時間を動かす。**
+    /// どちらも押していなければ `None`（今のまま）。
+    #[test]
+    fn the_knee_flip_keys_cycle_the_style_and_move_the_step_time() {
+        let lim = lim();
+        let mut intent = misa_core::Intent::default();
+        assert_eq!(intent.knee_flip_style, None);
+        assert_eq!(intent.knee_flip_phase_s, None);
+        // 起動時が stand なので 1 押しで trot、2 押しで rest、3 押しで stand。
+        for want in [
+            misa_core::KneeFlipStyleRequest::Trot,
+            misa_core::KneeFlipStyleRequest::Rest,
+            misa_core::KneeFlipStyleRequest::Stand,
+        ] {
+            apply(&mut intent, Key::KneeStyleNext, &lim);
+            assert_eq!(intent.knee_flip_style, Some(want));
+        }
+        // 1 段の時間は起動時の値から ±0.05 s、0.2〜2.0 で丸める。
+        apply(&mut intent, Key::KneePhase(1), &lim);
+        assert!((intent.knee_flip_phase_s.unwrap() - 0.55).abs() < 1e-9);
+        for _ in 0..40 {
+            apply(&mut intent, Key::KneePhase(-1), &lim);
+        }
+        assert!((intent.knee_flip_phase_s.unwrap() - 0.2).abs() < 1e-9);
+        // 一覧に出ている。
+        let h = help(&lim, GaitSelect::Trot);
+        assert!(h.contains("反転を何脚ずつ"), "{h}");
+        assert!(h.contains("反転の 1 段の時間"), "{h}");
+    }
+
     fn lim() -> Limits {
         Limits {
             knee_style_initial: misa_core::KneeFlipStyleRequest::Stand,
+            knee_phase_initial: 0.5,
             max_vx: 0.4,
             max_vy: 0.2,
             max_wz: 0.8,
