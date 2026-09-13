@@ -232,6 +232,16 @@ impl AppConfig {
                 self.gait.knee_flip_reverse_style
             ));
         }
+        let (lkp, lmax, lrate) = (
+            self.gait.knee_flip_level_kp,
+            self.gait.knee_flip_level_max_m,
+            self.gait.knee_flip_level_rate_m_s,
+        );
+        if !((0.0..10.0).contains(&lkp) && (0.0..0.1).contains(&lmax) && (0.0..2.0).contains(&lrate)) {
+            return Err(format!(
+                "gait.knee_flip_level_kp {lkp}（0〜10）/ knee_flip_level_max_m {lmax}（0〜0.1 m）/ knee_flip_level_rate_m_s {lrate}（0〜2 m/s）が範囲外"
+            ));
+        }
         let (ov, ct) = (self.gait.knee_flip_reverse_overlap, self.gait.knee_flip_cop_tau_s);
         if !((0.0..=0.9).contains(&ov) && (0.0..10.0).contains(&ct)) {
             return Err(format!(
@@ -1242,6 +1252,22 @@ fn default_knee_flip_stand_overlap() -> f64 {
     0.6
 }
 
+fn default_knee_flip_swing_min_phase_s() -> f64 {
+    0.65
+}
+
+fn default_knee_flip_level_kp() -> f64 {
+    1.0
+}
+
+fn default_knee_flip_level_max_m() -> f64 {
+    0.02
+}
+
+fn default_knee_flip_level_rate_m_s() -> f64 {
+    0.10
+}
+
 fn default_knee_flip_slide_dip_m() -> f64 {
     0.015
 }
@@ -1584,6 +1610,26 @@ pub struct GaitTuning {
     /// 0.6 まで通る。既定 0.6。
     #[serde(default = "default_knee_flip_stand_overlap")]
     pub knee_flip_stand_overlap: f64,
+    /// `stand` で**腿を振り出す経路**の 1 段の下限 [s]（0 で無し、既定 0.8）。
+    /// 7 kg の腿をほぼ水平まで振る反動が胴体に出るので、速いと揺れる
+    /// （MuJoCo、胴体 0.30 m: 0.5 s で 4.9°、0.65 s で 3.0°、0.8 s で 1.6°。荷重を抜く段を
+    /// 分ける前は 0.5 s で 14° あった）。既定 0.65。
+    #[serde(default = "default_knee_flip_swing_min_phase_s")]
+    pub knee_flip_swing_min_phase_s: f64,
+    /// 膝の反転中、**IMU で胴体の傾きを保つ帰還**の利き（0 で無し、既定 1.0）。
+    ///
+    /// 4 脚 → 3 脚に荷重が移ると、残った脚が余分に沈んで胴体が傾く（keel、MIT 500 で
+    /// 2〜3°。実機はもっと大きい）。反転を始めたときの傾きを基準に、立脚の足先を
+    /// `Δz = kp·(Δroll·y − Δpitch·x)` だけ上下させて戻す（1.0 が幾何そのまま）。
+    /// 上限 `knee_flip_level_max_m`、変化率 `knee_flip_level_rate_m_s`。
+    #[serde(default = "default_knee_flip_level_kp")]
+    pub knee_flip_level_kp: f64,
+    /// 水平保持で立脚の足先を上下させる量の上限 [m]。既定 0.02。
+    #[serde(default = "default_knee_flip_level_max_m")]
+    pub knee_flip_level_max_m: f64,
+    /// 同じく変化率の上限 [m/s]。既定 0.10。
+    #[serde(default = "default_knee_flip_level_rate_m_s")]
+    pub knee_flip_level_rate_m_s: f64,
     /// `trot` で**浮かせる脚を床に滑らせる**。足を上げず（`knee_flip_foot_lift_m` を 0 に）、
     /// 胴体も上げず立ち高さのまま、ロールで倒して折り返す途中で足先が床を押す
     /// （一直線の瞬間で `knee_flip_slide_dip_m` まで床の下を目標にしてよい）ことを
@@ -1895,6 +1941,10 @@ impl Default for GaitTuning {
             knee_flip_stand_height_m: None,
             knee_flip_stand_overlap: default_knee_flip_stand_overlap(),
             knee_flip_height_m: None,
+            knee_flip_swing_min_phase_s: default_knee_flip_swing_min_phase_s(),
+            knee_flip_level_kp: default_knee_flip_level_kp(),
+            knee_flip_level_max_m: default_knee_flip_level_max_m(),
+            knee_flip_level_rate_m_s: default_knee_flip_level_rate_m_s(),
             knee_flip_slide: false,
             knee_flip_slide_dip_m: default_knee_flip_slide_dip_m(),
             knee_flip_reverse_style: default_knee_flip_reverse_style(),

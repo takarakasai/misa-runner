@@ -887,7 +887,11 @@ pub fn run(
         {
             let want: [f64; 4] = match out.state {
                 State::Relaxed => [0.0; 4],
-                State::Active | State::FlippingKnees => std::array::from_fn(|i| out.stance[i] as u8 as f64),
+                // 膝の反転中は**計画の足の高さから作った連続の重み**
+                // （`ControlOutput::contact_weight`）。足がまだ床にいるうちに
+                // 配り替えると機体が突き上げられる。
+                State::FlippingKnees => out.contact_weight,
+                State::Active => std::array::from_fn(|i| out.stance[i] as u8 as f64),
                 _ => [1.0; 4],
             };
             let blend = cfg.control.gravity_feedforward_blend_s;
