@@ -434,6 +434,7 @@ impl Teleop {
             wbc: None,
             gait_controller: None,
             knee_pattern: None,
+            knee_flip_style: None,
             // **プロポは歩容パラメータを触らない。** チャンネルが足りない
             // し、飛びながら周期を変えたい要件も無い。
             gait_tune: misa_core::GaitTune::default(),

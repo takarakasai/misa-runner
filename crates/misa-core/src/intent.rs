@@ -193,6 +193,35 @@ pub enum KneePatternRequest {
     BothForward,
 }
 
+/// 膝を反転する振り付けのやり方の切り替え要求（`gait.knee_flip_style`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KneeFlipStyleRequest {
+    /// 立ったまま 1 脚ずつ（3 脚支持）。
+    Stand,
+    /// 車輪・腹に載せて 4 脚まとめて。
+    Rest,
+    /// 対角 2 脚ずつ（反転する脚は床を滑らせる）。
+    Trot,
+}
+
+impl KneeFlipStyleRequest {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stand => "stand",
+            Self::Rest => "rest",
+            Self::Trot => "trot",
+        }
+    }
+    /// stand → trot → rest → stand。
+    pub fn next(self) -> Self {
+        match self {
+            Self::Stand => Self::Trot,
+            Self::Trot => Self::Rest,
+            Self::Rest => Self::Stand,
+        }
+    }
+}
+
 impl KneePatternRequest {
     pub const ALL: [Self; 4] = [Self::BothBack, Self::MammalianForward, Self::MammalianReverse, Self::BothForward];
     pub fn label(self) -> &'static str {
@@ -257,6 +286,10 @@ pub struct Intent {
     /// 持ち続けて毎周期送る（いまと同じ向きなら何も起きない）。
     #[serde(default)]
     pub knee_pattern: Option<KneePatternRequest>,
+    /// 膝を反転する振り付けのやり方（stand / rest / trot）の切り替え。`None` で今のまま。
+    /// 反転の最中は無視される（次の反転から効く）。
+    #[serde(default)]
+    pub knee_flip_style: Option<KneeFlipStyleRequest>,
 }
 
 impl Intent {

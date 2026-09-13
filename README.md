@@ -788,7 +788,10 @@ MIT の q̇_d に載せる（指令は Impedance になり、ブリッジは `jo
 
 前から見て `前方: >> >< <> <<: 後方`（`<` は膝が後ろ、`>` は前）。設定は
 `gait.knee_pattern`（`both_back` / `mammalian_forward` / `mammalian_reverse` /
-`both_forward`）で、**立って止まっているとき**に `]` / `[` で次 / 前へ巡回できる
+`both_forward`）で、**立って止まっているとき**に `]` / `[` で次 / 前へ巡回できる。
+反転のやり方（`gait.knee_flip_style`: stand / trot / rest）は `;` で巡回でき（`Intent.knee_flip_style`、
+記録形式 6）、反転の最中に押した分は次の反転から効く。rest はプロファイルに
+`knee_flip_rest_height_m` が無ければ切り替わらない（WARN）
 （ROS 2 の操縦には口を作っていない）。`sim` は `--knee-script "3:>>,12:<<"`、
 `--knee-style stand|rest|trot`。
 

@@ -470,7 +470,7 @@ mod tests {
             kp: [40.0, 60.0, 70.0],
             kd: [1.0, 1.5, 2.0],
         };
-        let cmd = command(&layout(), &JointVec::zeros(), 8.0, false, Some(g), None, None, None);
+        let cmd = command(&layout(), &JointVec::zeros(), 8.0, false, Some([g; 4]), None, None, None);
         let t = layout().table;
         for (name, kp, kd) in [
             ("FL_hip_joint", 40.0, 1.0),
@@ -560,7 +560,7 @@ mod tests {
         let g = misa_hal::config::MitGains { kp: [300.0; 3], kd: [3.0; 3] };
         let mut qd = JointVec::zeros();
         qd.legs[1][2] = -1.5;
-        let cmd = command(&lay, &JointVec::zeros(), 8.0, false, Some(g), None, None, Some(&qd));
+        let cmd = command(&lay, &JointVec::zeros(), 8.0, false, Some([g; 4]), None, None, Some(&qd));
         let a = cmd.get(AxisId::new(5)).unwrap();
         assert_eq!(a.mode, ControlMode::Impedance);
         assert_eq!(a.velocity_rad_s, -1.5);
@@ -574,7 +574,7 @@ mod tests {
         assert_eq!(a.mode, ControlMode::Position);
         assert_eq!(a.velocity_rad_s, 8.0);
         // 脱力が勝つ。
-        let cmd = command(&lay, &JointVec::zeros(), 8.0, true, Some(g), None, None, Some(&qd));
+        let cmd = command(&lay, &JointVec::zeros(), 8.0, true, Some([g; 4]), None, None, Some(&qd));
         assert_eq!(cmd.get(AxisId::new(5)).unwrap().mode, ControlMode::Idle);
     }
 

@@ -69,6 +69,8 @@ pub enum Key {
     /// 膝の向きを次へ / 前へ（`<<` → `<>` → `><` → `>>`。立って止まっているときだけ効く）。
     KneeNext,
     KneePrev,
+    /// 膝の反転のやり方を次へ（stand → trot → rest）。次の反転から効く。
+    KneeStyleNext,
     Help,
     Quit,
 }
@@ -146,6 +148,7 @@ pub fn decode(c: u8) -> Option<Key> {
         b'o' => Key::WbcCycle,
         b']' => Key::KneeNext,
         b'[' => Key::KneePrev,
+        b';' => Key::KneeStyleNext,
         b'p' => Key::ControllerToggle,
         b'h' | b'?' => Key::Help,
         // **Ctrl-C も自分で拾う。** raw モードでは端末が SIGINT を出さない
@@ -173,6 +176,8 @@ pub struct Limits {
     pub controller_initial: GaitControllerRequest,
     /// 起動時の膝の向き。`[` / `]` の巡回はここから数える。
     pub knee_initial: misa_core::KneePatternRequest,
+    /// 起動時の反転のやり方。`h` の巡回はここから数える。
+    pub knee_style_initial: misa_core::KneeFlipStyleRequest,
 }
 
 /// 歩容 → `base_tune` の添字。
@@ -200,6 +205,11 @@ impl Limits {
                 (true, _) => WbcRequest::Position,
             },
             knee_initial: cfg.gait.knee_pattern.to_request(),
+            knee_style_initial: match cfg.gait.knee_flip_style {
+                crate::config::KneeFlipStyle::Stand => misa_core::KneeFlipStyleRequest::Stand,
+                crate::config::KneeFlipStyle::Rest => misa_core::KneeFlipStyleRequest::Rest,
+                crate::config::KneeFlipStyle::Trot => misa_core::KneeFlipStyleRequest::Trot,
+            },
             controller_initial: match cfg.gait.controller {
                 crate::config::GaitControllerKind::Mpc
                 | crate::config::GaitControllerKind::Centroidal => GaitControllerRequest::Mpc,
@@ -335,6 +345,9 @@ pub fn apply(intent: &mut Intent, key: Key, lim: &Limits) {
         Key::KneePrev => {
             intent.knee_pattern = Some(intent.knee_pattern.unwrap_or(lim.knee_initial).prev());
         }
+        Key::KneeStyleNext => {
+            intent.knee_flip_style = Some(intent.knee_flip_style.unwrap_or(lim.knee_style_initial).next());
+        }
         Key::Help | Key::Quit => {}
     }
 }
@@ -369,6 +382,7 @@ pub fn help(lim: &Limits, gait: GaitSelect) -> String {
          　  o        全身制御の出力を巡回  OFF → 位置 → トルク → OFF\n\
          　  p        歩容コントローラ MPC ↔ CHAMP（**立って止まっているときだけ**効く）\n\
          　  ] / [    膝の向きを次へ / 前へ  << → <> → >< → >>（**立って止まっているときだけ**。脚を浮かせて膝を伸ばし切る振り付けを通る）\n\
+         　  ;        反転のやり方を次へ  stand（3 脚支持で 1 脚ずつ）→ trot（対角 2 脚、床を滑らせる）→ rest（車輪に載せる）。次の反転から効く\n\
          \n\
          　  h / ?    この一覧    Esc / Ctrl-C    終了（脱力して抜けます）\n",
         lim.max_vx,
@@ -624,6 +638,7 @@ mod tests {
 
     fn lim() -> Limits {
         Limits {
+            knee_style_initial: misa_core::KneeFlipStyleRequest::Stand,
             max_vx: 0.4,
             max_vy: 0.2,
             max_wz: 0.8,

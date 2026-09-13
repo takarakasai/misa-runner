@@ -39,7 +39,9 @@ use crate::time::Time;
 // **`Intent` に `wbc` / `gait_controller`（実行中の切り替え要求）が増えたので 4。**
 //
 // **`Intent` に `knee_pattern`（膝の向きの切り替え要求）が増えたので 5。**
-pub const FORMAT_VERSION: u32 = 5;
+//
+// **`Intent` に `knee_flip_style`（反転のやり方の切り替え要求）が増えたので 6。**
+pub const FORMAT_VERSION: u32 = 6;
 
 /// 記録の先頭に 1 度だけ置く見出し。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

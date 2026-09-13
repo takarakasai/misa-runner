@@ -195,6 +195,7 @@ pub struct Controller {
     /// WBC の接地の仮定に使う。
     knee_flip_stance: Vec<[bool; 4]>,
     warned_knee_flip: bool,
+    warned_knee_style: bool,
     /// 組めなかった要求。同じ要求のあいだは組み直さない（毎周期の再計算とログを防ぐ）。
     knee_flip_failed: Option<crate::config::KneeShape>,
     /// 立ち位置の足先の xy のずらし（脚ごと、胴体座標）。`rest` の反転で車輪から
@@ -283,6 +284,7 @@ impl Controller {
             knee_flip_target: None,
             knee_flip_stance: Vec::new(),
             warned_knee_flip: false,
+            warned_knee_style: false,
             knee_flip_failed: None,
             stance_xy_offset: [nalgebra::Vector3::zeros(); 4],
             applied_offset: [nalgebra::Vector3::zeros(); 4],
@@ -969,6 +971,27 @@ impl Controller {
     }
 
     fn handle_knee_request(&mut self, cmd: &Intent) {
+        // 反転のやり方の切り替え（`h`）。反転の最中は次の反転から。
+        if let Some(style) = cmd.knee_flip_style {
+            use crate::config::KneeFlipStyle;
+            let want = match style {
+                misa_core::KneeFlipStyleRequest::Stand => KneeFlipStyle::Stand,
+                misa_core::KneeFlipStyleRequest::Rest => KneeFlipStyle::Rest,
+                misa_core::KneeFlipStyleRequest::Trot => KneeFlipStyle::Trot,
+            };
+            if want != self.cfg.gait.knee_flip_style && self.state != State::FlippingKnees {
+                if want == KneeFlipStyle::Rest && self.cfg.gait.knee_flip_rest_height_m.is_none() {
+                    if !self.warned_knee_style {
+                        log::warn!("反転のやり方 rest には gait.knee_flip_rest_height_m が要ります。いまの {} のまま", self.cfg.gait.knee_flip_style.label());
+                        self.warned_knee_style = true;
+                    }
+                } else {
+                    log::info!("膝の反転のやり方を {} → {} にしました", self.cfg.gait.knee_flip_style.label(), want.label());
+                    self.cfg.gait.knee_flip_style = want;
+                    self.warned_knee_style = false;
+                }
+            }
+        }
         let Some(req) = cmd.knee_pattern else {
             self.warned_knee_flip = false;
             self.knee_flip_failed = None;
