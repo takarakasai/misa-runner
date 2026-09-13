@@ -419,6 +419,12 @@ fn print_help() {
                                    止まって見える。** 進んだことを見せる用
          [--friction MU]           接地摩擦（既定 0.7）。**足が滑ると歩容は
                                    成立しない。**「接地中の足の滑り」を見る
+         [--hold]                  **その場に留まる**（位置保持）。歩容へ入った
+                                   時点の推定位置へ戻り続ける。要 gait.hold_position_kp
+         [--push t,dur,fx,fy,fz]   胴体を世界座標で押す（外乱応答）。
+                                   **平地の無外乱歩行は外乱について何も言わない**
+         [--csv PATH]              毎周期の「目標速度と実速度」を CSV に。
+                                   目標と実測を重ねて描くため（実速度は真値）
          [--safety-gate]           **実機と同じ安全ゲートを指令に掛ける。**
                                    既定は影（記録だけ）。トルクの上限・変化率が
                                    歩容に何をするかを実機の前に見る
@@ -623,6 +629,8 @@ const VALUE_FLAGS: &[&str] = &[
     "assume",
     "torque-nm",
     "from-record",
+    "csv",
+    "push",
     "at",
     "write",
     "max-id",
@@ -664,6 +672,7 @@ const BOOL_FLAGS: &[&str] = &[
     "forever",
     "chicken",
     "cam-fixed",
+    "hold",
     "safety-gate",
 ];
 

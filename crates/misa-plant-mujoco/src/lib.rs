@@ -436,6 +436,14 @@ impl MujocoPlant {
     }
 
     /// 胴体のワールド位置。転倒判定や進んだ距離を見るのに使う。
+    /// 胴体に世界座標の外力を `duration` 秒かける（外乱応答を見るため）。
+    ///
+    /// **脚配置で外乱に耐えられるかは、押してみないと分からない。** 平地の
+    /// 無外乱歩行の数字は、そこについて何も言っていない。
+    pub fn push(&mut self, link: &str, force: [f64; 3], duration: f64) {
+        self.sim.apply_external_force(link, force, [0.0; 3], duration);
+    }
+
     pub fn base_position(&self) -> Option<[f64; 3]> {
         self.sim.body_world_position(&self.root_link)
     }

@@ -18,6 +18,8 @@
 
 use std::time::{Duration, Instant};
 
+use std::io::Write as _;
+
 use misa_core::Plant as _;
 use misa_plant_mujoco::{MujocoPlant, SimOptions};
 
@@ -168,6 +170,9 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             // 胴体の傾きを打ち消すようにヘッド軸を動かす。ヘッド軸を持た
             // ない機体（namiashi2 は車輪 4 軸だけ）では立てても何も起きない。
             stabilize_head: cli.flag("chicken"),
+            // **その場に留まる**（`--hold`）。歩容へ入った時点の推定位置を
+            // 目標にして、押されたら戻る。試験用。
+            hold_position: cli.flag("hold"),
             // 胴体を傾けたまま歩く。**足は接地したまま胴体だけ回る**ので、
             // チキンヘッドが効いているかはここを振ると見える。
             // `gait.body_attitude_max_rad` が 0 なら効かない（既定）。
@@ -218,6 +223,8 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let interactive = !scripted;
 
     let robot = crate::robot::load_from_config(cfg)?;
+    // `--push` で外力をかける先。**`robot` は後でコントローラへ渡すので先に控える。**
+    let root_link = robot.root_link.clone();
     // **当たり判定のメッシュが欠けたまま動力学を回さない。** 落ちたメッシュ
     // のリンクは何にも当たらなくなるので、結果は「うまく動いている」ように
     // 見えてしまう。namiashi2 でこれに引っかかった (2026-09-02)。
@@ -369,6 +376,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let mut gate = misa_core::SafetyGate::new(limits.clone());
     let mut gate_torque = 0usize;
     let mut gate_torque_rate = 0usize;
+    let mut gate_recovery = 0usize;
     let recorder = match cli.str("record") {
         Some(path) => {
             let header = misa_core::record::Header {
@@ -408,6 +416,38 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|e| *e > 0);
+    // `--csv PATH`: 毎周期の「目標速度と実速度」。目標と実測を重ねて描くため。
+    let mut csv = cli.str("csv").map(|path| {
+        let mut w = std::io::BufWriter::new(
+            std::fs::File::create(path).unwrap_or_else(|e| panic!("{path} を作れません: {e}")),
+        );
+        let _ = writeln!(w, "t,vx_cmd,vy_cmd,wz_cmd,vx_true,vy_true,z,roll,pitch,x_world,y_world");
+        w
+    });
+    // `--push "t,dur,fx,fy,fz"`: 胴体を世界座標で押す（外乱応答）。
+    let push: Option<(f64, f64, [f64; 3])> = match cli.str("push") {
+        Some(spec) => {
+            let v: Vec<f64> = spec
+                .split(',')
+                .map(|x| x.trim().parse::<f64>())
+                .collect::<Result<_, _>>()
+                .map_err(|e| format!("--push {spec:?}: {e}（t,dur,fx,fy,fz）"))?;
+            if v.len() != 5 {
+                return Err(format!("--push は t,dur,fx,fy,fz の 5 つ（{spec:?}）"));
+            }
+            Some((v[0], v[1], [v[2], v[3], v[4]]))
+        }
+        None => None,
+    };
+    let mut pushed = false;
+    // 外乱のあいだと直後の姿勢。**倒れなくても「どれだけ持っていかれたか」**。
+    let mut push_roll_max = 0.0f64;
+    let mut push_pitch_max = 0.0f64;
+    let mut push_dev_max = 0.0f64;
+    let mut push_origin: Option<[f64; 3]> = None;
+    // **流されるのは減点ではない。** 見るのは「転ばないこと」と「姿勢」。
+    // 押し終わってからの傾きの戻り方を 1 s / 3 s で拾う。
+    let mut push_tilt_at: [Option<f64>; 2] = [None; 2];
     let mut active_ticks = 0usize;
     let mut q_prev_fl_thigh = 0.0f64;
     let mut active_start: Option<[f64; 3]> = None;
@@ -664,7 +704,42 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             },
             dt,
         );
+        // **シムは真値を持っている。** 位置保持の基準に入れる（実機では
+        // モーションキャプチャ等がここに入る。無ければ脚オドメトリ）。
+        if let Some(p) = plant.base_position() {
+            controller.observe_world_position([p[0], p[1]]);
+        }
         controller.observe_body(&body);
+
+        // 外乱を入れる。**押している最中と、その後 3 秒の最大を見る。**
+        if let Some((at, dur, f)) = push {
+            if !pushed && t >= at {
+                pushed = true;
+                plant.push(&root_link, f, dur);
+                push_origin = plant.base_position();
+                println!(
+                    "  t={t:.2} s  外力 ({:.0}, {:.0}, {:.0}) N を {dur:.2} s",
+                    f[0], f[1], f[2]
+                );
+            }
+            if pushed && t < at + dur + 3.0 {
+                let rpy = obs.imu.map(|m| m.rpy_rad).unwrap_or([0.0; 3]);
+                push_roll_max = push_roll_max.max(rpy[0].abs());
+                push_pitch_max = push_pitch_max.max(rpy[1].abs());
+                // 鉛直からの傾き（roll と pitch の合成）。
+                let tilt = (rpy[0].cos() * rpy[1].cos()).clamp(-1.0, 1.0).acos();
+                for (k, after) in [1.0f64, 3.0].into_iter().enumerate() {
+                    if push_tilt_at[k].is_none() && t >= at + dur + after {
+                        push_tilt_at[k] = Some(tilt);
+                    }
+                }
+                if let (Some(p), Some(o)) = (plant.base_position(), push_origin) {
+                    // 押した向きへどれだけ流されたか（指令ぶんは引かない）。
+                    let d = ((p[0] - o[0]).powi(2) + (p[1] - o[1]).powi(2)).sqrt();
+                    push_dev_max = push_dev_max.max(d);
+                }
+            }
+        }
 
         crate::dump::check_limits(&limits, &layout, &out.targets, t, &mut violations);
 
@@ -688,6 +763,30 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                         out.stance[0] as u8, out.stance[1] as u8, out.stance[2] as u8, out.stance[3] as u8,
                         vt[0], vt[1], ve.x, ve.y, p[2], body.height_m.unwrap_or(f64::NAN),
                         measured_qd.legs[0][1], fd
+                    );
+                }
+                // **目標と実速度を並べて書き出す**（`--csv PATH`）。実速度は
+                // MuJoCo の真値の差分を機体座標へ回したもので、推定器を通して
+                // いない。目標は歩容へ入った後のランプ済みの値。
+                // **最初の 1 周期は書かない。** `active_end` がまだ原点なので
+                // 差分が機体の絶対位置になってしまう。
+                if let (Some(w), true) = (csv.as_mut(), active_ticks > 0) {
+                    let vw = [(p[0] - active_end[0]) / dt, (p[1] - active_end[1]) / dt];
+                    let yaw = out.planned_yaw_rad;
+                    let (c, sn) = (yaw.cos(), yaw.sin());
+                    let _ = writeln!(
+                        w,
+                        "{t:.4},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5}",
+                        out.body_velocity[0],
+                        out.body_velocity[1],
+                        out.body_velocity[2],
+                        vw[0] * c + vw[1] * sn,
+                        -vw[0] * sn + vw[1] * c,
+                        p[2],
+                        obs.imu.map(|i| i.rpy_rad[0]).unwrap_or(0.0),
+                        obs.imu.map(|i| i.rpy_rad[1]).unwrap_or(0.0),
+                        p[0],
+                        p[1],
                     );
                 }
                 active_end = p;
@@ -835,10 +934,33 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         // 影で回すと記録には残るが指令は変わらないので、**ゲートが歩容に
         // 何をするかがシムでは見えない**。トルクのレート制限のように
         // 「実機でだけ効く」ものを実機の前に確かめるための口。
+        // **外乱から立ち直る窓を開ける。** 引き金は捕捉点パルスと同じ
+        // 「速度誤差が不感帯を超えた」。踏み出しの目標は正当に速いので、
+        // ここで言っておかないとゲートが異常と見なして削る。
+        if cfg.gait.recovery_target_rate_rad_s > 0.0 || cfg.gait.recovery_torque_scale > 0.0 {
+            let db = cfg.gait.mpc_capture_point_deadband_m_s;
+            if db > 0.0 {
+                if let Some(v) = body.velocity_world {
+                    let yaw = out.planned_yaw_rad;
+                    let (c, sn) = (yaw.cos(), yaw.sin());
+                    let vx_b = v.x * c + v.y * sn;
+                    let vy_b = -v.x * sn + v.y * c;
+                    let err = ((vx_b - out.body_velocity[0]).powi(2)
+                        + (vy_b - out.body_velocity[1]).powi(2))
+                    .sqrt();
+                    if err > db {
+                        gate.begin_recovery(std::time::Duration::from_millis(200));
+                    }
+                }
+            }
+        }
         if use_gate {
             let verdict = gate.apply(&mut outgoing, &obs, Duration::from_secs_f64(dt));
             gate_torque_rate += verdict.torque_rate_limited.len();
             gate_torque += verdict.torque_limited.len();
+            if verdict.recovery_active {
+                gate_recovery += 1;
+            }
         }
         // 実トルクと実速度から電流と機械出力を積む。**歩容中だけ。**
         if out.state == crate::controller::State::Active {
@@ -1208,7 +1330,19 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     }
     if use_gate {
         println!(
-            "安全ゲート（--safety-gate）が丸めた延べ軸数  トルク {gate_torque} / トルクの変化率 {gate_torque_rate}"
+            "安全ゲート（--safety-gate）が丸めた延べ軸数  トルク {gate_torque} / トルクの変化率 {gate_torque_rate} / 復帰の窓が開いた周期 {gate_recovery}"
+        );
+    }
+    if pushed {
+        let f = |v: Option<f64>| v.map(|x| x.to_degrees()).unwrap_or(f64::NAN);
+        println!(
+            "外乱の応答  傾き最大 roll {:.2}° / pitch {:.2}°  \
+             戻り 1 s 後 {:.2}° / 3 s 後 {:.2}°  流された {:.3} m（**流されるのは可**）",
+            push_roll_max.to_degrees(),
+            push_pitch_max.to_degrees(),
+            f(push_tilt_at[0]),
+            f(push_tilt_at[1]),
+            push_dev_max
         );
     }
     if cur_n > 0 {
