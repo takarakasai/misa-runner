@@ -1338,7 +1338,12 @@ impl Controller {
         };
         // 反転中の胴体高さ。脚が一直線になる瞬間の足先の下がり (上腿+下腿)·cos(ロール)
         // + 3 cm を床から確保する（keel 0.30 → 0.34 m）。
-        let h_flip = h_ref.max(l_total * roll_mag.cos() + 0.03).max(g.knee_flip_height_m.unwrap_or(0.0));
+        // `knee_flip_height_m` があればそのまま（低くもできる。床に近づきすぎれば計画時の
+        // 検査が止める）。無ければ「一直線の下がり + 3 cm」と立ち高さの大きいほう。
+        let h_flip = match g.knee_flip_height_m {
+            Some(h) => h,
+            None => h_ref.max(l_total * roll_mag.cos() + 0.03),
+        };
 
         match g.knee_flip_style {
             KneeFlipStyle::Rest => {
