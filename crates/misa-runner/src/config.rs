@@ -1346,6 +1346,12 @@ pub enum KneeFlipStyle {
     /// 下がり (上腿+下腿)·cos(ロール) が立ち高さを超える機体では、反転中だけ胴体を
     /// 上げる（keel は 0.30 → 0.34 m）。車輪には頼らない。
     Trot,
+    /// **反転する脚を一斉に**（`knee_flip_reverse_style = "slide"` 前提）。
+    ///
+    /// 足を床から離さないので、何脚を同時に反転させても 4 点接地のまま。
+    /// `<<` ↔ `><` は前の 2 脚、`><` ↔ `>>` は後ろの 2 脚、`<>` ↔ `><` は 4 脚とも
+    /// 一斉に滑らせて折り返す。胴体を寄せる段も要らない（重心は動かさない）。
+    All,
 }
 
 impl KneeFlipStyle {
@@ -1354,6 +1360,7 @@ impl KneeFlipStyle {
             Self::Stand => "1 脚ずつ（3 脚支持、stand）",
             Self::Rest => "4 脚まとめて（車輪・腹に載せる、rest）",
             Self::Trot => "対角 2 脚ずつ（床を滑らせる、trot）",
+            Self::All => "反転する脚を一斉に（床を滑らせる、all）",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -1361,6 +1368,7 @@ impl KneeFlipStyle {
             "stand" => Some(Self::Stand),
             "rest" => Some(Self::Rest),
             "trot" => Some(Self::Trot),
+            "all" => Some(Self::All),
             _ => None,
         }
     }

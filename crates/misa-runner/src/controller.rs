@@ -1026,6 +1026,7 @@ impl Controller {
                 misa_core::KneeFlipStyleRequest::Stand => KneeFlipStyle::Stand,
                 misa_core::KneeFlipStyleRequest::Rest => KneeFlipStyle::Rest,
                 misa_core::KneeFlipStyleRequest::Trot => KneeFlipStyle::Trot,
+                misa_core::KneeFlipStyleRequest::All => KneeFlipStyle::All,
             };
             if want != self.cfg.gait.knee_flip_style && self.state != State::FlippingKnees {
                 if want == KneeFlipStyle::Rest && self.cfg.gait.knee_flip_rest_height_m.is_none() {
@@ -1567,7 +1568,7 @@ impl Controller {
                 cur_floor.set(-h_ref);
                 // 5. 立ち上がった足の位置がそのまま新しい立ち位置になる（置き替え無し）。
             }
-            KneeFlipStyle::Trot => {
+            KneeFlipStyle::Trot | KneeFlipStyle::All => {
                 // **対角 2 脚で支えて、残りの対角 2 脚をまとめて反転する。** 車輪には
                 // 頼らない。2 点接触では支持線まわりの回転を接地力で止められない
                 // （角運動量は重力でしか変わらない）ので、2 脚でいる時間を短くする：
@@ -1592,17 +1593,43 @@ impl Controller {
                 let shifted = |slot: usize, u: f64, n: nalgebra::Vector2<f64>, z: f64| {
                     nalgebra::Vector3::new(feet_ref[slot].x - u * n.x, feet_ref[slot].y - u * n.y, z)
                 };
-                for pair in [[0usize, 3], [1, 2]] {
-                    let slots: Vec<usize> = pair.iter().copied().filter(|s| flip[*s]).collect();
+                // 組の分け方。`trot` は対角 2 脚ずつ、`all` は反転する脚を一斉に。
+                let all_at_once = g.knee_flip_style == KneeFlipStyle::All;
+                if all_at_once && !slide_path {
+                    return Err("一斉の反転（all）は knee_flip_reverse_style = \"slide\" が要ります（脚を浮かせると支える脚が無くなる）".into());
+                }
+                let groups: Vec<(Vec<usize>, Option<[usize; 2]>, String)> = if all_at_once {
+                    let slots: Vec<usize> = (0..4).filter(|s| flip[*s]).collect();
+                    let tag = format!(
+                        " {}",
+                        slots.iter().map(|s| leg_name(*s)).collect::<Vec<_>>().join("+")
+                    );
+                    vec![(slots, None, tag)]
+                } else {
+                    [[0usize, 3], [1, 2]]
+                        .into_iter()
+                        .map(|pair| {
+                            let slots: Vec<usize> = pair.iter().copied().filter(|s| flip[*s]).collect();
+                            let support = if pair == [0, 3] { [1, 2] } else { [0, 3] };
+                            let tag = format!(" {}+{}", leg_name(pair[0]), leg_name(pair[1]));
+                            (slots, Some(support), tag)
+                        })
+                        .collect()
+                };
+                for (slots, support_pair, tag) in groups {
                     if slots.is_empty() {
                         continue;
                     }
-                    let support: [usize; 2] = if pair == [0, 3] { [1, 2] } else { [0, 3] };
+                    // 一斉のときは支える組が無い（足を床から離さないので要らない）。
+                    let support: [usize; 2] = support_pair.unwrap_or([1, 2]);
                     cur_support.set(support);
-                    let tag = format!(" {}+{}", leg_name(pair[0]), leg_name(pair[1]));
+                    // **滑らせる脚は接地したまま**なので立脚として扱う（前置トルクの
+                    // 配分・2 脚支持の釣り合い・水平保持がそのぶん正しくなる）。
                     let mut stance = [true; 4];
-                    for &s in &slots {
-                        stance[s] = false;
+                    if !slide_path {
+                        for &s in &slots {
+                            stance[s] = false;
+                        }
                     }
                     // 支持線（支える対角の足先を結ぶ線）とその法線 n。
                     let (a, b) = (feet_ref[support[0]], feet_ref[support[1]]);
@@ -1628,6 +1655,9 @@ impl Controller {
                     let mut u = 0.0;
                     let mut lift = cur;
                     for _ in 0..3 {
+                        if support_pair.is_none() {
+                            break;
+                        }
                         for s in 0..4 {
                             let z = if stance[s] { -h_flip } else { z_float };
                             lift.legs[s] = ik(s, shifted(s, u, n, z), cur_forward.get()[s])?;
@@ -1641,7 +1671,12 @@ impl Controller {
                     }
                     // 釣り合いの諸元（設計の確認用）。支持線まわりの慣性は重心まわりの
                     // 慣性を d に射影したもの、不安定極は √(m·g·h / (I_cm + m·h²))。
-                    {
+                    if support_pair.is_none() {
+                        log::info!(
+                            "一斉の反転{tag}: {} 脚を同時に、足を床に着けたまま滑らせます（胴体 {:.3} m、寄せ無し）",
+                            slots.len(), h_flip
+                        );
+                    } else {
                         let bi = self.robot.body_inertia_at(&lift);
                         let d3 = nalgebra::Vector3::new(d.x, d.y, 0.0);
                         let i_cm = (d3.transpose() * bi.inertia_body * d3)[(0, 0)];
@@ -1662,8 +1697,11 @@ impl Controller {
                     }
                     cur_shift.set(u);
                     // 寄せるは実行中に上書きされる（推定込みの重心が支持線に乗る所へ）。
-                    cur_kind.set(KneeStepKind::Adjust);
-                    push(format!("寄せる{tag}"), cur, 2.0 * phase, [true; 4]);
+                    // 一斉のときは寄せない（足を床から離さないので重心を動かす要が無い）。
+                    if support_pair.is_some() {
+                        cur_kind.set(KneeStepKind::Adjust);
+                        push(format!("寄せる{tag}"), cur, 2.0 * phase, [true; 4]);
+                    }
                     // 重心の探り: 対角 2 脚を少しだけ浮かせて保持し、倒れ始める角加速度
                     // から実機の重心のずれを測る → 寄せ直す。2 脚とも浮かせる組だけ。
                     if slots.len() == 2 && g.knee_flip_probe_rounds > 0 && g.knee_flip_probe_lift_m > 0.0 {
@@ -2175,7 +2213,6 @@ impl Controller {
     /// 立脚の足先を `Δz = kp·(Δroll·y − Δpitch·x)` だけ動かす（高い側の脚を縮める）。
     /// 浮かせている脚の `Δz` は 0 へ戻す（着いたときに段差を作らない）。
     fn level_stance_legs(&mut self, idx: usize, attitude_rad: [f64; 3], dt: f64) {
-        use crate::robot::knee_forward_for;
         use quadruped_gait::solve_leg_ik;
         let g = &self.cfg.gait;
         let (kp, max, rate) = (
@@ -2187,15 +2224,29 @@ impl Controller {
             return;
         }
         let Some(stance) = self.knee_flip_stance.get(idx).copied() else { return };
-        let forward: [bool; 4] = self
-            .knee_flip_forward
-            .get(idx)
-            .copied()
-            .unwrap_or_else(|| std::array::from_fn(|s| knee_forward_for(g.knee_pattern, s)));
         let d_roll = attitude_rad[0] - self.knee_flip_level_ref[0];
         let d_pitch = attitude_rad[1] - self.knee_flip_level_ref[1];
         let step = rate * dt;
         let kin = self.stance_kinematics_with_offset(self.commanded_height_m());
+        // **膝の向きの枝を跨がない IK。** 反転の途中は計画が枝の間を通っている
+        // （足を滑らせる `all` / `slide` では立脚の膝も反転する）ので、枝を決め打ちで
+        // 解くと目標角が 0.4 rad 跳ぶ（実測 79 rad/s）。いまの目標に近いほうを選ぶ。
+        let nearest = |leg, target: nalgebra::Vector3<f64>, sg: [f64; 3], near: [f64; 3]| -> Option<[f64; 3]> {
+            let mut best: Option<([f64; 3], f64)> = None;
+            for fwd in [true, false] {
+                let sol = solve_leg_ik(leg, target, fwd);
+                if !sol.is_reachable() {
+                    continue;
+                }
+                let (h, t, c) = sol.angles();
+                let q = [h * sg[0], t * sg[1], c * sg[2]];
+                let d: f64 = (0..3).map(|k| (q[k] - near[k]).powi(2)).sum();
+                if best.as_ref().map(|(_, bd)| d < *bd).unwrap_or(true) {
+                    best = Some((q, d));
+                }
+            }
+            best.map(|(q, _)| q)
+        };
         // 計画（再生中の目標）の足先。ここへ Δz を足して IK し直す。
         let feet = self.robot.feet_from_posture(&self.targets);
         for slot in 0..4 {
@@ -2212,13 +2263,11 @@ impl Controller {
                 continue;
             }
             let target = nalgebra::Vector3::new(f.x, f.y, base_z + dz);
-            let sol = solve_leg_ik(kin.legs()[slot], target, forward[slot]);
-            if !sol.is_reachable() {
+            let near = self.targets.legs[slot];
+            let Some(q) = nearest(kin.legs()[slot], target, self.robot.signs[slot], near) else {
                 continue;
-            }
-            let (hh, t, c) = sol.angles();
-            let sg = self.robot.signs[slot];
-            self.targets.legs[slot] = [hh * sg[0], t * sg[1], c * sg[2]];
+            };
+            self.targets.legs[slot] = q;
             self.knee_flip_level_dz[slot] = dz;
         }
     }
