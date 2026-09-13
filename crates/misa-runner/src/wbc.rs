@@ -299,6 +299,10 @@ pub struct WbcLayer {
     warned_infeasible: bool,
     /// 検算に連続で落ちた周期数。**1 周期だけなら想定内。**
     rejected_run: usize,
+    /// 直近の解での優先度 0 の等式残差 `‖A·x − b‖` と最悪の不等式マージン
+    /// `min(f − D·x)`（負なら破っている）。**解いた後にしか分からない。**
+    p0_eq_residual: f64,
+    p0_iq_margin: f64,
     /// 遊脚の加速度誤差積分（`swing_accel_integral_k`）の状態:
     /// 「離地時の q̇ に WBC の q̈ を積んだ速度」。立脚中は意味を持たない。
     swing_vel_pred: [[f64; 3]; 4],
@@ -431,6 +435,8 @@ impl WbcLayer {
             last_swing_target: [[0.0; 3]; 4],
             warned_infeasible: false,
             rejected_run: 0,
+            p0_eq_residual: 0.0,
+            p0_iq_margin: 0.0,
             swing_vel_pred: [[0.0; 3]; 4],
             was_swing: [false; 4],
         })
@@ -665,7 +671,12 @@ impl WbcLayer {
         let grf_ok = !self.cfg.solution_check
             || stance_count == 0
             || (f_z_total >= lower && f_z_total <= self.cfg.check_grf_max_frac * weight);
-        let sane = finite && grf_ok;
+        // **優先度 0 が満たされたか。** 解の値ではなく残差を見る唯一の直接
+        // 証拠（[`crate::config::WbcConfig::check_eom_residual`]）。
+        let eom_ok = !self.cfg.solution_check
+            || self.cfg.check_eom_residual <= 0.0
+            || self.p0_eq_residual <= self.cfg.check_eom_residual;
+        let sane = finite && grf_ok && eom_ok;
         if !sane {
             self.x_prev = None;
             self.rejected_run += 1;
@@ -678,6 +689,11 @@ impl WbcLayer {
                      接地フラグ・摩擦・トルク上限・質量を確かめてください",
                     if !finite {
                         "数値が壊れています".to_string()
+                    } else if !eom_ok {
+                        format!(
+                            "優先度 0 の相対残差 {:.2e} がしきい値 {:.0e} を超えています",
+                            self.p0_eq_residual, self.cfg.check_eom_residual
+                        )
                     } else {
                         format!(
                             "接地 {stance_count} 本で接地力の合計 {f_z_total:.1} N、体重 {weight:.1} N"
@@ -710,6 +726,10 @@ impl WbcLayer {
                 f(sol.q_ddot[0]), f(sol.q_ddot[1]), f(sol.q_ddot[2]),
                 f(sol.q_ddot[3]), f(sol.q_ddot[4]), f(sol.q_ddot[5]),
                 (0..4).map(|i| sol.f_grf[3 * i + 2]).sum::<f64>(),
+            );
+            eprintln!(
+                "      p0 相対残差 {:.3e} マージン {:.3}",
+                self.p0_eq_residual, self.p0_iq_margin
             );
             let mut sat = Vec::new();
             for (i, t) in sol.tau.iter().enumerate() {
@@ -986,6 +1006,7 @@ impl WbcLayer {
             x_prev: self.x_prev.as_ref(),
             prox_weight: self.cfg.prox_weight,
         };
+        let p0 = task_0.clone();
         let l0 = wbc::HoQp::new_with_higher_warm(task_0, None, &warm);
         let l1 = wbc::HoQp::new_with_higher_warm(task_1, Some(&l0), &warm);
         let l2 = wbc::HoQp::new_with_higher_warm(task_2, Some(&l1), &warm);
@@ -999,6 +1020,22 @@ impl WbcLayer {
             );
         }
         let x = l2.solution();
+        // **優先度 0 が実際に満たされたかを解の後に確かめる。** 階層 LSQ は
+        // スラックで不等式を逃がすので、**満たせなかったことが解の値には
+        // 現れない**。残差とマージンを直接測るのが唯一の直接証拠。
+        // **重みに依らない相対量にする。** タスクには重み（既定 1000）が
+        // 掛かっているので、絶対値のしきい値は設定を変えると意味を失う。
+        self.p0_eq_residual = if p0.n_eq() > 0 {
+            let scale = p0.b.norm().max(1.0);
+            (&p0.a * x - &p0.b).norm() / scale
+        } else {
+            0.0
+        };
+        self.p0_iq_margin = if p0.n_iq() > 0 {
+            (&p0.f - &p0.d * x).min()
+        } else {
+            0.0
+        };
         WbcSolution {
             q_ddot: x.rows(dims.q_offset(), dims.nv).into_owned(),
             f_grf: x.rows(dims.f_offset(), 3 * dims.nc).into_owned(),
@@ -1602,6 +1639,45 @@ mod tests {
             })
         });
         assert!(!same, "解を捨てたのにトルクが変わっていない");
+    }
+
+    /// **優先度 0 の残差でも捨てられる。** 接地力の検査と独立した第 2 の目で、
+    /// **機体にも質量にも重みにも依らない**（相対残差なので）。ここでは
+    /// 健全な立位に無茶なしきい値を当てて経路を確かめている。
+    #[test]
+    fn a_large_priority_zero_residual_also_rejects() {
+        let r = robot();
+        let stand = crate::robot::rest_pose(&crate::config::AppConfig::default(), &r);
+        let zero = JointVec::zeros();
+        let obs = || WbcObservation {
+            measured_q: &stand,
+            measured_qd: &zero,
+            target_q: &stand,
+            target_foot_body: [na::Vector3::zeros(); 4],
+            attitude_rad: [0.0; 3],
+            gyro_rad_s: [0.0; 3],
+            planned_yaw_rad: 0.0,
+            body_velocity: [0.0; 3],
+            body: level_stand(),
+            mpc: None,
+            stance: [true; 4],
+            contact_weight: [1.0; 4],
+            dt: 0.005,
+        };
+        // 既定（無効）では通る。
+        let mut off = WbcLayer::new(
+            &r,
+            &WbcConfig { enabled: true, ..WbcConfig::default() },
+        )
+        .unwrap();
+        assert!(!off.solve(&obs()).status.rejected);
+        // **残差ゼロを要求すれば必ず落ちる**（数値解に厳密な 0 は無い）。
+        let mut strict = WbcLayer::new(
+            &r,
+            &WbcConfig { enabled: true, check_eom_residual: 1e-30, ..WbcConfig::default() },
+        )
+        .unwrap();
+        assert!(strict.solve(&obs()).status.rejected);
     }
 
     /// **4 脚とも浮いていれば接地力 0 が正しい。** そこで検算を効かせると
