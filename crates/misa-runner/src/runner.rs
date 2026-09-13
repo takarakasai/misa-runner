@@ -575,7 +575,7 @@ pub fn run(
     // **Plant が名乗らないモードでは出さない。** 実機のトルク制御は、
     // トルク定数を書くまで単位が食い違う（`AppConfig::torque_unit_mismatch`）。
     // ここで止めないと、N·m が電流 (A) として 12 軸ぶん線に乗る。
-    // MIT しか無い機体（keel のブリッジ）は位置出力だけ受けられる
+    // MIT しか無い機体（hayaashi のブリッジ）は位置出力だけ受けられる
     // （[`crate::wbc::WbcRunner::plant_can`]）。
     if let Some(w) = wbc.as_ref().filter(|w| w.is_active()) {
         let want = w.control_mode();

@@ -780,7 +780,7 @@ impl GaitControllerKind {
 /// ホスト側に帰還ループは増えない。`[wbc]` の位置出力との違いはそこ
 /// （あちらは胴体の姿勢・高さ・速度の PD が τ_ff に乗る）。
 ///
-/// MIT の kp が低い機体（keel は calf が kp 500 / kd 5 まで）で、PD だけでは
+/// MIT の kp が低い機体（hayaashi は calf が kp 500 / kd 5 まで）で、PD だけでは
 /// 自重を持てずに沈む・後退するときの最初の一手。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -981,7 +981,7 @@ pub struct GaitTuning {
     /// 基準姿勢を左右で平均するか（b / c にだけ効く）。
     ///
     /// 実測はゲインと重力でつり合った姿勢なので左右で 2〜3 cm ずれる
-    /// （keel の実測で足先 x が FL/FR 20 mm、RL/RR 28 mm）。そのまま基準にする
+    /// （hayaashi の実測で足先 x が FL/FR 20 mm、RL/RR 28 mm）。そのまま基準にする
     /// と左右差ごと焼き付く。**黙って対称化はしない** — 本当に非対称な機体も
     /// あるので、取ったかどうかをここに残す。
     #[serde(default)]
@@ -1127,7 +1127,7 @@ pub struct GaitTuning {
     /// MPC の接地力のコスト（`SrbdMpcConfig::r_diag`）。`None`（既定）なら
     /// 質量から決める: namiashi（2.4 kg）で詰めた 1e-3 を `(2.4 g / m g)²` で
     /// 伸ばし、力を体重で割った無次元量に対して同じ罰にする。重い機体で
-    /// 既定の 1e-3 のままだと、体重を支えない解が最適になる（keel）。
+    /// 既定の 1e-3 のままだと、体重を支えない解が最適になる（hayaashi）。
     #[serde(default)]
     pub mpc_force_cost: Option<f64>,
     /// 胴体の状態（高さ・速度）をどう推定するか。
@@ -1145,7 +1145,7 @@ pub struct GaitTuning {
     ///
     /// quadruped-gait の既定は 0.05 だが、**追従の悪い相手には正帰還になる**
     /// （観測速度と指令の差で着地点を動かすので、追従誤差を増幅する）。
-    /// namiashi では MPC 単体で trot が +0.496 → +0.154 m に落ち、keel では
+    /// namiashi では MPC 単体で trot が +0.496 → +0.154 m に落ち、hayaashi では
     /// MPC + WBC が −0.15 m・ヨー 63° で歩けなかった（0 にしたら +1.16 m、
     /// 96 %）。articara も 0 に落としている。効かせるなら機体で値を出す。
     #[serde(default = "default_mpc_capture_point_gain_s")]

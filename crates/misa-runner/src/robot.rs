@@ -128,7 +128,7 @@ impl Robot {
         // **misarta は根リンク自身の `[link.inertial]` を落とす。** `build_model`
         // は関節の子リンクにだけ慣性を付け、根（joint 0 = universe）はゼロの
         // まま。namiashi は根の `trunk` が質量 0 で慣性を fixed 関節の子
-        // （`trunk_interia`）に持たせているので気づかなかったが、keel は
+        // （`trunk_interia`）に持たせているので気づかなかったが、hayaashi は
         // `base_link` に 18.3 kg が直接書いてあり、WBC と MPC が 53 kg の機体を
         // 35 kg と思って走った（MuJoCo は .misa から直接作るので 53 kg。
         // 2026-09-09、trot 0.12 で −0.15 m・ヨー 63°）。固定ベースの動力学では
@@ -245,9 +245,9 @@ impl Robot {
         // **接地力のコストと上限は質量で伸ばす。** quadruped-gait の既定
         // （`r_diag = 1e-3`、`max_normal_force = 200 N`）は namiashi（2.4 kg）で
         // 詰めた値で、重い機体ではそのままだと (a) 接地力 1 本が 200 N で
-        // 頭打ち（keel 35 kg は trot の 2 本支持で 1 本 172 N、53 kg なら 260 N）、
+        // 頭打ち（hayaashi 35 kg は trot の 2 本支持で 1 本 172 N、53 kg なら 260 N）、
         // (b) 力の 2 乗のコストが追従のコストを圧倒して、体重を支えない解が
-        // 最適になる。keel の MuJoCo でこれが起きた（MPC の接地力の合計が
+        // 最適になる。hayaashi の MuJoCo でこれが起きた（MPC の接地力の合計が
         // 体重の 1/4、胴体の目標加速度が −8 m/s²、trot 0.12 が −0.15 m・
         // ヨー 63°）。力を「体重で割った無次元量」で罰する形に揃える。
         let weight_n = body.mass_kg * 9.806_65;

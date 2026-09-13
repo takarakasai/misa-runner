@@ -492,7 +492,7 @@ impl Plant for MujocoPlant {
                 ControlMode::Position | ControlMode::Impedance => {
                     self.model.joints[ji].actuator_mode = ActuatorMode::Position;
                     // **指令に kp/kd が載っていればそれを使う。** ブリッジ越しの
-                    // 機体（keel）は `[hardware.mit_gains]` を毎周期載せるので、
+                    // 機体（hayaashi）は `[hardware.mit_gains]` を毎周期載せるので、
                     // シムでも同じ関節別のゲインで回る（実機は calf だけ kp の
                     // 上限が低い、という事情をシムで見られる）。載っていない
                     // 機体（シリアル）は `--kp` / `--kv` の一律の値。

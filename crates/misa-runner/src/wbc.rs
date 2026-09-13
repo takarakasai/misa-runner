@@ -1238,11 +1238,11 @@ impl WbcRunner {
     /// 名乗っているモードそのものに加えて、**MIT（インピーダンス）しか無い
     /// 機体は位置出力を受けられる**。位置出力の指令は「目標角 + 前置トルク」で、
     /// MIT の機体はそれに kp/kd を毎周期載せて `τ = kp(q_d − q) − kd·q̇ + τ_ff`
-    /// にする（[`crate::snapshot::command`]）。WBC を切った素の歩容が keel の
+    /// にする（[`crate::snapshot::command`]）。WBC を切った素の歩容が hayaashi の
     /// ブリッジへ出ているのも同じ形なので、位置出力にしても線に乗る量の
     /// 意味は変わらない。**トルク出力は含めない** — kp = kd = 0 で τ だけ
     /// 出す形になり、ゲインで抑えていた誤差がそのまま出る（MuJoCo でも
-    /// keel のトルク出力は未調整で後退する）。使うなら Plant 側で
+    /// hayaashi のトルク出力は未調整で後退する）。使うなら Plant 側で
     /// `Torque` を名乗ってから。
     pub fn plant_can(modes: &[misa_core::ControlMode], mode: misa_core::ControlMode) -> bool {
         use misa_core::ControlMode::{Impedance, Position};
@@ -1410,7 +1410,7 @@ mod tests {
         assert_eq!(w.output(), WbcOutput::Torque);
         w.apply_request(Some(WbcRequest::Off), &all);
         assert!(!w.is_active());
-        // MIT しか名乗らない Plant（keel のブリッジ）: 位置出力は MIT の
+        // MIT しか名乗らない Plant（hayaashi のブリッジ）: 位置出力は MIT の
         // 「目標角 + 前置トルク + kp/kd」そのものなので入る。トルクは拒否。
         let mit_only = [ControlMode::Impedance];
         assert!(WbcRunner::plant_can(&mit_only, ControlMode::Position));

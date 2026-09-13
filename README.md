@@ -8,7 +8,7 @@ WBC / MPC・MuJoCo での検証**をここに持つ。
 機体ごとのもの（配線・校正値・モデル・立ち上げ手順・評価結果）は機体側の
 リポジトリが持ち、そちらの実行ファイルが `misa_runner::main_with` を呼ぶ
 （namiashi → [namiashi-runner2](https://github.com/takarakasai/namiashi-runner2)、
-keel → keel-runner）。`misa-run` 単体は同梱の汎用モデル `models/testquad` と
+hayaashi → hayaashi-runner）。`misa-run` 単体は同梱の汎用モデル `models/testquad` と
 `robots/testquad.toml` で動く。
 
 ## できること
@@ -28,8 +28,8 @@ keel → keel-runner）。`misa-run` 単体は同梱の汎用モデル `models/t
 
 **引き継ぎ・設計判断**は [`doc/handover.md`](doc/handover.md)。**機体ごとの
 配線・校正値・立ち上げ手順・SBC の運用は機体側のリポジトリ**にある（namiashi は
-[namiashi-runner2](https://github.com/takarakasai/namiashi-runner2)、keel は
-keel-runner）。このリポジトリは機体に依らない部分だけを持つ。
+[namiashi-runner2](https://github.com/takarakasai/namiashi-runner2)、hayaashi は
+hayaashi-runner）。このリポジトリは機体に依らない部分だけを持つ。
 
 ## ハードウェア
 
@@ -239,7 +239,7 @@ cargo run --release --features sim -- \
 のがこちらの主目的で、周期・遊脚高さ・歩幅・接地比が対象。
 
 ```sh
-cargo run --release --features sim -- sim --robot robots/keel.toml \
+cargo run --release --features sim -- sim --robot robots/hayaashi.toml \
     --gait trot --kp 1200 --kv 30 --timestep 0.0005 --pilot keys
 ```
 
@@ -278,7 +278,7 @@ MuJoCo の trot 0.3 で 位置 → トルク → OFF → 位置 と替えても�
 保たれた（`--wbc-script "3:torque,7:off,11:position"` で再現できる）。
 **Plant が扱えない出力は拒否して今のまま**（実機はトルク定数を書くまで
 トルク出力に替わらない。`WbcRunner::apply_request`）。**MIT（インピーダンス）
-しか名乗らない機体 — keel の STM ブリッジ — は位置出力だけ受けられる**:
+しか名乗らない機体 — hayaashi の STM ブリッジ — は位置出力だけ受けられる**:
 位置出力の指令は「目標角 + 前置トルク」で、MIT の機体はそれに kp/kd を
 毎周期載せるので、WBC を切った素の歩容と線に乗る量の意味が変わらない
 （`WbcRunner::plant_can`。起動時の検査も同じ判断）。要求は
@@ -288,7 +288,7 @@ MuJoCo の trot 0.3 で 位置 → トルク → OFF → 位置 と替えても�
 台本からも同じ経路を通せる。**端末が要らないので試験と掃引に使える。**
 
 ```sh
-misa-run sim --robot robots/keel.toml --gait trot --vx 0.12 \
+misa-run sim --robot robots/hayaashi.toml --gait trot --vx 0.12 \
     --cycle 0.45 --swing 0.06 --step-length 0.12 --duty 0.55
 
 # 歩きながら替える（8 秒で切り替え、跳ねないかを見る）
@@ -299,7 +299,7 @@ misa-run sim ... --tune-at 8.0 --cycle 1.00
 要求レートと可動域で、同じフラグを受け付ける。
 
 ```sh
-misa-run dump --robot robots/keel.toml --gait trot --swing 0.10
+misa-run dump --robot robots/hayaashi.toml --gait trot --swing 0.10
 #   FL  hip  0.02/8.00  thigh  3.1/8.00  calf  9.16/8.00 ✗   ← ゲート超え
 ```
 
@@ -407,10 +407,10 @@ MIT モードで持つ。
 （2026-09-10 以降。`--kp` / `--kv` は載っていない機体 — シリアル — の一律の値）。
 ブリッジ越しの機体は kp/kd を毎周期指令に載せるので、MuJoCo の位置制御に
 同じ値を入れれば実機の MIT と同じ形になる。関節別に上限が違う機体
-（keel は hip / thigh kp 2000、calf は kp 500・kd 5 まで）を実機の値で評価できる。
-keel の trot 0.12 で kp 300 / kd 2 なら素の歩容は −0.30 m（後退）、MPC + WBC
+（hayaashi は hip / thigh kp 2000、calf は kp 500・kd 5 まで）を実機の値で評価できる。
+hayaashi の trot 0.12 で kp 300 / kd 2 なら素の歩容は −0.30 m（後退）、MPC + WBC
 位置出力で +0.50 m。kp 2000 / 2000 / 500、kd 20 / 20 / 5 で +0.52 m と +1.12 m
-（keel-runner の `doc/bringup_checklist_keel.md` 段階 1-3 の表）。calf の減衰が
+（hayaashi-runner の `doc/bringup_checklist_hayaashi.md` 段階 1-3 の表）。calf の減衰が
 足りないぶんを埋めるのは WBC の前置トルクで、hip / thigh の kd を上げても戻らない。
 
 うまくいっているかは終了時の 3 行で見る:
@@ -722,7 +722,7 @@ CHAMP の crawl は重心を支持三角形へ寄せないので、1 本上げ�
 **既定では IMU も脚オドメトリも生値のまま WBC と MPC に入る。** 姿勢角は IMU 側で
 融合済みだが、ジャイロと胴体速度（J·q̇ を接地脚で平均しただけ）は微分系の量で、
 実機ではノイズとブリッジの遅れがそのまま WBC の kd 項（attitude_kd 8、height_kd 20、
-velocity_kd 10）に掛かって τ_ff に出る。keel の実機で WBC 位置出力が立ち姿勢のあと
+velocity_kd 10）に掛かって τ_ff に出る。hayaashi の実機で WBC 位置出力が立ち姿勢のあと
 振動した（2026-09-10）のはこの経路が疑わしい。
 
 ```toml
@@ -736,7 +736,7 @@ estimator_velocity_lpf_hz = 15.0   # 同上
 `gyro_body`」、速度が「WBC の高さ・速度 kd 項・MPC の速度閉ループ」。姿勢角には
 掛けない。`estimator = "kalman"` を選んだ場合の速度にも同じフィルタが掛かる。
 
-MuJoCo（測定が綺麗なので効果は出ないが、害が無いことの確認。keel、trot 0.12）:
+MuJoCo（測定が綺麗なので効果は出ないが、害が無いことの確認。hayaashi、trot 0.12）:
 
 | | 無し | 15 Hz | 8 Hz |
 |---|---|---|---|
@@ -769,7 +769,7 @@ gravity_feedforward_scale = 1.0   # 実機で段階的に入れるなら 0.25 �
 解く。**実機で WBC を入れて振動したときの、いちばん帰還の少ない一手。**
 WBC が有効で解けている周期は WBC の解が優先され、こちらは使われない。
 
-MIT の kp が低い機体で効く。keel（calf は kp 500 / kd 5 が上限）の MuJoCo、
+MIT の kp が低い機体で効く。hayaashi（calf は kp 500 / kd 5 が上限）の MuJoCo、
 trot 0.12、歩容 10 s:
 
 | kp [hip, thigh, calf] / kd | 素の歩容 | `full` | `legs` | CHAMP + WBC 位置 |
@@ -984,7 +984,7 @@ misa-run stance capture --robot robots/x.toml --from-record run.rec --at 5.0    
 `check` の数字と、`sim --vx 0 --features render --video DIR --cam-fixed --cam-az 90`
 を 2 つのプロファイルで撮って同じフレームを並べる。
 
-keel の実測姿勢（`doc/reference_stance.md` §1）を入れて MuJoCo で立たせると
+hayaashi の実測姿勢（`doc/reference_stance.md` §1）を入れて MuJoCo で立たせると
 **pitch −4.24°**（実機 IMU −4.25°、順運動学 −4.36°）で、モデルの幾何が実機と合って
 いることの回帰になっている。
 
@@ -1030,9 +1030,9 @@ misa-run sim --robot robots/testquad.toml --gait-controller mpc --wbc-output pos
 （Cheetah 級の 9 kg・慣性 0.07/0.26/0.24）で走り、namiashi（2.4 kg・
 0.008/0.034/0.034）とは 4〜8 倍ずれる。**接地力のコスト（`r_diag`）と上限も
 質量で伸ばす**（力を体重で割った無次元量で罰する。`[gait] mpc_force_cost` で
-上書き可）— namiashi の値のままだと keel（53 kg）では体重を支えない解が最適に
+上書き可）— namiashi の値のままだと hayaashi（53 kg）では体重を支えない解が最適に
 なった。**misarta は根リンク自身の `[link.inertial]` を落とす**ので
-`Robot::load` で補っている（keel は `base_link` の 18.3 kg が消えて 35 kg に
+`Robot::load` で補っている（hayaashi は `base_link` の 18.3 kg が消えて 35 kg に
 見えていた。namiashi は根の質量が 0 なので無事）。`misa-run check` が実際に
 入る値を出すので、**.misa の link 質量の合計と突き合わせること**:
 
@@ -1178,8 +1178,8 @@ submodule 無しで `cargo test` が通る**。`robots/testquad.toml` はそれ�
 （articara の詰め値 + MPC で trot 0.80 を位置出力 90 %、トルク出力 58 % — WBC の
 ゲインは namiashi で詰めたものなので、この機体では詰め直していない）。
 
-実機の設定・モデル・立ち上げ手順・評価結果は機体側のリポジトリに置く（keel は
-keel-runner、namiashi は namiashi-runner2）。namiashi のもの（`robots/testquad.toml`、
+実機の設定・モデル・立ち上げ手順・評価結果は機体側のリポジトリに置く（hayaashi は
+hayaashi-runner、namiashi は namiashi-runner2）。namiashi のもの（`robots/testquad.toml`、
 `models/namiashi` の submodule、SBC の運用手順、`.misa` と URDF の整合試験）は
 2026-09-06 に namiashi-runner2 へ移した。
 
@@ -1197,7 +1197,7 @@ keel-runner、namiashi は namiashi-runner2）。namiashi のもの（`robots/te
   （`--kv-velocity`）に強く依り、MPC 歩容と組むと後ろへ走る。
 - **捕捉点フィードバック（`gait.mpc_capture_point_gain_s`）は既定 0。** 追従の
   悪い相手に対して正帰還になり、namiashi（MPC 単体 +0.496 → +0.154 m）も
-  keel（MPC + WBC が −0.15 m・ヨー 63°）も歩けなくなった。効かせるなら機体で
+  hayaashi（MPC + WBC が −0.15 m・ヨー 63°）も歩けなくなった。効かせるなら機体で
   値を出す。
 - **WBC のトルク・速度出力は実機で回したことがない。** HAL からモータの
   コマンド（`0xA1` / `0xA2`）まで配線して MuJoCo で確かめてあるだけ。
