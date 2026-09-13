@@ -1483,6 +1483,9 @@ impl Controller {
                 //     帰還して立脚の足先をずらす（この段の目標は初期値）、
                 //  4. 着けたら、ずらした位置から計画へ滑らかに戻す（`PosePlayer::rebase`）。
                 let _ = &park;
+                // `swing` はロールを使わず胴体も上げない（腿を振った所で一直線を通す）。
+                let swing = g.knee_flip_reverse_style == "swing";
+                let h_flip = if swing { h_ref.max(g.knee_flip_height_m.unwrap_or(0.0)) } else { h_flip };
                 let z_float = -h_flip + g.knee_flip_foot_lift_m;
                 cur_floor.set(-h_flip);
                 let shifted = |slot: usize, u: f64, n: nalgebra::Vector2<f64>, z: f64| {
@@ -1577,41 +1580,80 @@ impl Controller {
                             push(format!("寄せ直し{tag} {round}"), cur, 0.6, [true; 4]);
                         }
                     }
-                    // 浮かす + 倒す + 折り返しの前半: 浮かせた角から hip のロールを外へ
-                    // 倒しながら、腿と calf を着地姿勢（新しい膝の向き）へ
-                    // `knee_flip_reverse_overlap` だけ進めておく（0.5 なら倒し切りと同時に
-                    // 脚が一直線になる）。
                     let mut landed = [[0.0; 3]; 4];
-                    let ov = g.knee_flip_reverse_overlap;
                     for &slot in &slots {
                         landed[slot] = ik(slot, shifted(slot, u, n, z_float), knee_forward_for(new, slot))?;
-                        cur.legs[slot] = lift.legs[slot];
-                        cur.legs[slot][0] = roll_out(slot);
-                        for k in 1..3 {
-                            cur.legs[slot][k] += ov * (landed[slot][k] - lift.legs[slot][k]);
+                    }
+                    if swing {
+                        // 浮かす（ロール無し）。
+                        for &slot in &slots {
+                            cur.legs[slot] = lift.legs[slot];
                         }
+                        push(format!("浮かす{tag}"), cur, 0.5 * phase, stance);
+                        // 振り出す: 腿を胴体から離す向き（前脚は前、後脚は後ろ）へ、calf を
+                        // 伸ばす途中で足先が床に触れない角まで（`out_thigh`。下腿が真下を
+                        // 向く瞬間がいちばん低いので、腿はほぼ水平まで振ることになる）。
+                        // calf は畳んだまま。
+                        for &slot in &slots {
+                            cur.legs[slot][1] = out_thigh(slot, cur.legs[slot][0], cur.legs[slot][2], 0.0, -h_flip)?;
+                        }
+                        push(format!("振り出す{tag}"), cur, 0.7 * phase, stance);
+                        // 伸ばす: calf を 0（一直線）。腿が傾いているので足先は床から離れている。
+                        for &slot in &slots {
+                            cur.legs[slot][2] = 0.0;
+                        }
+                        push(format!("伸ばす{tag}"), cur, 0.6 * phase, stance);
+                        // 逆へ畳む: 腿は振ったまま calf を反対側へ（腿を戻しながら畳むと
+                        // 下腿が真下を通って足先が床に触れる）。
+                        for &slot in &slots {
+                            let sign_new = if landed[slot][2] < 0.0 { -1.0 } else { 1.0 };
+                            cur.legs[slot][2] = fold(slot, sign_new, false);
+                        }
+                        push(format!("逆へ畳む{tag}"), cur, 0.6 * phase, stance);
+                        // 戻す: 新しい膝の向きで浮かせ位置へ。
+                        for &slot in &slots {
+                            cur.legs[slot] = landed[slot];
+                        }
+                        let mut fwd_now = cur_forward.get();
+                        for &slot in &slots {
+                            fwd_now[slot] = knee_forward_for(new, slot);
+                        }
+                        cur_forward.set(fwd_now);
+                        push(format!("戻す{tag}"), cur, 0.7 * phase, stance);
+                    } else {
+                        // 浮かす + 倒す + 折り返しの前半: 浮かせた角から hip のロールを外へ
+                        // 倒しながら、腿と calf を着地姿勢（新しい膝の向き）へ
+                        // `knee_flip_reverse_overlap` だけ進めておく。
+                        let ov = g.knee_flip_reverse_overlap;
+                        for &slot in &slots {
+                            cur.legs[slot] = lift.legs[slot];
+                            cur.legs[slot][0] = roll_out(slot);
+                            for k in 1..3 {
+                                cur.legs[slot][k] += ov * (landed[slot][k] - lift.legs[slot][k]);
+                            }
+                        }
+                        push(format!("浮かす{tag}"), cur, phase, stance);
+                        // 反転: ロールは外のまま、腿と calf を着地姿勢の角へ（残り）。
+                        for &slot in &slots {
+                            cur.legs[slot][1] = landed[slot][1];
+                            cur.legs[slot][2] = landed[slot][2];
+                        }
+                        let mut fwd_now = cur_forward.get();
+                        for &slot in &slots {
+                            fwd_now[slot] = knee_forward_for(new, slot);
+                        }
+                        cur_forward.set(fwd_now);
+                        push(format!("反転{tag}"), cur, phase, stance);
+                        // 戻す: ロールを戻して足先を浮かせ位置へ。
+                        for &slot in &slots {
+                            cur.legs[slot] = landed[slot];
+                        }
+                        push(format!("戻す{tag}"), cur, phase, stance);
                     }
-                    push(format!("浮かす{tag}"), cur, phase, stance);
-                    // 反転: ロールは外のまま、腿と calf を着地姿勢の角へ（残り）。
-                    for &slot in &slots {
-                        cur.legs[slot][1] = landed[slot][1];
-                        cur.legs[slot][2] = landed[slot][2];
-                    }
-                    let mut fwd_now = cur_forward.get();
-                    for &slot in &slots {
-                        fwd_now[slot] = knee_forward_for(new, slot);
-                    }
-                    cur_forward.set(fwd_now);
-                    push(format!("反転{tag}"), cur, phase, stance);
-                    // 戻す: ロールを戻して足先を浮かせ位置へ。
-                    for &slot in &slots {
-                        cur.legs[slot] = landed[slot];
-                    }
-                    push(format!("戻す{tag}"), cur, phase, stance);
                     for &slot in &slots {
                         cur.legs[slot] = ik(slot, shifted(slot, u, n, -h_flip), knee_forward_for(new, slot))?;
                     }
-                    push(format!("着ける{tag}"), cur, phase, [true; 4]);
+                    push(format!("着ける{tag}"), cur, if swing { 0.5 * phase } else { phase }, [true; 4]);
                 }
                 // 中央へ: 寄せていた胴体を基準の立ち位置・立ち高さへ戻す。
                 cur_shift.set(0.0);

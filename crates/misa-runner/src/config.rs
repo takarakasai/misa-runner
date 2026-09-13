@@ -226,6 +226,12 @@ impl AppConfig {
                 "gait.knee_flip_stand_height_m {sh}（0.1〜0.6 m）/ knee_flip_stand_overlap {so}（0〜0.9）が範囲外"
             ));
         }
+        if !matches!(self.gait.knee_flip_reverse_style.as_str(), "roll" | "swing") {
+            return Err(format!(
+                "gait.knee_flip_reverse_style = {:?} は roll / swing のどちらか",
+                self.gait.knee_flip_reverse_style
+            ));
+        }
         let (ov, ct) = (self.gait.knee_flip_reverse_overlap, self.gait.knee_flip_cop_tau_s);
         if !((0.0..=0.9).contains(&ov) && (0.0..10.0).contains(&ct)) {
             return Err(format!(
@@ -1104,6 +1110,10 @@ fn default_knee_flip_stand_overlap() -> f64 {
     0.6
 }
 
+fn default_knee_flip_reverse_style() -> String {
+    "roll".into()
+}
+
 fn default_knee_flip_reverse_overlap() -> f64 {
     0.2
 }
@@ -1433,6 +1443,14 @@ pub struct GaitTuning {
     /// 胴体 0.40 m なら床の余裕が 6 cm あるので 0.6 まで通る。既定 0.6。
     #[serde(default = "default_knee_flip_stand_overlap")]
     pub knee_flip_stand_overlap: f64,
+    /// `trot` の折り返しのやり方。`"roll"`（既定）は hip のロールで脚を外へ倒して腿と
+    /// calf を同時に折り返す（脚が真下で一直線になるので胴体を 0.34 m に上げる）。
+    /// `"swing"` は**腿を胴体から離す向きへ振りながら calf を伸ばし**、腿が傾いた所で
+    /// 一直線を通す（足先は床から離れる）ので、ロール無し・胴体は立ち高さのまま。
+    /// 浮かす → 振り出す → 伸ばす → 畳む → 着ける。ロールを使わないぶん 7 kg の脚の
+    /// 横の反動が無く、胴体が低いぶん釣り合いの効率もよい。
+    #[serde(default = "default_knee_flip_reverse_style")]
+    pub knee_flip_reverse_style: String,
     /// ロールで外へ倒しながら**腿と calf の折り返しをどこまで先に始めるか**（0〜0.9）。
     /// 浮かす段の終わりに、折り返しをこの割合まで進めておく。反転の段に残る動きが
     /// 減るので段を短くできる。**0.3 以上は途中で足先が床に近づく**（ロールが
@@ -1716,6 +1734,7 @@ impl Default for GaitTuning {
             knee_flip_stand_height_m: None,
             knee_flip_stand_overlap: default_knee_flip_stand_overlap(),
             knee_flip_height_m: None,
+            knee_flip_reverse_style: default_knee_flip_reverse_style(),
             knee_flip_reverse_overlap: default_knee_flip_reverse_overlap(),
             knee_flip_cop_tau_s: default_knee_flip_cop_tau_s(),
             knee_flip_probe_lift_m: default_knee_flip_probe_lift_m(),
