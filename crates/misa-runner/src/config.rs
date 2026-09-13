@@ -226,9 +226,9 @@ impl AppConfig {
                 "gait.knee_flip_stand_height_m {sh}（0.1〜0.6 m）/ knee_flip_stand_overlap {so}（0〜0.9）が範囲外"
             ));
         }
-        if !matches!(self.gait.knee_flip_reverse_style.as_str(), "roll" | "swing") {
+        if !matches!(self.gait.knee_flip_reverse_style.as_str(), "roll" | "swing" | "slide") {
             return Err(format!(
-                "gait.knee_flip_reverse_style = {:?} は roll / swing のどちらか",
+                "gait.knee_flip_reverse_style = {:?} は roll / swing / slide のどれか",
                 self.gait.knee_flip_reverse_style
             ));
         }
@@ -1110,8 +1110,12 @@ fn default_knee_flip_stand_overlap() -> f64 {
     0.6
 }
 
+fn default_knee_flip_slide_dip_m() -> f64 {
+    0.015
+}
+
 fn default_knee_flip_reverse_style() -> String {
-    "roll".into()
+    "slide".into()
 }
 
 fn default_knee_flip_reverse_overlap() -> f64 {
@@ -1444,12 +1448,32 @@ pub struct GaitTuning {
     /// 胴体 0.40 m なら床の余裕が 6 cm あるので 0.6 まで通る。既定 0.6。
     #[serde(default = "default_knee_flip_stand_overlap")]
     pub knee_flip_stand_overlap: f64,
-    /// `trot` の折り返しのやり方。`"roll"`（既定）は hip のロールで脚を外へ倒して腿と
-    /// calf を同時に折り返す（脚が真下で一直線になるので胴体を 0.34 m に上げる）。
+    /// `trot` で**浮かせる脚を床に滑らせる**。足を上げず（`knee_flip_foot_lift_m` を 0 に）、
+    /// 胴体も上げず立ち高さのまま、ロールで倒して折り返す途中で足先が床を押す
+    /// （一直線の瞬間で `knee_flip_slide_dip_m` まで床の下を目標にしてよい）ことを
+    /// 許す。押した足が支えになるので静的に安定する見込み。浮かせる脚は
+    /// `hardware.mit_gains_knee_flip_swing` で柔らかくして、床を押す力と滑りの摩擦を
+    /// 小さくする。既定 false。
+    #[serde(default)]
+    pub knee_flip_slide: bool,
+    /// `knee_flip_slide` で、浮かせる脚の足先が床の下を目標にしてよい深さ [m]。既定 0.03。
+    #[serde(default = "default_knee_flip_slide_dip_m")]
+    pub knee_flip_slide_dip_m: f64,
+    /// `trot` の折り返しのやり方。既定 `"slide"`（下）。`"roll"` は hip のロールで脚を
+    /// 外へ倒して腿と calf を同時に折り返す（脚が真下で一直線になるので胴体を 0.34 m に
+    /// 上げる。釣り合いの帰還に頼り、MuJoCo で 4〜6°、重心のずれに弱い）。
     /// `"swing"` は**腿を胴体から離す向きへ振りながら calf を伸ばし**、腿が傾いた所で
     /// 一直線を通す（足先は床から離れる）ので、ロール無し・胴体は立ち高さのまま。
     /// 浮かす → 振り出す → 伸ばす → 畳む → 着ける。ロールを使わないぶん 7 kg の脚の
-    /// 横の反動が無く、胴体が低いぶん釣り合いの効率もよい。
+    /// 横の反動が無く、胴体が低いぶん釣り合いの効率もよい（MuJoCo では 19〜37° と悪い）。
+    /// `"slide"`（ユーザー案、2026-09-17）は**足を床から離さず横へ滑らせる**: ロールで
+    /// 外へ倒しながら脚が伸びるぶん足先が床の上を外へ動き（IK が届く所まで、keel で
+    /// 約 0.2 m）、いちばん外で一直線を通して膝の向きを替え、戻す。足先は床の上の目標
+    /// （頂点だけ `knee_flip_slide_dip_m` 押す）なので反転する脚も床を支え続け、
+    /// **4 点で静的に安定**する。keel MuJoCo: 1 段 0.8 s で 9.5 s・傾き 1.2°、0.5 s で
+    /// 5.9 s・1.8°、重心ずれ 28 mm を注入しても 1.2°、釣り合いの帰還を切っても 0.7°。
+    /// 反転する脚は `hardware.mit_gains_knee_flip_swing` で柔らかく（kp 200）して床を
+    /// 押す力と滑りの摩擦を小さくする（500 のままでも 1°）。
     #[serde(default = "default_knee_flip_reverse_style")]
     pub knee_flip_reverse_style: String,
     /// ロールで外へ倒しながら**腿と calf の折り返しをどこまで先に始めるか**（0〜0.9）。
@@ -1735,6 +1759,8 @@ impl Default for GaitTuning {
             knee_flip_stand_height_m: None,
             knee_flip_stand_overlap: default_knee_flip_stand_overlap(),
             knee_flip_height_m: None,
+            knee_flip_slide: false,
+            knee_flip_slide_dip_m: default_knee_flip_slide_dip_m(),
             knee_flip_reverse_style: default_knee_flip_reverse_style(),
             knee_flip_reverse_overlap: default_knee_flip_reverse_overlap(),
             knee_flip_cop_tau_s: default_knee_flip_cop_tau_s(),

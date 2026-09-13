@@ -780,15 +780,23 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             cfg.hardware.default_max_speed_rad_s(),
             out.leg_mode == misa_hal::joint::JointMode::Idle,
             {
-                // 膝の反転中はゲインを寄せる（無ければそのまま）。
+                // 膝の反転中はゲインを寄せる（無ければそのまま）。浮かせている脚には
+                // `mit_gains_knee_flip_swing` があればそれ。
                 let flipping = controller.state() == State::FlippingKnees;
                 let ramp = cfg.hardware.mit_gains_ramp_s();
                 let step = if ramp > 0.0 { dt / ramp } else { 1.0 };
                 gain_blend = (gain_blend + if flipping { step } else { -step }).clamp(0.0, 1.0);
-                match (cfg.hardware.mit_gains(), cfg.hardware.mit_gains_knee_flip()) {
-                    (Some(a), Some(b)) => Some(misa_hal::config::MitGains::lerp(a, b, gain_blend)),
-                    (a, _) => a,
-                }
+                cfg.hardware.mit_gains().map(|base| {
+                    let flip = cfg.hardware.mit_gains_knee_flip();
+                    let swing = cfg.hardware.mit_gains_knee_flip_swing().or(flip);
+                    std::array::from_fn(|leg| {
+                        let target = if flipping && !out.stance[leg] { swing } else { flip };
+                        match target {
+                            Some(t) => misa_hal::config::MitGains::lerp(base, t, gain_blend),
+                            None => base,
+                        }
+                    })
+                })
             },
             plan.as_ref(),
             gravity_ff.as_ref(),

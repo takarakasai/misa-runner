@@ -1490,8 +1490,11 @@ impl Controller {
                 let _ = &park;
                 // `swing` はロールを使わず胴体も上げない（腿を振った所で一直線を通す）。
                 let swing = g.knee_flip_reverse_style == "swing";
-                let h_flip = if swing { h_ref.max(g.knee_flip_height_m.unwrap_or(0.0)) } else { h_flip };
-                let z_float = -h_flip + g.knee_flip_foot_lift_m;
+                // `slide` は足を上げず胴体も上げない（足先が床を滑る・押す）。
+                let slide = g.knee_flip_slide || g.knee_flip_reverse_style == "slide";
+                let slide_path = g.knee_flip_reverse_style == "slide";
+                let h_flip = if swing || slide { h_ref.max(g.knee_flip_height_m.unwrap_or(0.0)) } else { h_flip };
+                let z_float = if slide { -h_flip } else { -h_flip + g.knee_flip_foot_lift_m };
                 cur_floor.set(-h_flip);
                 let shifted = |slot: usize, u: f64, n: nalgebra::Vector2<f64>, z: f64| {
                     nalgebra::Vector3::new(feet_ref[slot].x - u * n.x, feet_ref[slot].y - u * n.y, z)
@@ -1589,7 +1592,75 @@ impl Controller {
                     for &slot in &slots {
                         landed[slot] = ik(slot, shifted(slot, u, n, z_float), knee_forward_for(new, slot))?;
                     }
-                    if swing {
+                    if slide_path {
+                        // 滑らせる: 足先を床の上に置いたまま横（外）へ。ロールで倒れるぶん
+                        // 脚が伸び、いちばん外（h·tan(ロール上限)）でほぼ一直線になる。
+                        // そこだけ床の下 `knee_flip_slide_dip_m` を目標にして一直線を
+                        // 通し（柔らかい脚が押すだけ）、新しい膝の向きで戻す。
+                        let out_dir = |slot: usize| if is_left(slot) { 1.0 } else { -1.0 };
+                        // 脚ごとに、頂点（床の下 dip）で両方の膝の向きに IK が届く最大の横移動を探す
+                        // （hip の横のオフセットと可動域があるので h·tan(ロール) より小さい）。
+                        let d_max_for = |slot: usize| -> f64 {
+                            let mut d = 0.35;
+                            let z = -h_flip - g.knee_flip_slide_dip_m;
+                            while d > 0.02 {
+                                let f0 = shifted(slot, u, n, z);
+                                let f = nalgebra::Vector3::new(f0.x, f0.y + out_dir(slot) * d, z);
+                                let leg = kin_ref.legs()[slot];
+                                let ok = [true, false].iter().all(|fwd| {
+                                    let sol = solve_leg_ik(leg, f, *fwd);
+                                    sol.is_reachable() && {
+                                        let (hh, _, _) = sol.angles();
+                                        let (lo, hi) = limit(slot, 0);
+                                        let hm = hh * signs[slot][0];
+                                        hm > lo + 0.02 && hm < hi - 0.02
+                                    }
+                                });
+                                if ok {
+                                    break;
+                                }
+                                d -= 0.005;
+                            }
+                            d
+                        };
+                        let d_max: [f64; 4] = std::array::from_fn(d_max_for);
+                        let at_lat = |slot: usize, frac: f64, z: f64| {
+                            let f = shifted(slot, u, n, z);
+                            nalgebra::Vector3::new(f.x, f.y + out_dir(slot) * frac * d_max[slot], z)
+                        };
+                        let seg = 0.35 * phase;
+                        for frac in [0.4, 0.75] {
+                            for &slot in &slots {
+                                cur.legs[slot] = ik(slot, at_lat(slot, frac, -h_flip), cur_forward.get()[slot])?;
+                            }
+                            push(format!("滑らせ出す{tag} {:.0}%", frac * 100.0), cur, seg, stance);
+                        }
+                        // 頂点（旧い向きで、床の下へ少し）。
+                        for &slot in &slots {
+                            cur.legs[slot] = ik(slot, at_lat(slot, 1.0, -h_flip - g.knee_flip_slide_dip_m), cur_forward.get()[slot])?;
+                        }
+                        push(format!("滑らせ出す{tag} 頂点"), cur, seg, stance);
+                        // 頂点（新しい向き）: 一直線を挟んだ反対側の解。
+                        let mut fwd_now = cur_forward.get();
+                        for &slot in &slots {
+                            fwd_now[slot] = knee_forward_for(new, slot);
+                        }
+                        cur_forward.set(fwd_now);
+                        for &slot in &slots {
+                            cur.legs[slot] = ik(slot, at_lat(slot, 1.0, -h_flip - g.knee_flip_slide_dip_m), knee_forward_for(new, slot))?;
+                        }
+                        push(format!("滑らせ戻す{tag} 頂点"), cur, seg, stance);
+                        for frac in [0.75, 0.4] {
+                            for &slot in &slots {
+                                cur.legs[slot] = ik(slot, at_lat(slot, frac, -h_flip), knee_forward_for(new, slot))?;
+                            }
+                            push(format!("滑らせ戻す{tag} {:.0}%", frac * 100.0), cur, seg, stance);
+                        }
+                        for &slot in &slots {
+                            cur.legs[slot] = landed[slot];
+                        }
+                        push(format!("戻す{tag}"), cur, seg, stance);
+                    } else if swing {
                         // 浮かす（ロール無し）。
                         for &slot in &slots {
                             cur.legs[slot] = lift.legs[slot];
@@ -1658,7 +1729,7 @@ impl Controller {
                     for &slot in &slots {
                         cur.legs[slot] = ik(slot, shifted(slot, u, n, -h_flip), knee_forward_for(new, slot))?;
                     }
-                    push(format!("着ける{tag}"), cur, if swing { 0.5 * phase } else { phase }, [true; 4]);
+                    push(format!("着ける{tag}"), cur, if swing || slide_path { 0.5 * phase } else { phase }, [true; 4]);
                 }
                 // 中央へ: 寄せていた胴体を基準の立ち位置・立ち高さへ戻す。
                 cur_shift.set(0.0);
@@ -1786,7 +1857,9 @@ impl Controller {
                     let foot = forward_leg_kinematics(leg, q[0] * s[0], q[1] * s[1], q[2] * s[2]);
                     // 床は、浮かせ始めた足先の面と段の床（rest では車輪に載った胴体の
                     // 下）の低いほう。浮かせた面より少し下がっても床に着かなければよい。
-                    let limit_z = (floor_z[slot] - 0.005).min(floor_true + 0.002);
+                    // `knee_flip_slide` は浮かせる脚が床を押してよい（trot）。
+                    let dip = if (g.knee_flip_slide || g.knee_flip_reverse_style == "slide") && g.knee_flip_style == KneeFlipStyle::Trot { g.knee_flip_slide_dip_m + 0.005 } else { 0.0 };
+                    let limit_z = (floor_z[slot] - 0.005).min(floor_true + 0.002) - dip;
                     if foot.z < limit_z {
                         return Err(format!(
                             "段「{}」の途中で {} の足先が床（z {:+.3}）に近づきすぎる（足先 z {:+.3}）。knee_flip_out_z_m を見直す",
@@ -1794,7 +1867,7 @@ impl Controller {
                         ));
                     }
                     let knee = knee_pos(slot, &q);
-                    if knee.z < floor_true + 0.002 {
+                    if knee.z < floor_true + 0.002 - dip {
                         return Err(format!(
                             "段「{}」の途中で {} の膝が床（z {:+.3}）から {:.3} m しか離れない（膝 z {:+.3}）",
                             st.name, leg_name(slot), floor_true, knee.z - floor_true, knee.z

@@ -439,6 +439,11 @@ pub struct Ros2Hardware {
     /// `mit_gains` ↔ `mit_gains_knee_flip` を切り替える時間 [s]。既定 0.5。
     #[serde(default = "default_mit_gains_ramp_s")]
     pub mit_gains_ramp_s: f64,
+    /// 膝の反転中、**浮かせている脚**だけに使う MIT ゲイン（無ければ `mit_gains_knee_flip`）。
+    /// 足を床に滑らせる反転（`gait.knee_flip_slide`）では、浮かせる脚を柔らかくして
+    /// 床を押す力を小さくする（kp 200 で 1 cm 沈んで数十 N）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mit_gains_knee_flip_swing: Option<MitGains>,
     /// **目標の関節速度を MIT の q̇_d に載せる倍率**（0 = 載せない、既定。1 = そのまま）。
     ///
     /// `τ = kp(q_d − q) + kd(q̇_d − q̇) + τ_ff` の q̇_d。0 だと PD は「動く目標を
@@ -521,6 +526,7 @@ impl Default for Ros2Hardware {
             mit_gains: default_mit_gains(),
             mit_gains_knee_flip: None,
             mit_gains_ramp_s: default_mit_gains_ramp_s(),
+            mit_gains_knee_flip_swing: None,
             mit_velocity_feedforward: 0.0,
         }
     }
@@ -602,6 +608,14 @@ impl HardwareConfig {
         match self {
             HardwareConfig::Serial(_) => None,
             HardwareConfig::Ros2(h) => h.mit_gains_knee_flip,
+        }
+    }
+
+    /// 膝の反転中の浮かせている脚の MIT ゲイン（[`Ros2Hardware::mit_gains_knee_flip_swing`]）。
+    pub fn mit_gains_knee_flip_swing(&self) -> Option<MitGains> {
+        match self {
+            HardwareConfig::Serial(_) => None,
+            HardwareConfig::Ros2(h) => h.mit_gains_knee_flip_swing,
         }
     }
 

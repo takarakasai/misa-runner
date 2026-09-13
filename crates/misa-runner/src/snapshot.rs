@@ -310,7 +310,7 @@ pub fn command(
     targets: &JointVec,
     max_speed_rad_s: f64,
     relaxed: bool,
-    gains: Option<misa_hal::config::MitGains>,
+    gains: Option<[misa_hal::config::MitGains; 4]>,
     wbc: Option<&crate::wbc::WbcPlan>,
     feedforward: Option<&JointVec>,
     target_qd: Option<&JointVec>,
@@ -360,7 +360,7 @@ pub fn command(
             // 0 になり、位置を指令しているのに脱力したまま崩れる。
             // シリアルの機体はサーボが内部で持つので `None`。
             if let Some(g) = gains {
-                let (kp, kd) = g.for_joint(k);
+                let (kp, kd) = g[leg].for_joint(k);
                 a.kp_nm_per_rad = kp;
                 a.kd_nm_s_per_rad = kd;
             }
@@ -377,7 +377,7 @@ pub fn command(
             };
             if let Some(g) = gains {
                 // ヘッドは脚ではないので、いちばん軽い hip の値を借りる。
-                let (kp, kd) = g.for_joint(0);
+                let (kp, kd) = g[0].for_joint(0);
                 a.kp_nm_per_rad = kp;
                 a.kd_nm_s_per_rad = kd;
             }

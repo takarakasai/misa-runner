@@ -185,7 +185,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                 &out.targets,
                 cfg.hardware.default_max_speed_rad_s(),
                 out.leg_mode == misa_hal::joint::JointMode::Idle,
-                cfg.hardware.mit_gains(),
+                cfg.hardware.mit_gains().map(|g| [g; 4]),
                 // **`dump` は実機も動力学も無いので WBC は回さない。**
                 // 接触力を解いても、それが正しいかを確かめる相手がいない。
                 None,
