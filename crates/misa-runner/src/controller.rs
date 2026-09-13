@@ -2781,6 +2781,11 @@ impl Controller {
         self.widen_now += (want - self.widen_now) * alpha;
     }
 
+    /// いま効いている立ち幅の広げ量 [m]（診断・記録用）。
+    pub fn stance_widen_now(&self) -> f64 {
+        self.widen_now
+    }
+
     /// 位置保持が使う「いまの位置」。外部基準があればそちら。
     fn hold_here(&self) -> [f64; 2] {
         self.world_position.unwrap_or(self.odom_world)

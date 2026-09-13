@@ -449,6 +449,30 @@ hayaashi の trot 0.12 で kp 300 / kd 2 なら素の歩容は −0.30 m（後�
 台本だけで回すなら `--pilot ros2` を外して `--vx 0.15` などを渡す。ROS 2 の
 口が要らないので `--features sim` だけでビルドできる。
 
+### 指令と実測を重ねた動画（計器板つき）
+
+**絵だけでは何が起きたか分からない。** 押された瞬間に推定速度が真値から
+外れる、といったことは数字にしか出ない。`--csv` と `--video` を一緒に出して
+`scripts/hud-video.py` に渡す。
+
+```sh
+misa-run sim --robot robots/testquad.toml --gait trot --vx 0.12 --secs 14 \
+    --timestep 0.0005 --safety-gate --push "6.0,0.2,0,-600,0" \
+    --csv /tmp/run.csv \
+    --video /tmp/frames --cam-fixed --cam-az 0 --cam-el -11 \
+    --cam-dist 1.55 --cam-x 0.45 --cam-y -0.22 --cam-z 0.26
+
+./scripts/hud-video.py /tmp/run.csv /tmp/frames out.mp4 \
+    --title "600N 0.2s | MPC+WBC" --push 6.0,0.2,0,-600,0
+```
+
+計器板は REQUEST（生の指令）／ COMMAND（ランプ後）／ ACTUAL（**シムの真値**）／
+ESTIMATE（脚オドメトリ）を並べ、胴体の高さと傾き、立ち幅の広げ量、外力の
+状態（UPCOMING → ACTIVE → DONE）を出す。
+
+**カメラの向き。** `--cam-az 0` で機体の前がカメラ側、`180` で後ろ姿、
+`90` で真横（右が前）。横に押すところを見せるなら正面、進む量を見せるなら真横。
+
 ### MuJoCo の絵を動画にする
 
 `--viz`（articara へ Zenoh）は**関節角だけ**で、接地も地面も出ない。動きを

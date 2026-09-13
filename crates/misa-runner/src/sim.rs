@@ -421,7 +421,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         let mut w = std::io::BufWriter::new(
             std::fs::File::create(path).unwrap_or_else(|e| panic!("{path} を作れません: {e}")),
         );
-        let _ = writeln!(w, "t,vx_cmd,vy_cmd,wz_cmd,vx_true,vy_true,z,roll,pitch,x_world,y_world");
+        let _ = writeln!(w, "t,vx_req,vy_req,wz_req,vx_cmd,vy_cmd,wz_cmd,vx_true,vy_true,wz_true,vx_est,vy_est,z,roll,pitch,x_world,y_world,widen");
         w
     });
     // `--push "t,dur,fx,fy,fz"`: 胴体を世界座標で押す（外乱応答）。
@@ -774,19 +774,28 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                     let vw = [(p[0] - active_end[0]) / dt, (p[1] - active_end[1]) / dt];
                     let yaw = out.planned_yaw_rad;
                     let (c, sn) = (yaw.cos(), yaw.sin());
+                    let ve = body.velocity_world.unwrap_or_default();
                     let _ = writeln!(
                         w,
-                        "{t:.4},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5}",
+                        "{t:.4},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},\
+                         {:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5}",
+                        cmd.velocity.vx_m_s,
+                        cmd.velocity.vy_m_s,
+                        cmd.velocity.wz_rad_s,
                         out.body_velocity[0],
                         out.body_velocity[1],
                         out.body_velocity[2],
                         vw[0] * c + vw[1] * sn,
                         -vw[0] * sn + vw[1] * c,
+                        obs.imu.map(|i| i.gyro_rad_s[2]).unwrap_or(0.0),
+                        ve.x * c + ve.y * sn,
+                        -ve.x * sn + ve.y * c,
                         p[2],
                         obs.imu.map(|i| i.rpy_rad[0]).unwrap_or(0.0),
                         obs.imu.map(|i| i.rpy_rad[1]).unwrap_or(0.0),
                         p[0],
                         p[1],
+                        controller.stance_widen_now(),
                     );
                 }
                 active_end = p;
