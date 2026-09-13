@@ -498,6 +498,16 @@ pub struct WbcConfig {
     /// ここを大きくしてもモデルの上には行かない — 上げるなら
     /// `torque_scale` のほう。
     pub max_torque_nm: f64,
+    /// 軸種別のトルク定数 `[hip, thigh, calf]` [N·m/A]。**診断専用。**
+    ///
+    /// 指令には一切使わない。`sim` が実トルクを相電流に直して報告するための
+    /// もので、**電源と電流リミットに対する余裕を実機の前に見る**のが目的。
+    ///
+    /// keel は hip / thigh が Robstride RS04（2.1 N·m/Arms）、calf が
+    /// MyActuator X12-320（3.3 N·m/A）。**単位が揃っていない**（前者は正弦波
+    /// 駆動の実効値）ので、ピークで比べるなら RS04 側を √2 倍すること。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub torque_constant_nm_per_a: Option<[f64; 3]>,
     /// 軸種別のトルク上限 `[hip, thigh, calf]` [N·m]。**脚 12 軸にだけ効く。**
     ///
     /// 指定すると [`Self::max_torque_nm`] より優先する（脚の軸のみ。補助軸は
@@ -832,6 +842,7 @@ impl Default for WbcConfig {
             f_min_stance_n: 0.5,
             torque_scale: 1.0,
             max_torque_nm: 0.0,
+            torque_constant_nm_per_a: None,
             max_torque_nm_by_joint: None,
             max_torque_rate_nm_s: 0.0,
             solution_check: true,

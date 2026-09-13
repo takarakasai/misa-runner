@@ -432,6 +432,15 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let mut prev_tau = [0.0f64; 12];
     // WBC の解を検算で捨てた周期（`wbc.solution_check`）。**1 周期だけなら
     // 想定内**（拘束集合が変わった瞬間）だが、続くなら設定かモデルが疑わしい。
+    // 電流とパワー（`wbc.torque_constant_nm_per_a` があるときだけ）。
+    // **機械出力は τ·ω の絶対値の和。** 回生を差し引かないのは、電源から見て
+    // 引く側の最悪を知りたいため。
+    let mut cur_sum_sq = [0.0f64; 3];
+    let mut cur_max = [0.0f64; 3];
+    let mut cur_n = 0usize;
+    let mut bus_mech_sum = 0.0f64;
+    let mut bus_mech_max = 0.0f64;
+    let mut amp_sum_max = 0.0f64;
     let mut wbc_ticks = 0usize;
     let mut wbc_rejected = 0usize;
     // **着地の衝撃。** 接地が false → true になった周期の足の鉛直速度（直前の
@@ -831,6 +840,32 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             gate_torque_rate += verdict.torque_rate_limited.len();
             gate_torque += verdict.torque_limited.len();
         }
+        // 実トルクと実速度から電流と機械出力を積む。**歩容中だけ。**
+        if out.state == crate::controller::State::Active {
+            let kt = cfg.wbc.torque_constant_nm_per_a;
+            cur_n += 1;
+            let mut amps = 0.0;
+            let mut mech = 0.0;
+            for leg in 0..4 {
+                for k in 0..3 {
+                    let id = misa_core::AxisId::new((leg * 3 + k) as u16);
+                    let tau = obs.get(id).and_then(|a| a.torque_nm).unwrap_or(0.0);
+                    let w = measured_qd.legs[leg][k];
+                    mech += (tau * w).abs();
+                    if let Some(kt) = kt {
+                        let a = (tau / kt[k]).abs();
+                        amps += a;
+                        cur_sum_sq[k] += a * a;
+                        if a > cur_max[k] {
+                            cur_max[k] = a;
+                        }
+                    }
+                }
+            }
+            bus_mech_sum += mech;
+            bus_mech_max = bus_mech_max.max(mech);
+            amp_sum_max = amp_sum_max.max(amps);
+        }
         for i in 0..12 {
             let tau = outgoing
                 .get(misa_core::AxisId::new(i as u16))
@@ -1175,6 +1210,31 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         println!(
             "安全ゲート（--safety-gate）が丸めた延べ軸数  トルク {gate_torque} / トルクの変化率 {gate_torque_rate}"
         );
+    }
+    if cur_n > 0 {
+        let n = cur_n as f64;
+        println!(
+            "機械出力 [W]（Σ|τ·ω|、歩容中）  平均 {:.1}  最大 {:.1}",
+            bus_mech_sum / n,
+            bus_mech_max
+        );
+        if let Some(kt) = cfg.wbc.torque_constant_nm_per_a {
+            let names = ["hip", "thigh", "calf"];
+            let s: String = (0..3)
+                .map(|k| {
+                    format!(
+                        "{} {:.1}/{:.1}  ",
+                        names[k],
+                        (cur_sum_sq[k] / (4.0 * n)).sqrt(),
+                        cur_max[k]
+                    )
+                })
+                .collect();
+            println!("相電流 [A]（実効/最大、1 軸あたり。Kt = {kt:?}）  {s}");
+            println!(
+                "12 軸の相電流の和の最大  {amp_sum_max:.1} A                   **これは電源電流ではない**（電源側は 機械出力/η + 銅損 を電圧で割る）"
+            );
+        }
     }
     if wbc_ticks > 0 {
         println!(
