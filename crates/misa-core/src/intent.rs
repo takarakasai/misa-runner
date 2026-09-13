@@ -204,6 +204,8 @@ pub enum KneeFlipStyleRequest {
     Trot,
     /// 反転する脚を一斉に（床を滑らせる）。
     All,
+    /// 一斉に伸ばして折り返す（Pitch 軸だけ）。
+    Pitch,
 }
 
 impl KneeFlipStyleRequest {
@@ -213,14 +215,16 @@ impl KneeFlipStyleRequest {
             Self::Rest => "rest",
             Self::Trot => "trot",
             Self::All => "all",
+            Self::Pitch => "pitch",
         }
     }
-    /// stand → trot → all → rest → stand。
+    /// stand → trot → all → pitch → rest → stand。
     pub fn next(self) -> Self {
         match self {
             Self::Stand => Self::Trot,
             Self::Trot => Self::All,
-            Self::All => Self::Rest,
+            Self::All => Self::Pitch,
+            Self::Pitch => Self::Rest,
             Self::Rest => Self::Stand,
         }
     }

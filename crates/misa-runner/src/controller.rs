@@ -1027,6 +1027,7 @@ impl Controller {
                 misa_core::KneeFlipStyleRequest::Rest => KneeFlipStyle::Rest,
                 misa_core::KneeFlipStyleRequest::Trot => KneeFlipStyle::Trot,
                 misa_core::KneeFlipStyleRequest::All => KneeFlipStyle::All,
+                misa_core::KneeFlipStyleRequest::Pitch => KneeFlipStyle::Pitch,
             };
             if want != self.cfg.gait.knee_flip_style && self.state != State::FlippingKnees {
                 if want == KneeFlipStyle::Rest && self.cfg.gait.knee_flip_rest_height_m.is_none() {
@@ -1869,6 +1870,53 @@ impl Controller {
                     cur.legs[s] = ik(s, feet_ref[s], cur_forward.get()[s])?;
                 }
                 push("中央へ".into(), cur, 2.0 * phase, [true; 4]);
+            }
+            KneeFlipStyle::Pitch => {
+                // **Pitch 軸（腿と calf）だけで一斉に折り返す。** hip のロールも足の滑りも
+                // 使わない。全脚を伸ばし切る手前まで伸ばす（足は床に着いたまま、胴体が
+                // 上がる）→ そこで膝の向きを入れ替える → 元の立ち高さへ戻す、の 3 段。
+                // 反転しない脚も同じだけ伸び縮みするので胴体は水平のまま。
+                //
+                // 伸ばし切り（特異点）では IK が解けず膝の向きも決まらないので
+                // `knee_flip_straight_margin_m` 手前で折り返す。そこでの膝の曲がりは
+                // keel（脚長 0.426、余裕 5 mm）で腿 ±8.8° / calf ∓17.6° と小さい。
+                let at = |f: nalgebra::Vector3<f64>, z: f64| nalgebra::Vector3::new(f.x, f.y, z);
+                let reach_at = |h: f64| -> bool {
+                    (0..4).all(|s| {
+                        [true, false].iter().all(|fwd| {
+                            solve_leg_ik(kin_ref.legs()[s], at(feet_ref[s], -h), *fwd).is_reachable()
+                        })
+                    })
+                };
+                let mut h_top = l_total - g.knee_flip_straight_margin_m;
+                while h_top > h_ref && !reach_at(h_top) {
+                    h_top -= 0.002;
+                }
+                if h_top < h_ref + 0.02 {
+                    return Err(format!(
+                        "伸ばし切っても立ち高さ {h_ref:.3} m との差が 2 cm 未満（{h_top:.3} m）。脚が短いか立ち位置が広い"
+                    ));
+                }
+                log::info!(
+                    "膝の反転（Pitch 軸だけ一斉に）: 胴体 {:.3} → {:.3} → {:.3} m、足は床に着けたまま、3 段 {:.1} s",
+                    h_ref, h_top, h_ref, 5.0 * phase
+                );
+                // 1. 伸ばす（いまの膝の向きのまま）。
+                for s in 0..4 {
+                    cur.legs[s] = ik(s, at(feet_ref[s], -h_top), cur_forward.get()[s])?;
+                }
+                push("伸ばす".into(), cur, 2.0 * phase, [true; 4]);
+                // 2. 折り返す（伸ばし切りの手前で膝の向きを入れ替える）。
+                for s in 0..4 {
+                    cur.legs[s] = ik(s, at(feet_ref[s], -h_top), knee_forward_for(new, s))?;
+                }
+                cur_forward.set(std::array::from_fn(|s| knee_forward_for(new, s)));
+                push("折り返す".into(), cur, phase, [true; 4]);
+                // 3. 戻す（元の立ち高さへ）。
+                for s in 0..4 {
+                    cur.legs[s] = ik(s, feet_ref[s], knee_forward_for(new, s))?;
+                }
+                push("戻す".into(), cur, 2.0 * phase, [true; 4]);
             }
             KneeFlipStyle::Stand => {
                 // **立ったまま 1 脚ずつ、他の 3 脚で支える。** 静的に安定（重心を支持三角形の

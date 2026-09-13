@@ -220,6 +220,7 @@ impl Limits {
                 crate::config::KneeFlipStyle::Rest => misa_core::KneeFlipStyleRequest::Rest,
                 crate::config::KneeFlipStyle::Trot => misa_core::KneeFlipStyleRequest::Trot,
                 crate::config::KneeFlipStyle::All => misa_core::KneeFlipStyleRequest::All,
+                crate::config::KneeFlipStyle::Pitch => misa_core::KneeFlipStyleRequest::Pitch,
             },
             controller_initial: match cfg.gait.controller {
                 crate::config::GaitControllerKind::Mpc
@@ -397,7 +398,7 @@ pub fn help(lim: &Limits, gait: GaitSelect) -> String {
          　  o        全身制御の出力を巡回  OFF → 位置 → トルク → OFF\n\
          　  p        歩容コントローラ MPC ↔ CHAMP（**立って止まっているときだけ**効く）\n\
          　  ] / [    膝の向きを次へ / 前へ  << → <> → >< → >>（**立って止まっているときだけ**。脚を浮かせて膝を伸ばし切る振り付けを通る）\n\
-         　  ;        反転を何脚ずつ行うか  1 脚ずつ（3 脚支持）→ 対角 2 脚（床を滑らせる）→ 一斉（床を滑らせる）→ 4 脚まとめて（車輪に載せる）。次の反転から効く\n\
+         　  ;        反転のやり方  1 脚ずつ（3 脚支持）→ 対角 2 脚（滑らせる）→ 一斉（滑らせる）→ 一斉に伸ばして折り返す（Pitch 軸だけ）→ 4 脚まとめて（車輪）。次の反転から効く\n\
          　  = / -    反転の 1 段の時間 ±0.05 s（0.2〜2.0。**腿を振り出す経路は 0.8 s 以上**。次の反転から効く）\n\
          　  ※ 反転は **`r` / `f` で決めたいまの立ち高さのまま**行います（低いほど揺れません）\n\
          \n\
@@ -665,6 +666,7 @@ mod tests {
         for want in [
             misa_core::KneeFlipStyleRequest::Trot,
             misa_core::KneeFlipStyleRequest::All,
+            misa_core::KneeFlipStyleRequest::Pitch,
             misa_core::KneeFlipStyleRequest::Rest,
             misa_core::KneeFlipStyleRequest::Stand,
         ] {
@@ -680,7 +682,7 @@ mod tests {
         assert!((intent.knee_flip_phase_s.unwrap() - 0.2).abs() < 1e-9);
         // 一覧に出ている。
         let h = help(&lim, GaitSelect::Trot);
-        assert!(h.contains("反転を何脚ずつ"), "{h}");
+        assert!(h.contains("反転のやり方"), "{h}");
         assert!(h.contains("反転の 1 段の時間"), "{h}");
     }
 

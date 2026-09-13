@@ -1252,6 +1252,10 @@ fn default_knee_flip_stand_overlap() -> f64 {
     0.6
 }
 
+fn default_knee_flip_straight_margin_m() -> f64 {
+    0.005
+}
+
 fn default_knee_flip_swing_min_phase_s() -> f64 {
     0.65
 }
@@ -1352,6 +1356,13 @@ pub enum KneeFlipStyle {
     /// `<<` ↔ `><` は前の 2 脚、`><` ↔ `>>` は後ろの 2 脚、`<>` ↔ `><` は 4 脚とも
     /// 一斉に滑らせて折り返す。胴体を寄せる段も要らない（重心は動かさない）。
     All,
+    /// **Pitch 軸（腿と calf）だけで一斉に折り返す。** hip のロールも足の滑りも使わない。
+    ///
+    /// 全脚をいったん伸ばし切る手前まで伸ばし（足は床に着いたまま、胴体が脚長の
+    /// 手前まで上がる）、そこで膝の向きを入れ替え、元の立ち高さへ戻す。反転しない脚も
+    /// 同じだけ伸び縮みするので胴体は水平のまま。伸ばし切りは特異点なので、
+    /// `knee_flip_straight_margin_m` だけ手前で折り返す。3 段。
+    Pitch,
 }
 
 impl KneeFlipStyle {
@@ -1361,6 +1372,7 @@ impl KneeFlipStyle {
             Self::Rest => "4 脚まとめて（車輪・腹に載せる、rest）",
             Self::Trot => "対角 2 脚ずつ（床を滑らせる、trot）",
             Self::All => "反転する脚を一斉に（床を滑らせる、all）",
+            Self::Pitch => "一斉に伸ばして折り返す（Pitch 軸だけ、pitch）",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -1369,6 +1381,7 @@ impl KneeFlipStyle {
             "rest" => Some(Self::Rest),
             "trot" => Some(Self::Trot),
             "all" => Some(Self::All),
+            "pitch" => Some(Self::Pitch),
             _ => None,
         }
     }
@@ -1618,6 +1631,10 @@ pub struct GaitTuning {
     /// 0.6 まで通る。既定 0.6。
     #[serde(default = "default_knee_flip_stand_overlap")]
     pub knee_flip_stand_overlap: f64,
+    /// `pitch` で伸ばし切りの手前どこで折り返すか [m]（既定 0.005）。
+    /// 0 だと特異点そのもので、IK が解けず膝の向きも決まらない。
+    #[serde(default = "default_knee_flip_straight_margin_m")]
+    pub knee_flip_straight_margin_m: f64,
     /// `stand` で**腿を振り出す経路**の 1 段の下限 [s]（0 で無し、既定 0.8）。
     /// 7 kg の腿をほぼ水平まで振る反動が胴体に出るので、速いと揺れる
     /// （MuJoCo、胴体 0.30 m: 0.5 s で 4.9°、0.65 s で 3.0°、0.8 s で 1.6°。荷重を抜く段を
@@ -1949,6 +1966,7 @@ impl Default for GaitTuning {
             knee_flip_stand_height_m: None,
             knee_flip_stand_overlap: default_knee_flip_stand_overlap(),
             knee_flip_height_m: None,
+            knee_flip_straight_margin_m: default_knee_flip_straight_margin_m(),
             knee_flip_swing_min_phase_s: default_knee_flip_swing_min_phase_s(),
             knee_flip_level_kp: default_knee_flip_level_kp(),
             knee_flip_level_max_m: default_knee_flip_level_max_m(),
