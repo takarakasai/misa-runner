@@ -427,6 +427,18 @@ pub struct Ros2Hardware {
     /// 残る）。既定は 120 / 2.0。
     #[serde(default = "default_mit_gains")]
     pub mit_gains: MitGains,
+    /// **膝の反転中だけ**使う MIT ゲイン（無ければ `mit_gains` のまま）。
+    ///
+    /// 1 脚を浮かせて振ると、残りの立脚が荷重の移動で沈み、7 kg の脚の反動で
+    /// 胴体が揺れる（keel 実機、kp 500 で体感 10°）。hip / thigh は kp 2000 まで
+    /// 使えるので反転中だけ上げる。calf は上限（kp 500 / kd 5）のまま。
+    /// 切り替えは `mit_gains_ramp_s` で滑らかに（追従誤差 × Δkp のトルクが
+    /// 一度に出ないように）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mit_gains_knee_flip: Option<MitGains>,
+    /// `mit_gains` ↔ `mit_gains_knee_flip` を切り替える時間 [s]。既定 0.5。
+    #[serde(default = "default_mit_gains_ramp_s")]
+    pub mit_gains_ramp_s: f64,
     /// **目標の関節速度を MIT の q̇_d に載せる倍率**（0 = 載せない、既定。1 = そのまま）。
     ///
     /// `τ = kp(q_d − q) + kd(q̇_d − q̇) + τ_ff` の q̇_d。0 だと PD は「動く目標を
@@ -447,6 +459,10 @@ fn default_mit_gains() -> MitGains {
     }
 }
 
+fn default_mit_gains_ramp_s() -> f64 {
+    0.5
+}
+
 /// MIT モードの kp/kd。脚の 3 関節ぶん。
 ///
 /// **関節ごとに違う。** 膝は自重を支える側なので腿より大きく要る。
@@ -459,6 +475,15 @@ pub struct MitGains {
 }
 
 impl MitGains {
+    /// `a` から `b` へ `t`（0〜1）だけ寄せた値。
+    pub fn lerp(a: MitGains, b: MitGains, t: f64) -> MitGains {
+        let t = t.clamp(0.0, 1.0);
+        MitGains {
+            kp: std::array::from_fn(|i| a.kp[i] + (b.kp[i] - a.kp[i]) * t),
+            kd: std::array::from_fn(|i| a.kd[i] + (b.kd[i] - a.kd[i]) * t),
+        }
+    }
+
     /// 軸表の並び（脚 × 3）から `[hip, thigh, calf]` の添字へ。
     pub fn for_joint(&self, k: usize) -> (f64, f64) {
         (self.kp[k.min(2)], self.kd[k.min(2)])
@@ -494,6 +519,8 @@ impl Default for Ros2Hardware {
             default_max_speed_rad_s: default_max_speed(),
             max_target_rate_rad_s: default_max_target_rate(),
             mit_gains: default_mit_gains(),
+            mit_gains_knee_flip: None,
+            mit_gains_ramp_s: default_mit_gains_ramp_s(),
             mit_velocity_feedforward: 0.0,
         }
     }
@@ -567,6 +594,22 @@ impl HardwareConfig {
         match self {
             HardwareConfig::Serial(_) => None,
             HardwareConfig::Ros2(h) => Some(h.mit_gains),
+        }
+    }
+
+    /// 膝の反転中の MIT ゲイン（[`Ros2Hardware::mit_gains_knee_flip`]）。無ければ `None`。
+    pub fn mit_gains_knee_flip(&self) -> Option<MitGains> {
+        match self {
+            HardwareConfig::Serial(_) => None,
+            HardwareConfig::Ros2(h) => h.mit_gains_knee_flip,
+        }
+    }
+
+    /// ゲインの切り替え時間 [s]。
+    pub fn mit_gains_ramp_s(&self) -> f64 {
+        match self {
+            HardwareConfig::Serial(_) => 0.0,
+            HardwareConfig::Ros2(h) => h.mit_gains_ramp_s.max(0.0),
         }
     }
 

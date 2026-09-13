@@ -50,6 +50,10 @@ pub struct SimOptions {
     /// 追従と比べるときは必ず併せて記録すること。
     pub actuator_kp: f64,
     pub actuator_kv: f64,
+    /// 関節の種類（名前に hip / thigh / calf を含む）ごとの PD。`Some` なら
+    /// `actuator_kp` / `actuator_kv` より優先（実機の MIT ゲインが関節別なのに合わせる）。
+    pub actuator_kp_by_kind: Option<[f64; 3]>,
+    pub actuator_kv_by_kind: Option<[f64; 3]>,
     /// モデルの `effort`（＝アクチュエータが出せるトルクの上限）に掛ける係数。
     ///
     /// **WBC の `wbc.torque_scale` と同じ値を渡すこと。** あちらは「QP が
@@ -114,6 +118,8 @@ impl Default for SimOptions {
             control_period_s: 0.005,
             actuator_kp: 60.0,
             actuator_kv: 1.0,
+            actuator_kp_by_kind: None,
+            actuator_kv_by_kind: None,
             torque_scale: 1.0,
             velocity_kv: 20.0,
             base_height_m: 0.30,
@@ -149,6 +155,8 @@ pub struct MujocoPlant {
     /// 速度で違う意味に使う**ので、両方を控えて毎周期入れ直す。
     position_kp: f64,
     position_kv: f64,
+    /// 関節ごとの位置制御ゲイン（種類別の指定があるとき）。速度制御から戻すときに使う。
+    position_gains_by_joint: Vec<(f64, f64)>,
     velocity_kv: f64,
     /// 1 tick で進める MuJoCo のフレーム数。
     frames_per_tick: u32,
@@ -205,6 +213,27 @@ impl MujocoPlant {
                 j.effort *= opts.torque_scale;
             }
         }
+        // 関節の種類ごとのゲイン（hip / thigh / calf）。
+        if opts.actuator_kp_by_kind.is_some() || opts.actuator_kv_by_kind.is_some() {
+            let pairs: Vec<(String, usize)> = model.joint_map.iter().map(|(n, i)| (n.clone(), *i)).collect();
+            for (name, idx) in pairs {
+                let kind = if name.contains("hip") {
+                    0
+                } else if name.contains("thigh") {
+                    1
+                } else if name.contains("calf") {
+                    2
+                } else {
+                    continue;
+                };
+                if let Some(kp) = opts.actuator_kp_by_kind {
+                    model.joints[idx].actuator_kp = kp[kind];
+                }
+                if let Some(kv) = opts.actuator_kv_by_kind {
+                    model.joints[idx].actuator_kv = kv[kind];
+                }
+            }
+        }
         for (name, q) in &opts.home {
             let idx = *model
                 .joint_map
@@ -225,6 +254,12 @@ impl MujocoPlant {
             joint_idx.push(idx);
         }
 
+        let position_gains_by_joint: Vec<(f64, f64)> = model.joints.iter().map(|j| (j.actuator_kp, j.actuator_kv)).collect();
+        if std::env::var_os("MISA_SIM_GAIN_TRACE").is_some() {
+            for (name, idx) in model.joint_map.iter() {
+                eprintln!("[sim gain] {name}: kp {} kv {}", model.joints[*idx].actuator_kp, model.joints[*idx].actuator_kv);
+            }
+        }
         let mjcf = MjcfExportOptions {
             base_pos: Some([0.0, 0.0, opts.base_height_m]),
             ground_plane: Some(GroundPlaneCfg {
@@ -304,6 +339,7 @@ impl MujocoPlant {
             prev_base_vel_world: None,
             position_kp: opts.actuator_kp,
             position_kv: opts.actuator_kv,
+            position_gains_by_joint,
             velocity_kv: opts.velocity_kv,
             frames_per_tick,
             #[cfg(feature = "render")]
@@ -500,8 +536,9 @@ impl Plant for MujocoPlant {
                         self.model.joints[ji].actuator_kp = a.kp_nm_per_rad;
                         self.model.joints[ji].actuator_kv = a.kd_nm_s_per_rad;
                     } else {
-                        self.model.joints[ji].actuator_kp = self.position_kp;
-                        self.model.joints[ji].actuator_kv = self.position_kv;
+                        let (kp, kv) = self.position_gains_by_joint.get(ji).copied().unwrap_or((self.position_kp, self.position_kv));
+                        self.model.joints[ji].actuator_kp = kp;
+                        self.model.joints[ji].actuator_kv = kv;
                     }
                     self.sim.set_position_target(ji, a.position_rad);
                     // Impedance のときだけ `velocity_rad_s` は目標速度（Position では上限）。

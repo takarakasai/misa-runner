@@ -1080,7 +1080,7 @@ fn default_knee_flip_foot_lift_m() -> f64 {
 }
 
 fn default_knee_flip_stand_phase_s() -> f64 {
-    0.5
+    0.65
 }
 
 fn default_knee_flip_probe_lift_m() -> f64 {
@@ -1435,8 +1435,11 @@ pub struct GaitTuning {
     /// この 2 倍。既定 0.8。
     #[serde(default = "default_knee_flip_phase_s")]
     pub knee_flip_phase_s: f64,
-    /// `stand` の 1 段の時間 [s]。3 脚支持は静的に安定なので `trot` より短くできる。
-    /// 既定 0.5（1 脚 2.5 s、4 脚で約 11 s。0.8 の 5 段だった頃は 24 s）。
+    /// `stand` の 1 段の時間 [s]。3 脚支持は静的に安定（倒れない）が、7 kg の脚を
+    /// 振る反動と立脚の沈みで胴体は揺れる。keel MuJoCo（MIT 500 / 5）の反転中の
+    /// 傾きの最大は 0.5 s で 16°、0.65 s で 14°、0.8 s で 3°。反転中だけ hip / thigh
+    /// を kp 2000 / kd 20 にする（`hardware.mit_gains_knee_flip`）と 0.5 s で 8°、
+    /// 0.65 s で 3°、0.8 s で 1.7°。既定 0.65（4 脚で 15 s。5 段だった頃は 24 s）。
     #[serde(default = "default_knee_flip_stand_phase_s")]
     pub knee_flip_stand_phase_s: f64,
     /// 膝を伸ばし切るときに脚を向ける方向。**胴体座標で足先が hip より

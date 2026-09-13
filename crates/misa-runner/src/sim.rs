@@ -251,11 +251,33 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         })
         .collect();
 
+    // `--kp 500` は全関節、`--kp 2000,2000,500` は hip / thigh / calf 別（`--kv` も同じ）。
+    let parse_gain = |key: &str, default: f64| -> Result<(f64, Option<[f64; 3]>), String> {
+        match cli.str(key) {
+            None => Ok((default, None)),
+            Some(s) if s.contains(',') => {
+                let v: Vec<f64> = s
+                    .split(',')
+                    .map(|x| x.trim().parse::<f64>().map_err(|e| format!("--{key} {s:?}: {e}")))
+                    .collect::<Result<_, _>>()?;
+                if v.len() != 3 {
+                    return Err(format!("--{key} は 1 つの値か hip,thigh,calf の 3 つ"));
+                }
+                Ok((v[0], Some([v[0], v[1], v[2]])))
+            }
+            Some(s) => Ok((s.trim().parse::<f64>().map_err(|e| format!("--{key} {s:?}: {e}"))?, None)),
+        }
+    };
+    let (kp, kp_kind) = parse_gain("kp", 60.0)?;
+    let (kv, kv_kind) = parse_gain("kv", 1.0)?;
+    let kp_kv = (kp, kv, kp_kind, kv_kind);
     let opts = SimOptions {
         misa_path: cfg.control.model.clone(),
         control_period_s: dt,
-        actuator_kp: cli.f64("kp").unwrap_or(60.0),
-        actuator_kv: cli.f64("kv").unwrap_or(1.0),
+        actuator_kp: kp_kv.0,
+        actuator_kv: kp_kv.1,
+        actuator_kp_by_kind: kp_kv.2,
+        actuator_kv_by_kind: kp_kv.3,
         // **QP の上限とアクチュエータの上限を揃える。** 揃えないと、QP は
         // 出ないトルクを当てにした解を出す。
         torque_scale: cfg.wbc.torque_scale,
@@ -324,6 +346,11 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     // 出どころ（モデルの慣性の和。根リンクは `Robot::load` が補っている）。
     let weight_n = robot.model.inertias.iter().map(|i| i.mass).sum::<f64>() * 9.81;
     let mut com_report = crate::estimator::ComReport::default();
+    // MIT ゲインの切り替え（膝の反転中だけ `mit_gains_knee_flip`）。0〜1 のランプ。
+    let mut gain_blend = 0.0f64;
+    // 膝の反転中の胴体の傾き（roll / pitch の最大）と、そのときのゲイン。
+    let mut flip_tilt_max = [0.0f64; 2];
+    let mut flip_ticks = 0usize;
     let mut controller = Controller::with_arm(robot, cfg.clone(), head_driven);
     // **可動域は `dump` と同じ表で、同じ関数で見る。**
     //
@@ -511,6 +538,11 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             attitude,
             dt,
         );
+        if controller.state() == State::FlippingKnees {
+            flip_ticks += 1;
+            flip_tilt_max[0] = flip_tilt_max[0].max(attitude[0].abs());
+            flip_tilt_max[1] = flip_tilt_max[1].max(attitude[1].abs());
+        }
         if controller.is_standing_still() {
             let feet = controller.robot().feet_from_posture(&measured);
             if let Some((com_xy, fz_each)) = crate::estimator::com_from_foot_forces(&feet, &fz) {
@@ -732,7 +764,17 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             &out.targets,
             cfg.hardware.default_max_speed_rad_s(),
             out.leg_mode == misa_hal::joint::JointMode::Idle,
-            cfg.hardware.mit_gains(),
+            {
+                // 膝の反転中はゲインを寄せる（無ければそのまま）。
+                let flipping = controller.state() == State::FlippingKnees;
+                let ramp = cfg.hardware.mit_gains_ramp_s();
+                let step = if ramp > 0.0 { dt / ramp } else { 1.0 };
+                gain_blend = (gain_blend + if flipping { step } else { -step }).clamp(0.0, 1.0);
+                match (cfg.hardware.mit_gains(), cfg.hardware.mit_gains_knee_flip()) {
+                    (Some(a), Some(b)) => Some(misa_hal::config::MitGains::lerp(a, b, gain_blend)),
+                    (a, _) => a,
+                }
+            },
             plan.as_ref(),
             gravity_ff.as_ref(),
             target_qd.as_ref(),
@@ -1154,6 +1196,18 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         )),
         None => {
             println!("転倒なし");
+            if flip_ticks > 0 {
+                println!(
+                    "膝の反転中の胴体の傾き 最大: roll {:.1}° / pitch {:.1}°（{:.1} s、MIT ゲイン {}）",
+                    flip_tilt_max[0].to_degrees(),
+                    flip_tilt_max[1].to_degrees(),
+                    flip_ticks as f64 * dt,
+                    match cfg.hardware.mit_gains_knee_flip() {
+                        Some(g) => format!("反転中 kp {:?} / kd {:?}", g.kp, g.kd),
+                        None => "切り替え無し".to_string(),
+                    }
+                );
+            }
             Ok(())
         }
     }

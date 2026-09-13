@@ -599,6 +599,8 @@ pub fn run(
     // 出どころ（モデルの慣性の和）。
     let weight_n = robot.model.inertias.iter().map(|i| i.mass).sum::<f64>() * 9.81;
     let mut com_report = crate::estimator::ComReport::default();
+    // MIT ゲインの切り替え（膝の反転中だけ `mit_gains_knee_flip`）。0〜1 のランプ。
+    let mut gain_blend = 0.0f64;
     if cfg.control.gravity_feedforward.is_on() {
         log::info!(
             "開ループの重力補償を τ_ff に載せます（{}、体重 {:.1} N、倍率 {:.2}）。WBC が回っているあいだは WBC の解が優先",
@@ -908,7 +910,17 @@ pub fn run(
             &out.targets,
             cfg.hardware.default_max_speed_rad_s(),
             out.leg_mode == JointMode::Idle,
-            cfg.hardware.mit_gains(),
+            {
+                // 膝の反転中はゲインを寄せる（無ければそのまま）。
+                let flipping = controller.state() == State::FlippingKnees;
+                let ramp = cfg.hardware.mit_gains_ramp_s();
+                let step = if ramp > 0.0 { period.as_secs_f64() / ramp } else { 1.0 };
+                gain_blend = (gain_blend + if flipping { step } else { -step }).clamp(0.0, 1.0);
+                match (cfg.hardware.mit_gains(), cfg.hardware.mit_gains_knee_flip()) {
+                    (Some(a), Some(b)) => Some(misa_hal::config::MitGains::lerp(a, b, gain_blend)),
+                    (a, _) => a,
+                }
+            },
             plan.as_ref(),
             gravity_ff.as_ref(),
             target_qd.as_ref(),
