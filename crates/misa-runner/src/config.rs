@@ -210,6 +210,13 @@ impl AppConfig {
         let bmax = self.gait.knee_flip_balance_max_m;
         let brate = self.gait.knee_flip_balance_rate_m_s;
         let (blpf, bslpf) = (self.gait.knee_flip_balance_lpf_hz, self.gait.knee_flip_balance_sdot_lpf_hz);
+        let (pl, ph, pr) = (self.gait.knee_flip_probe_lift_m, self.gait.knee_flip_probe_hold_s, self.gait.knee_flip_probe_rounds);
+        let pm = self.gait.knee_flip_probe_move_s;
+        if !((0.0..0.05).contains(&pl) && (0.0..2.0).contains(&ph) && (0.1..3.0).contains(&pm) && pr <= 5) {
+            return Err(format!(
+                "gait.knee_flip_probe_lift_m {pl}（0〜0.05 m）/ knee_flip_probe_hold_s {ph}（0〜2 s）/ knee_flip_probe_rounds {pr}（0〜5）が範囲外"
+            ));
+        }
         if !(bk.iter().all(|k| k.is_finite() && *k >= 0.0 && *k < 1000.0)
             && bmax > 0.0
             && bmax < 0.2
@@ -1068,6 +1075,22 @@ fn default_knee_flip_foot_lift_m() -> f64 {
     0.02
 }
 
+fn default_knee_flip_probe_lift_m() -> f64 {
+    0.03
+}
+
+fn default_knee_flip_probe_hold_s() -> f64 {
+    0.4
+}
+
+fn default_knee_flip_probe_move_s() -> f64 {
+    1.0
+}
+
+fn default_knee_flip_probe_rounds() -> u32 {
+    0
+}
+
 fn default_knee_flip_shift_m() -> f64 {
     0.05
 }
@@ -1339,6 +1362,29 @@ pub struct GaitTuning {
     /// `rest` で、載ったあと足を地面から浮かす量 [m]。既定 0.02。
     #[serde(default = "default_knee_flip_foot_lift_m")]
     pub knee_flip_foot_lift_m: f64,
+    /// `trot` の**重心の探り**: 浮かせる前に対角 2 脚をこれだけ [m] 浮かせて
+    /// `knee_flip_probe_hold_s` 保持し、胴体が倒れ始める角加速度から実機の重心の
+    /// 支持線からのずれを測る（重力がセンサ。`I·θ̈ = m·g·x`）。測ったぶん胴体を
+    /// 寄せ直してから本番の浮かすに入る。浮かせる量が小さいので、倒れ始めても
+    /// 足がすぐ着いて止まる（3 cm なら 5° で着く）。**kp 500 の脚は荷重で 1 cm 余り
+    /// 沈んでいるので、5 mm では足が地面を離れない。** 既定 0.03。
+    #[serde(default = "default_knee_flip_probe_lift_m")]
+    pub knee_flip_probe_lift_m: f64,
+    /// 探りで浮かせたまま測る時間 [s]。既定 0.4。
+    #[serde(default = "default_knee_flip_probe_hold_s")]
+    pub knee_flip_probe_hold_s: f64,
+    /// 探りで足を上げ下げする時間 [s]。既定 1.0。**速く上げると脚の反動で胴体が
+    /// 回り**（0.3 s で ±2°）、重力で倒れ始める角加速度が読めない。
+    #[serde(default = "default_knee_flip_probe_move_s")]
+    pub knee_flip_probe_move_s: f64,
+    /// 探りの回数（1 回目の残差を 2 回目で詰める）。**既定 0 = 探らない（試験中）。**
+    ///
+    /// MuJoCo（kp 500）ではまだ測れていない: 上げの反動と脚の沈みで、モデルが正しい
+    /// ときも −10〜−15 mm と読み、注入した ±16〜28 mm のずれを追わない。3 cm 上げると
+    /// 保持中に 17° まで倒れる回もある。使うなら sim で「重心の探り」のログが注入した
+    /// ずれと合うことを確かめてから。
+    #[serde(default = "default_knee_flip_probe_rounds")]
+    pub knee_flip_probe_rounds: u32,
     /// `trot` の釣り合いの帰還ゲイン `[k_θ, k_ω, k_s, k_ṡ]`。胴体を支持線と直角に
     /// 動かす量 [m] = −(k_θ·θ + k_ω·θ̇ + k_s·s + k_ṡ·ṡ)。θ は支持線まわりの傾き
     /// [rad]（重心が動く向きを正）、s は**実測**（エンコーダの FK）の全身重心の
@@ -1588,6 +1634,10 @@ impl Default for GaitTuning {
             com_offset_body_m: [0.0, 0.0],
             knee_flip_rest_height_m: None,
             knee_flip_foot_lift_m: default_knee_flip_foot_lift_m(),
+            knee_flip_probe_lift_m: default_knee_flip_probe_lift_m(),
+            knee_flip_probe_hold_s: default_knee_flip_probe_hold_s(),
+            knee_flip_probe_move_s: default_knee_flip_probe_move_s(),
+            knee_flip_probe_rounds: default_knee_flip_probe_rounds(),
             knee_flip_shift_m: default_knee_flip_shift_m(),
             knee_flip_balance_gains: default_knee_flip_balance_gains(),
             knee_flip_balance_rate_m_s: default_knee_flip_balance_rate_m_s(),
