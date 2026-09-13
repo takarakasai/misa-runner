@@ -1117,7 +1117,7 @@ impl Controller {
         let feet_nominal: [nalgebra::Vector3<f64>; 4] = std::array::from_fn(|s| kin_ref.legs()[s].nominal_foot_body);
         let feet_ref: [nalgebra::Vector3<f64>; 4] = std::array::from_fn(|s| feet_nominal[s] + self.stance_xy_offset[s]);
         let mut next_offset = self.stance_xy_offset;
-        let at_z_all = |xy: &[nalgebra::Vector3<f64>; 4], z: f64| -> [nalgebra::Vector3<f64>; 4] {
+        let _at_z_all = |xy: &[nalgebra::Vector3<f64>; 4], z: f64| -> [nalgebra::Vector3<f64>; 4] {
             std::array::from_fn(|s| nalgebra::Vector3::new(xy[s].x, xy[s].y, z))
         };
         // 可動域の内側か（モデル座標）。
@@ -1276,6 +1276,23 @@ impl Controller {
             Ok(())
         };
 
+        // ロールで外へ倒して腿と calf を同時に折り返す（`trot` / `stand`）ための共通量。
+        // 外向きのロール（IK 座標で左 + / 右 −、可動域の 0.02 rad 手前）。
+        let roll_out = |slot: usize| -> f64 {
+            let (lo, hi) = limit(slot, 0);
+            let out_ik = if is_left(slot) { 1.0 } else { -1.0 };
+            (out_ik * (hi.min(-lo) - 0.02) * signs[slot][0]).clamp(lo + 0.02, hi - 0.02)
+        };
+        let leg0 = kin_ref.legs()[0];
+        let l_total = leg0.upper_leg_m + leg0.lower_leg_m;
+        let roll_mag = {
+            let (lo, hi) = limit(0, 0);
+            hi.min(-lo) - 0.02
+        };
+        // 反転中の胴体高さ。脚が一直線になる瞬間の足先の下がり (上腿+下腿)·cos(ロール)
+        // + 3 cm を床から確保する（keel 0.30 → 0.34 m）。
+        let h_flip = h_ref.max(l_total * roll_mag.cos() + 0.03);
+
         match g.knee_flip_style {
             KneeFlipStyle::Rest => {
                 let h_rest = g
@@ -1419,20 +1436,6 @@ impl Controller {
                 //     帰還して立脚の足先をずらす（この段の目標は初期値）、
                 //  4. 着けたら、ずらした位置から計画へ滑らかに戻す（`PosePlayer::rebase`）。
                 let _ = &park;
-                // 外向きのロール（IK 座標で左 + / 右 −、可動域の 0.02 rad 手前）。
-                let roll_out = |slot: usize| -> f64 {
-                    let (lo, hi) = limit(slot, 0);
-                    let out_ik = if is_left(slot) { 1.0 } else { -1.0 };
-                    (out_ik * (hi.min(-lo) - 0.02) * signs[slot][0]).clamp(lo + 0.02, hi - 0.02)
-                };
-                let leg0 = kin_ref.legs()[0];
-                let l_total = leg0.upper_leg_m + leg0.lower_leg_m;
-                let roll_mag = {
-                    let (lo, hi) = limit(0, 0);
-                    hi.min(-lo) - 0.02
-                };
-                // 反転中の胴体高さ。一直線の脚の下がり + 3 cm を床から確保する。
-                let h_flip = h_ref.max(l_total * roll_mag.cos() + 0.03);
                 let z_float = -h_flip + g.knee_flip_foot_lift_m;
                 cur_floor.set(-h_flip);
                 let shifted = |slot: usize, u: f64, n: nalgebra::Vector2<f64>, z: f64| {
@@ -1565,9 +1568,20 @@ impl Controller {
                 push("中央へ".into(), cur, 2.0 * phase, [true; 4]);
             }
             KneeFlipStyle::Stand => {
+                // **立ったまま 1 脚ずつ、他の 3 脚で支える。** 静的に安定（重心を支持三角形の
+                // 内側に 5 cm 入れる）なので釣り合いの制御は要らず、段も短くできる。
+                // 脚の反転は trot と同じく、hip のロールで外へ倒して腿と calf を同時に
+                // 折り返す 3 段（浮かす → 反転 → 戻す）。畳んで振り出す 5 段だった頃の
+                // 24 s が約 11 s になる。反転中は胴体を h_flip に上げる。
                 let shift = g.knee_flip_shift_m;
+                let ph = g.knee_flip_stand_phase_s;
+                cur_floor.set(-h_flip);
+                let z_float = -h_flip + g.knee_flip_foot_lift_m;
+                let at = |f: nalgebra::Vector3<f64>, z: f64| nalgebra::Vector3::new(f.x, f.y, z);
+                let order = [0usize, 3, 1, 2];
+                let mut first = true;
                 // 対角を交互に。
-                for &slot in &[0usize, 3, 1, 2] {
+                for &slot in &order {
                     if !flip[slot] {
                         continue;
                     }
@@ -1577,27 +1591,38 @@ impl Controller {
                     let dy = if slot % 2 == 0 { shift } else { -shift };
                     let feet_shift: [nalgebra::Vector3<f64>; 4] =
                         std::array::from_fn(|s| feet_ref[s] + nalgebra::Vector3::new(dx, dy, 0.0));
-                    let done: [bool; 4] = std::array::from_fn(|s| {
-                        // すでに反転を終えた脚は新しい向き。
-                        let order = [0usize, 3, 1, 2];
-                        let me = order.iter().position(|x| *x == slot).unwrap();
-                        let it = order.iter().position(|x| *x == s).unwrap();
-                        flip[s] && it < me
-                    });
                     for s2 in 0..4 {
-                        let fwd = knee_forward_for(if done[s2] { new } else { old }, s2);
-                        cur.legs[s2] = ik(s2, feet_shift[s2], fwd)?;
+                        cur.legs[s2] = ik(s2, at(feet_shift[s2], -h_flip), cur_forward.get()[s2])?;
                     }
                     let tag = format!(" {}", leg_name(slot));
-                    push(format!("寄せる{tag}"), cur, 2.0 * phase, [true; 4]);
+                    // 最初の寄せは胴体を上げる動きも兼ねるので長め。
+                    push(format!("寄せる{tag}"), cur, if first { 2.0 * ph } else { ph }, [true; 4]);
+                    first = false;
                     let mut stance = [true; 4];
                     stance[slot] = false;
-                    flip_legs(&mut cur, &[slot], stance, &feet_shift, -h_ref, false, &mut push, &tag)?;
+                    // 浮かす + 倒す。
+                    cur.legs[slot] = ik(slot, at(feet_shift[slot], z_float), cur_forward.get()[slot])?;
+                    cur.legs[slot][0] = roll_out(slot);
+                    push(format!("浮かす{tag}"), cur, ph, stance);
+                    // 反転: ロールは外のまま、腿と calf を着地姿勢（新しい向き）の角へ同時に。
+                    let landed = ik(slot, at(feet_shift[slot], z_float), knee_forward_for(new, slot))?;
+                    cur.legs[slot][1] = landed[1];
+                    cur.legs[slot][2] = landed[2];
+                    let mut fwd_now = cur_forward.get();
+                    fwd_now[slot] = knee_forward_for(new, slot);
+                    cur_forward.set(fwd_now);
+                    push(format!("反転{tag}"), cur, ph, stance);
+                    // 戻す: ロールを戻して足先を浮かせ位置へ。
+                    cur.legs[slot] = landed;
+                    push(format!("戻す{tag}"), cur, ph, stance);
+                    cur.legs[slot] = ik(slot, at(feet_shift[slot], -h_flip), knee_forward_for(new, slot))?;
+                    push(format!("着ける{tag}"), cur, ph, [true; 4]);
                 }
+                cur_floor.set(-h_ref);
                 for slot in 0..4 {
                     cur.legs[slot] = ik(slot, feet_ref[slot], knee_forward_for(new, slot))?;
                 }
-                push("中央へ".into(), cur, 2.0 * phase, [true; 4]);
+                push("中央へ".into(), cur, 2.0 * ph, [true; 4]);
             }
         }
 

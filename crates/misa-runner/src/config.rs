@@ -211,6 +211,10 @@ impl AppConfig {
         let brate = self.gait.knee_flip_balance_rate_m_s;
         let (blpf, bslpf) = (self.gait.knee_flip_balance_lpf_hz, self.gait.knee_flip_balance_sdot_lpf_hz);
         let (pl, ph, pr) = (self.gait.knee_flip_probe_lift_m, self.gait.knee_flip_probe_hold_s, self.gait.knee_flip_probe_rounds);
+        let sp = self.gait.knee_flip_stand_phase_s;
+        if !(0.2..3.0).contains(&sp) {
+            return Err(format!("gait.knee_flip_stand_phase_s = {sp} は 0.2〜3 s で"));
+        }
         let pm = self.gait.knee_flip_probe_move_s;
         if !((0.0..0.05).contains(&pl) && (0.0..2.0).contains(&ph) && (0.1..3.0).contains(&pm) && pr <= 5) {
             return Err(format!(
@@ -1075,6 +1079,10 @@ fn default_knee_flip_foot_lift_m() -> f64 {
     0.02
 }
 
+fn default_knee_flip_stand_phase_s() -> f64 {
+    0.5
+}
+
 fn default_knee_flip_probe_lift_m() -> f64 {
     0.03
 }
@@ -1423,9 +1431,14 @@ pub struct GaitTuning {
     /// （keel の足パターン ±0.245 × ±0.197 で、重心が対角線から約 5 cm 内側に入る）。
     #[serde(default = "default_knee_flip_shift_m")]
     pub knee_flip_shift_m: f64,
-    /// 振り付けの 1 段の時間 [s]。胴体を下ろす・上げる・寄せる段はこの 2 倍。既定 0.8。
+    /// 振り付けの 1 段の時間 [s]（`rest` / `trot`）。胴体を下ろす・上げる・寄せる段は
+    /// この 2 倍。既定 0.8。
     #[serde(default = "default_knee_flip_phase_s")]
     pub knee_flip_phase_s: f64,
+    /// `stand` の 1 段の時間 [s]。3 脚支持は静的に安定なので `trot` より短くできる。
+    /// 既定 0.5（1 脚 2.5 s、4 脚で約 11 s。0.8 の 5 段だった頃は 24 s）。
+    #[serde(default = "default_knee_flip_stand_phase_s")]
+    pub knee_flip_stand_phase_s: f64,
     /// 膝を伸ばし切るときに脚を向ける方向。**胴体座標で足先が hip より
     /// これだけ下**になる角度に腿を振る（前脚は前へ、後脚は後ろへ）。
     /// 0 なら水平（既定）。下げると、畳んだ calf を伸ばす途中で下腿が真下を
@@ -1645,6 +1658,7 @@ impl Default for GaitTuning {
             knee_flip_balance_sdot_lpf_hz: default_knee_flip_balance_sdot_lpf_hz(),
             knee_flip_balance_max_m: default_knee_flip_balance_max_m(),
             knee_flip_phase_s: default_knee_flip_phase_s(),
+            knee_flip_stand_phase_s: default_knee_flip_stand_phase_s(),
             knee_flip_out_z_m: default_knee_flip_out_z_m(),
             mpc_force_cost: None,
             estimator: EstimatorKind::LegOdometry,
