@@ -180,6 +180,8 @@ pub struct WbcStatus {
     /// 解が出した接地力の鉛直成分の合計 [N]。体重（`m·g`）と大きく違えば
     /// 参照か接地フラグが疑わしい。
     pub f_z_total_n: f64,
+    /// **検算に落ちて解を捨てたか。** 捨てた周期は重力補償トルクだけを出す。
+    pub rejected: bool,
     /// 参照が MPC 由来か。**`false` なら準静的な自前の参照**で、MPC 歩容を
     /// 選んだつもりで CHAMP のままだった、というのがここで分かる。
     pub mpc_driven: bool,
@@ -292,6 +294,8 @@ pub struct WbcLayer {
     last_swing_target: [[f64; 3]; 4],
     /// 一度も解けていないことを 1 度だけ言うためのフラグ。
     warned_infeasible: bool,
+    /// 検算に連続で落ちた周期数。**1 周期だけなら想定内。**
+    rejected_run: usize,
     /// 遊脚の加速度誤差積分（`swing_accel_integral_k`）の状態:
     /// 「離地時の q̇ に WBC の q̈ を積んだ速度」。立脚中は意味を持たない。
     swing_vel_pred: [[f64; 3]; 4],
@@ -423,6 +427,7 @@ impl WbcLayer {
             yaw_offset: 0.0,
             last_swing_target: [[0.0; 3]; 4],
             warned_infeasible: false,
+            rejected_run: 0,
             swing_vel_pred: [[0.0; 3]; 4],
             was_swing: [false; 4],
         })
@@ -616,19 +621,55 @@ impl WbcLayer {
         );
         self.x_prev = Some(sol.x_full.clone());
 
-        // **NaN を実機へ出さない。** QP が壊れた周期は前回の解を捨てて
-        // 重力補償トルクだけに落とす（脱力よりは崩れない）。
-        let sane = sol.tau.iter().all(|t| t.is_finite())
+        // **壊れた解を実機へ出さない。** 採用する前に検算し、外れた周期は
+        // 解を捨てて重力補償トルクだけに落とす（脱力よりは崩れない）。
+        //
+        // 見るものが 2 つある。
+        //
+        // 1. **有限かどうか。** QP が数値的に破綻すると NaN が出る。
+        // 2. **接地力の合計が体重と釣り合っているか。** HoQP は優先度 0 の
+        //    不等式を最小二乗で解くので、**拘束集合のランクが変わる周期に
+        //    「何も満たさない解」**を返すことがある。keel で実測したのは
+        //    「接地力の合計 0.1 N（体重 523 N）なのに胴体の角加速度
+        //    57 rad/s²」で、運動方程式と矛盾している。NaN ではないので
+        //    1 だけでは捕まらない。**踏み替えのたび**（trot の半周期
+        //    0.2 s ごと）に出ていた。
+        //
+        // **4 脚とも浮いている周期は見ない。** 接地力 0 がそこでは正しい。
+        let stance_count = obs.stance.iter().filter(|s| **s).count();
+        let f_z_total: f64 = (0..4)
+            .map(|i| sol.f_grf[3 * i + 2])
+            .filter(|f| f.is_finite())
+            .sum();
+        let finite = sol.tau.iter().all(|t| t.is_finite())
             && sol.q_ddot.iter().all(|a| a.is_finite());
+        let weight = self.mass_kg * G;
+        let grf_ok = !self.cfg.solution_check
+            || stance_count == 0
+            || (f_z_total >= self.cfg.check_grf_min_frac * weight
+                && f_z_total <= self.cfg.check_grf_max_frac * weight);
+        let sane = finite && grf_ok;
         if !sane {
             self.x_prev = None;
-            if !self.warned_infeasible {
+            self.rejected_run += 1;
+            // **1 周期だけなら想定内**（拘束集合が変わった瞬間）。続くなら
+            // 設定かモデルが疑わしいので、そのときだけ声を上げる。
+            if !self.warned_infeasible && (!finite || self.rejected_run >= 4) {
                 self.warned_infeasible = true;
                 log::error!(
-                    "WBC の解が数値的に壊れました。重力補償トルクだけに落とします。\
-                     接地フラグ・摩擦・トルク上限を確かめてください"
+                    "WBC の解を採用できません（{}）。重力補償トルクだけに落としています。\
+                     接地フラグ・摩擦・トルク上限・質量を確かめてください",
+                    if !finite {
+                        "数値が壊れています".to_string()
+                    } else {
+                        format!(
+                            "接地 {stance_count} 本で接地力の合計 {f_z_total:.1} N、体重 {weight:.1} N"
+                        )
+                    }
                 );
             }
+        } else {
+            self.rejected_run = 0;
         }
 
         if std::env::var_os("MISA_WBC_DEBUG").is_some() {
@@ -665,16 +706,12 @@ impl WbcLayer {
         }
 
         let mut status = WbcStatus {
-            stance_count: obs.stance.iter().filter(|s| **s).count(),
+            stance_count,
             mpc_driven,
+            f_z_total_n: f_z_total,
+            rejected: !sane,
             ..WbcStatus::default()
         };
-        for slot in 0..4 {
-            let fz = sol.f_grf[3 * slot + 2];
-            if fz.is_finite() {
-                status.f_z_total_n += fz;
-            }
-        }
 
         // ── 出力へ落とす ────────────────────────────────────
         //
@@ -1470,6 +1507,97 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen.len(), 12);
+    }
+
+    /// **検算に落ちた周期は解を捨てて重力補償トルクへ落ちる。**
+    ///
+    /// 「接地力の合計が体重の 5 倍以上でなければ異常」という無茶な下限を
+    /// 入れて、正常な立位を強制的に弾かせている。実機で弾きたいのは
+    /// 「接地力 0.1 N（体重 523 N）なのに胴体の角加速度 57 rad/s²」という
+    /// 矛盾した解で、**NaN ではないので有限性の検査だけでは捕まらない。**
+    #[test]
+    fn an_implausible_solution_falls_back_to_gravity_compensation() {
+        let r = robot();
+        let stand = crate::robot::rest_pose(&crate::config::AppConfig::default(), &r);
+        let zero = JointVec::zeros();
+        let obs = |_: ()| WbcObservation {
+            measured_q: &stand,
+            measured_qd: &zero,
+            target_q: &stand,
+            target_foot_body: [na::Vector3::zeros(); 4],
+            attitude_rad: [0.0; 3],
+            gyro_rad_s: [0.0; 3],
+            planned_yaw_rad: 0.0,
+            body_velocity: [0.0; 3],
+            body: level_stand(),
+            mpc: None,
+            stance: [true; 4],
+            dt: 0.005,
+        };
+
+        let mut ok = WbcLayer::new(
+            &r,
+            &WbcConfig {
+                enabled: true,
+                ..WbcConfig::default()
+            },
+        )
+        .unwrap();
+        let good = ok.solve(&obs(()));
+        assert!(!good.status.rejected, "正常な立位が弾かれてはいけない");
+
+        let mut strict = WbcLayer::new(
+            &r,
+            &WbcConfig {
+                enabled: true,
+                check_grf_min_frac: 5.0,
+                ..WbcConfig::default()
+            },
+        )
+        .unwrap();
+        let bad = strict.solve(&obs(()));
+        assert!(bad.status.rejected, "検算に落ちるはず");
+        // 捨てた周期は重力補償トルクだけ。正常な解とは違う値になる。
+        let same = (0..4).all(|l| {
+            (0..3).all(|k| {
+                (bad.legs[l][k].torque_nm - good.legs[l][k].torque_nm).abs() < 1e-9
+            })
+        });
+        assert!(!same, "解を捨てたのにトルクが変わっていない");
+    }
+
+    /// **4 脚とも浮いていれば接地力 0 が正しい。** そこで検算を効かせると
+    /// 遊脚期のたびに捨てることになる。
+    #[test]
+    fn a_fully_airborne_tick_is_not_rejected() {
+        let r = robot();
+        let stand = crate::robot::rest_pose(&crate::config::AppConfig::default(), &r);
+        let zero = JointVec::zeros();
+        let mut w = WbcLayer::new(
+            &r,
+            &WbcConfig {
+                enabled: true,
+                check_grf_min_frac: 5.0,
+                ..WbcConfig::default()
+            },
+        )
+        .unwrap();
+        let plan = w.solve(&WbcObservation {
+            measured_q: &stand,
+            measured_qd: &zero,
+            target_q: &stand,
+            target_foot_body: [na::Vector3::zeros(); 4],
+            attitude_rad: [0.0; 3],
+            gyro_rad_s: [0.0; 3],
+            planned_yaw_rad: 0.0,
+            body_velocity: [0.0; 3],
+            body: level_stand(),
+            mpc: None,
+            stance: [false; 4],
+            dt: 0.005,
+        });
+        assert_eq!(plan.status.stance_count, 0);
+        assert!(!plan.status.rejected);
     }
 
     /// **静止して 4 脚接地なら、接地力の合計は体重に近い。** ここが合わ

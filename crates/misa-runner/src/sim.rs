@@ -364,6 +364,11 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let limits = crate::snapshot::safety_config(cfg, &layout, &model_limits, &model_rates, &model_efforts, dt, 5.0);
     let mut violations: Vec<String> = Vec::new();
     let mut shadow_gate = misa_core::SafetyGate::new(limits.clone());
+    // `--gate` で実機と同じゲートを指令そのものに掛ける。
+    let use_gate = cli.flag("safety-gate");
+    let mut gate = misa_core::SafetyGate::new(limits.clone());
+    let mut gate_torque = 0usize;
+    let mut gate_torque_rate = 0usize;
     let recorder = match cli.str("record") {
         Some(path) => {
             let header = misa_core::record::Header {
@@ -425,6 +430,10 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
     let mut tau_step_max = [0.0f64; 12];
     let mut tau_step_at = [0.0f64; 12];
     let mut prev_tau = [0.0f64; 12];
+    // WBC の解を検算で捨てた周期（`wbc.solution_check`）。**1 周期だけなら
+    // 想定内**（拘束集合が変わった瞬間）だが、続くなら設定かモデルが疑わしい。
+    let mut wbc_ticks = 0usize;
+    let mut wbc_rejected = 0usize;
     // **着地の衝撃。** 接地が false → true になった周期の足の鉛直速度（直前の
     // 周期との差分）と、その後 50 ms の最大鉛直力。計画上の着地速度は 0
     // （遊脚の山は sin² で終端速度 0）なので、ここが大きければ「計画より早く
@@ -774,7 +783,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                 eprintln!("{line}");
             }
         }
-        let outgoing = crate::snapshot::command(
+        let mut outgoing = crate::snapshot::command(
             &layout,
             &out.targets,
             cfg.hardware.default_max_speed_rad_s(),
@@ -802,6 +811,22 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             gravity_ff.as_ref(),
             target_qd.as_ref(),
         );
+        if let Some(p) = plan.as_ref() {
+            wbc_ticks += 1;
+            if p.status.rejected {
+                wbc_rejected += 1;
+            }
+        }
+        // **実機と同じゲートを通す**（`--safety-gate`）。既定は影のまま。
+        //
+        // 影で回すと記録には残るが指令は変わらないので、**ゲートが歩容に
+        // 何をするかがシムでは見えない**。トルクのレート制限のように
+        // 「実機でだけ効く」ものを実機の前に確かめるための口。
+        if use_gate {
+            let verdict = gate.apply(&mut outgoing, &obs, Duration::from_secs_f64(dt));
+            gate_torque_rate += verdict.torque_rate_limited.len();
+            gate_torque += verdict.torque_limited.len();
+        }
         for i in 0..12 {
             let tau = outgoing
                 .get(misa_core::AxisId::new(i as u16))
@@ -1141,6 +1166,17 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             })
             .collect();
         println!("前置トルクの最大段差 [N·m/周期]（歩容の出入りで階段状に入っていないか。上位 4 軸）  {s}");
+    }
+    if use_gate {
+        println!(
+            "安全ゲート（--safety-gate）が丸めた延べ軸数  トルク {gate_torque} / トルクの変化率 {gate_torque_rate}"
+        );
+    }
+    if wbc_ticks > 0 {
+        println!(
+            "WBC の解を検算で捨てた周期  {wbc_rejected} / {wbc_ticks}（{:.1} %）",
+            wbc_rejected as f64 / wbc_ticks as f64 * 100.0
+        );
     }
     if td_n.iter().any(|&n| n > 0) {
         let s: String = (0..4)

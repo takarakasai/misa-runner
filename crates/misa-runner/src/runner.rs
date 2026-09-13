@@ -962,11 +962,12 @@ pub fn run(
                 log::info!("安全ゲート: 丸めなくなりました");
             } else {
                 log::warn!(
-                    "安全ゲート: 可動域 {} 軸 / 変化率 {} 軸 / トルク {} 軸\
-                     {}{}",
+                    "安全ゲート: 可動域 {} 軸 / 変化率 {} 軸 / トルク {} 軸 / \
+                     トルク変化率 {} 軸{}{}",
                     verdict.clamped.len(),
                     verdict.rate_limited.len(),
                     verdict.torque_limited.len(),
+                    verdict.torque_rate_limited.len(),
                     if verdict.held_for_stale_observation {
                         " / 観測が古いので目標を進めていません"
                     } else {

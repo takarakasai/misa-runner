@@ -45,6 +45,21 @@ pub struct AxisLimits {
     pub max_target_rate_rad_s: f64,
     /// トルク指令の上限 [N·m]。`0` なら制限しない。
     pub max_torque_nm: f64,
+    /// **トルク指令が動いてよい速さ** [N·m/s]。`0` なら制限しない。
+    ///
+    /// [`max_torque_nm`](Self::max_torque_nm) との関係は
+    /// [`max_target_rate_rad_s`](Self::max_target_rate_rad_s) と可動域の
+    /// 関係と同じ。**絶対値の上限だけでは「1 周期で −40 → +40」が素通り
+    /// する。**
+    ///
+    /// これが要る理由は WBC にある。接地集合が変わる周期に階層 QP が
+    /// 1 周期だけ矛盾した解を返すことがあり（接地力の合計 0.1 N に対して
+    /// 胴体の角加速度 57 rad/s² など）、そのとき τ が 145 N·m/周期
+    /// = 29,000 N·m/s 跳ぶ。keel の実測で**踏み替えのたび**（trot の
+    /// 半周期 0.2 s ごと）に出た。解そのものを弾くのは
+    /// `wbc.solution_check` の仕事で、**こちらはそれを抜けたものを受ける
+    /// 最後の砦**。
+    pub max_torque_rate_nm_s: f64,
     /// 速度指令の上限 [rad/s]。`0` なら制限しない。
     ///
     /// [`max_target_rate_rad_s`](Self::max_target_rate_rad_s) とは別物。
@@ -62,6 +77,7 @@ impl AxisLimits {
         max_rad: f64::INFINITY,
         max_target_rate_rad_s: 0.0,
         max_torque_nm: 0.0,
+        max_torque_rate_nm_s: 0.0,
         max_velocity_rad_s: 0.0,
     };
 }
@@ -93,6 +109,8 @@ pub struct SafetyVerdict {
     pub rate_limited: Vec<AxisId>,
     /// トルク指令を丸めた軸。
     pub torque_limited: Vec<AxisId>,
+    /// トルク指令の**変化**を鈍らせた軸。
+    pub torque_rate_limited: Vec<AxisId>,
     /// 速度指令を丸めた軸。
     pub velocity_limited: Vec<AxisId>,
     /// 観測が古すぎて目標を進めなかったか。
@@ -117,6 +135,7 @@ impl SafetyVerdict {
         self.clamped.is_empty()
             && self.rate_limited.is_empty()
             && self.torque_limited.is_empty()
+            && self.torque_rate_limited.is_empty()
             && self.velocity_limited.is_empty()
             && !self.held_for_stale_observation
             && self.faulted.is_empty()
@@ -206,6 +225,24 @@ impl SafetyGate {
             if lim.max_torque_nm > 0.0 && a.torque_ff_nm.abs() > lim.max_torque_nm {
                 a.torque_ff_nm = a.torque_ff_nm.clamp(-lim.max_torque_nm, lim.max_torque_nm);
                 v.torque_limited.push(id);
+            }
+
+            // **トルクの変化率。** 上限（絶対値）の直後、モードごとの
+            // 分岐より前に置く。**どのモードも `torque_ff_nm` を運ぶ**ので、
+            // ここで丸めておけば下の `issued_torque` にも丸めた値が残る。
+            //
+            // 出発点は「前回通したトルク」で、脱力明けは 0 から。**脱力から
+            // 通電した瞬間に τ が立ち上がるのも鈍らせる**（WBC が起動する
+            // 周期がまさにそれ）。脱力そのものは上の `Idle` で先に抜けて
+            // いるので、**止めるほうが遅れることはない。**
+            if lim.max_torque_rate_nm_s > 0.0 && !dt.is_zero() {
+                let from = self.issued_torque[i].unwrap_or(0.0);
+                let step = lim.max_torque_rate_nm_s * dt.as_secs_f64();
+                let limited = from + (a.torque_ff_nm - from).clamp(-step, step);
+                if limited != a.torque_ff_nm {
+                    a.torque_ff_nm = limited;
+                    v.torque_rate_limited.push(id);
+                }
             }
 
             // **速度指令の上限。** [`ControlMode::Position`] の
@@ -351,6 +388,106 @@ mod tests {
         c
     }
 
+    /// 前置トルクを載せた位置指令。
+    fn torque_cmd(n: usize, q: f64, tau: f64) -> Command {
+        let mut c = position_cmd(n, q);
+        for i in 0..n {
+            c.get_mut(AxisId::new(i as u16)).unwrap().torque_ff_nm = tau;
+        }
+        c
+    }
+
+    /// **1 周期で跳ぶ前置トルクは鈍る。** 200 N·m/s · 10 ms = 2 N·m ずつ。
+    ///
+    /// 上限（絶対値）だけでは「1 周期で −40 → +40」が素通りする。WBC の解が
+    /// 接地の切り替わる周期に壊れると実際にそれが出る。
+    #[test]
+    fn a_step_in_feedforward_torque_is_slewed() {
+        let mut g = gate(
+            AxisLimits {
+                max_torque_rate_nm_s: 200.0,
+                ..AxisLimits::UNLIMITED
+            },
+            1,
+        );
+        let id = AxisId::new(0);
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            let mut cmd = torque_cmd(1, 0.0, 50.0);
+            let v = g.apply(&mut cmd, &fresh_obs(1, 0.0), DT);
+            assert_eq!(v.torque_rate_limited, vec![id]);
+            seen.push(cmd.get(id).unwrap().torque_ff_nm);
+        }
+        assert_eq!(seen, vec![2.0, 4.0, 6.0, 8.0]);
+    }
+
+    /// 上限の中に収まる変化は触らない。
+    #[test]
+    fn a_small_change_in_feedforward_torque_passes_through() {
+        let mut g = gate(
+            AxisLimits {
+                max_torque_rate_nm_s: 200.0,
+                ..AxisLimits::UNLIMITED
+            },
+            1,
+        );
+        let mut cmd = torque_cmd(1, 0.0, 1.5);
+        let v = g.apply(&mut cmd, &fresh_obs(1, 0.0), DT);
+        assert_eq!(cmd.get(AxisId::new(0)).unwrap().torque_ff_nm, 1.5);
+        assert!(v.torque_rate_limited.is_empty());
+    }
+
+    /// **止めるほうは遅れない。** 脱力は上の `Idle` で先に抜けるので、
+    /// レート制限は掛からずトルクは即 0。通電し直したら 0 から積み直す。
+    #[test]
+    fn relaxing_drops_torque_at_once_and_reengaging_starts_from_zero() {
+        let mut g = gate(
+            AxisLimits {
+                max_torque_rate_nm_s: 200.0,
+                ..AxisLimits::UNLIMITED
+            },
+            1,
+        );
+        let id = AxisId::new(0);
+        for _ in 0..5 {
+            let mut cmd = torque_cmd(1, 0.0, 50.0);
+            g.apply(&mut cmd, &fresh_obs(1, 0.0), DT);
+        }
+        // 脱力: 丸めずにそのまま通り、履歴も捨てる。
+        let mut cmd = Command::idle(1);
+        cmd.get_mut(id).unwrap().torque_ff_nm = 0.0;
+        let v = g.apply(&mut cmd, &fresh_obs(1, 0.0), DT);
+        assert_eq!(cmd.get(id).unwrap().torque_ff_nm, 0.0);
+        assert!(v.torque_rate_limited.is_empty());
+        // 通電し直し: 10 N·m を出そうとしても 1 周期ぶんの 2 N·m から。
+        let mut cmd = torque_cmd(1, 0.0, 10.0);
+        g.apply(&mut cmd, &fresh_obs(1, 0.0), DT);
+        assert_eq!(cmd.get(id).unwrap().torque_ff_nm, 2.0);
+    }
+
+    /// 絶対値の上限が先、変化率が後。**上限で丸めた値へ向かって鈍る。**
+    #[test]
+    fn the_absolute_ceiling_applies_before_the_rate() {
+        let mut g = gate(
+            AxisLimits {
+                max_torque_nm: 3.0,
+                max_torque_rate_nm_s: 200.0,
+                ..AxisLimits::UNLIMITED
+            },
+            1,
+        );
+        let id = AxisId::new(0);
+        let mut cmd = torque_cmd(1, 0.0, 100.0);
+        let v = g.apply(&mut cmd, &fresh_obs(1, 0.0), DT);
+        assert_eq!(v.torque_limited, vec![id]);
+        assert_eq!(v.torque_rate_limited, vec![id]);
+        assert_eq!(cmd.get(id).unwrap().torque_ff_nm, 2.0);
+        // 2 周期目で上限の 3.0 に届き、そこで止まる。
+        let mut cmd = torque_cmd(1, 0.0, 100.0);
+        g.apply(&mut cmd, &fresh_obs(1, 0.0), DT);
+        assert_eq!(cmd.get(id).unwrap().torque_ff_nm, 3.0);
+    }
+
     #[test]
     fn a_target_outside_the_range_is_clamped() {
         let mut g = gate(
@@ -484,6 +621,7 @@ mod tests {
                 max_rad: 1.0,
                 max_target_rate_rad_s: 100.0,
                 max_torque_nm: 10.0,
+                max_torque_rate_nm_s: 1000.0,
                 max_velocity_rad_s: 20.0,
             },
             2,

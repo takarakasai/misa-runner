@@ -139,6 +139,9 @@ pub fn safety_config(
             .unwrap_or(0.0);
         cfg.wbc.torque_ceiling(declared)
     };
+    // **トルクの変化率はモデルに無い。** 機体の立ち姿勢のトルクから決める
+    // ものなので設定だけが持つ（[`crate::config::WbcConfig`]）。
+    let torque_rate = cfg.wbc.max_torque_rate_nm_s.max(0.0);
     // **速度指令の上限はモデルの定格速度。** `max_target_rate_rad_s`
     // （目標が動いてよい速さ）とは別で、こちらは軸そのものに要求してよい
     // 速さ。宣言が無ければ位置制御の既定速度上限で代用する。
@@ -189,6 +192,7 @@ pub fn safety_config(
                         max_rad: m.max_rad,
                         max_target_rate_rad_s: rate_of(id),
                         max_torque_nm: torque_of(id),
+                        max_torque_rate_nm_s: torque_rate,
                         max_velocity_rad_s: speed_of(id),
                     });
                 }
@@ -203,6 +207,7 @@ pub fn safety_config(
                         max_rad,
                         max_target_rate_rad_s: rate_of(id),
                         max_torque_nm: torque_of(id),
+                        max_torque_rate_nm_s: torque_rate,
                         max_velocity_rad_s: speed_of(id),
                     });
                 }
@@ -223,6 +228,7 @@ pub fn safety_config(
             max_rad,
             max_target_rate_rad_s: rate_of(id),
             max_torque_nm: torque_of(id),
+            max_torque_rate_nm_s: torque_rate,
             max_velocity_rad_s: speed_of(id),
         });
     }

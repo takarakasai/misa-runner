@@ -419,6 +419,9 @@ fn print_help() {
                                    止まって見える。** 進んだことを見せる用
          [--friction MU]           接地摩擦（既定 0.7）。**足が滑ると歩容は
                                    成立しない。**「接地中の足の滑り」を見る
+         [--safety-gate]           **実機と同じ安全ゲートを指令に掛ける。**
+                                   既定は影（記録だけ）。トルクの上限・変化率が
+                                   歩容に何をするかを実機の前に見る
          [--timestep S]            物理の刻み [s]（既定 MuJoCo の 2 ms）
                                    **重い機体では下げないと立てない。** PD が
                                    明示的なので kv < 2·I/dt でしか安定しない
@@ -661,6 +664,7 @@ const BOOL_FLAGS: &[&str] = &[
     "forever",
     "chicken",
     "cam-fixed",
+    "safety-gate",
 ];
 
 impl Cli {

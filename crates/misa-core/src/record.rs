@@ -41,7 +41,10 @@ use crate::time::Time;
 // **`Intent` に `knee_pattern`（膝の向きの切り替え要求）が増えたので 5。**
 //
 // **`Intent` に `knee_flip_style`（反転のやり方の切り替え要求）が増えたので 6。**
-pub const FORMAT_VERSION: u32 = 6;
+//
+// **`SafetyVerdict` に `torque_rate_limited` が増えたので 7。** 前置トルクの
+// 変化を鈍らせたことを記録に残すため。
+pub const FORMAT_VERSION: u32 = 7;
 
 /// 記録の先頭に 1 度だけ置く見出し。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
