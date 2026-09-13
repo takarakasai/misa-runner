@@ -1951,11 +1951,16 @@ impl Controller {
         let (wx, wy) = (cy * w.x + sy * w.y, -sy * w.x + cy * w.y);
         let omega = -(wx * d.x + wy * d.y);
         let kin = self.stance_kinematics_with_offset(h_ref);
-        let apply = |targets: &mut JointVec, u: f64, legs: &[usize], floor: Option<f64>| {
+        // 上書きするのは足先の x, y（寄せ）だけ。**z は計画（再生中の目標）のまま**
+        // — 寄せる段は胴体を立ち高さから h_flip へ上げる途中なので、段の床の高さを
+        // そのまま z に使うと最初の周期で目標が数 cm 跳ぶ（calf 90 rad/s、実機なら
+        // 飛び上がる）。
+        let planned_feet = self.robot.feet_from_posture(&self.targets);
+        let apply = |targets: &mut JointVec, u: f64, legs: &[usize], _floor: Option<f64>| {
             for &slot in legs {
                 let leg = kin.legs()[slot];
                 let f = self.knee_flip_feet[slot];
-                let z = floor.unwrap_or(f.z);
+                let z = planned_feet[slot].z;
                 let target = nalgebra::Vector3::new(f.x - u * n.x, f.y - u * n.y, z);
                 let sol = solve_leg_ik(leg, target, forward[slot]);
                 if !sol.is_reachable() {
