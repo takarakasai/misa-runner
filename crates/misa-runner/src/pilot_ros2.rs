@@ -235,6 +235,7 @@ impl Pilot for Ros2Pilot {
             wbc: None,
             gait_controller: None,
             knee_pattern: None,
+            knee_flip_style: None,
         }
     }
 }
