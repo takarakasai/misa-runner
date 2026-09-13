@@ -1845,6 +1845,27 @@ pub struct GaitTuning {
     /// 分単位の錨には使えない。押されて流されたぶんを数十秒で戻す用途向け。
     #[serde(default)]
     pub hold_position_kp: f64,
+    /// **外乱を受けたら立ち幅を広げる量** [m]（片側）。`0` で無効。
+    ///
+    /// 500 N 級の転倒は「足が食いついて、その足を支点に倒れる」= 躓きで
+    /// 起きる。効くのは接地幅で、keel の実測（横 push、trot 0.12）:
+    ///
+    ///   幅 ±0.12   400 N で転倒、歩行 +2.254 m、ΣI² 461
+    ///   幅 ±0.1955 500 N まで、  歩行 +1.968 m、ΣI² 554  ← 既定
+    ///   幅 ±0.25   600 N で 9.4°、歩行 +1.505 m、ΣI² 866
+    ///   幅 ±0.30   600 N で 5.5°、歩行 +1.173 m、ΣI² 1154
+    ///
+    /// **広いほど転ばないが、歩けなくなり電流も増える**（±0.30 で速度 −40%、
+    /// 電流 2 倍）。常時広げるのは割に合わないので、**押されたときだけ
+    /// 広げる。** 引き金は捕捉点パルスと同じ速度誤差の不感帯。
+    #[serde(default)]
+    pub recovery_stance_widen_m: f64,
+    /// 立ち幅を広げる／戻すときの一次遅れ [s]。既定 0.2。
+    ///
+    /// **階段状に動かさない。** 立ち姿勢の基準が跳ぶと接地している足まで
+    /// 横へ動かそうとする。
+    #[serde(default = "default_widen_tau")]
+    pub recovery_stance_widen_tau_s: f64,
     /// 速度指令を 0 から最大まで振り切るのにかける時間 [s]。0 でランプ無し。
     ///
     /// **歩容はスティックが動いた瞬間に出力を階段状に飛ばす。** 実測で
@@ -1962,6 +1983,10 @@ fn default_mpc_dt_per_step() -> f64 {
 }
 
 /// `quadruped_gait::mpc_controller::DEFAULT_CAPTURE_POINT_GAIN_S`。
+fn default_widen_tau() -> f64 {
+    0.2
+}
+
 fn default_mpc_capture_point_gain_s() -> f64 {
     0.0
 }
@@ -2013,6 +2038,8 @@ impl Default for GaitTuning {
             recovery_target_rate_rad_s: 0.0,
             recovery_torque_scale: 0.0,
             hold_position_kp: 0.0,
+            recovery_stance_widen_m: 0.0,
+            recovery_stance_widen_tau_s: default_widen_tau(),
             mpc_observe_pose: true,
             mpc_observe_velocity: true,
             estimator_use_measured_contact: false,

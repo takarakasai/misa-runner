@@ -207,6 +207,10 @@ pub struct Controller {
     /// 位置保持の目標。`Intent::hold_position` の立ち上がりで**いまの
     /// `odom_world`** を入れる。
     hold_target: Option<[f64; 2]>,
+    /// いま効いている立ち幅の広げ量 [m]（片側）。目標へ一次遅れで寄せる。
+    widen_now: f64,
+    /// 最後に運動学へ渡した広げ量。変わったときだけ差し替える。
+    applied_widen: f64,
     observed_omega_world: nalgebra::Vector3<f64>,
     /// 直近の歩容出力から取った胴体姿勢と接地。可視化にだけ使う。
     ///
@@ -323,6 +327,8 @@ impl Controller {
             odom_world: [0.0; 2],
             world_position: None,
             hold_target: None,
+            widen_now: 0.0,
+            applied_widen: 0.0,
             observed_omega_world: nalgebra::Vector3::zeros(),
             body_view: BodyView::default(),
             contact_weight: [0.0; 4],
@@ -550,6 +556,7 @@ impl Controller {
         self.odom_world[0] += self.observed_v_world.x * dt;
         self.odom_world[1] += self.observed_v_world.y * dt;
         self.apply_hold(cmd);
+        self.update_stance_widen(cmd, dt);
 
         self.mpc = None;
         match self.state {
@@ -962,13 +969,17 @@ impl Controller {
     /// 起きないのに可視化の胴体だけが上下していた。
     fn apply_body_height(&mut self, h: f64) {
         let same_offset = (0..4).all(|i| (self.stance_xy_offset[i] - self.applied_offset[i]).norm() < 1e-9);
-        if (h - self.applied_height_m).abs() < 1e-6 && same_offset {
+        if (h - self.applied_height_m).abs() < 1e-6
+            && same_offset
+            && (self.widen_now - self.applied_widen).abs() < 1e-5
+        {
             return;
         }
         self.gait.set_kinematics(self.stance_kinematics_with_offset(h));
         self.gait.set_body_height_m(h);
         self.applied_height_m = h;
         self.applied_offset = self.stance_xy_offset;
+        self.applied_widen = self.widen_now;
     }
 
     /// 立ち高さ `h` の運動学に、立ち位置のずらし（[`Self::stance_xy_offset`]）を足したもの。
@@ -976,7 +987,13 @@ impl Controller {
         let kin = self.robot.stance_kinematics_at_height(&self.cfg.gait, h);
         let feet: [nalgebra::Vector3<f64>; 4] = std::array::from_fn(|s| {
             let f = kin.legs()[s].nominal_foot_body;
-            nalgebra::Vector3::new(f.x + self.stance_xy_offset[s].x, f.y + self.stance_xy_offset[s].y, f.z)
+            // 左（FL, RL）は +y、右（FR, RR）は −y へ広げる。
+            let side = if s == 0 || s == 2 { 1.0 } else { -1.0 };
+            nalgebra::Vector3::new(
+                f.x + self.stance_xy_offset[s].x,
+                f.y + self.stance_xy_offset[s].y + side * self.widen_now,
+                f.z,
+            )
         });
         self.robot.kin_with_feet(feet)
     }
@@ -2735,6 +2752,35 @@ impl Controller {
     ///
     /// **戻れるのは脚オドメトリが信じられる範囲まで。** 滑りで誤差が溜まる
     /// ので、押されて流されたぶんを数十秒で戻す用途に限る。
+    /// **押されたら立ち幅を広げる。** 引き金は捕捉点パルスと同じ速度誤差。
+    ///
+    /// 500 N 級の転倒は躓き（足が食いついて支点になる）で起きるので、効くのは
+    /// 接地幅。ただし**常時広げると歩けなくなり電流も増える**（±0.30 で速度
+    /// −40%、電流 2 倍）ので、外乱のあいだだけ広げて戻す。
+    fn update_stance_widen(&mut self, cmd: &Intent, dt: f64) {
+        let want_max = self.cfg.gait.recovery_stance_widen_m;
+        let db = self.cfg.gait.mpc_capture_point_deadband_m_s;
+        let disturbed = want_max > 0.0
+            && db > 0.0
+            && cmd.mode == ModeRequest::Walk
+            && {
+                let yaw = self.body_view.yaw;
+                let (c, s) = (yaw.cos(), yaw.sin());
+                let vx_b = self.observed_v_world.x * c + self.observed_v_world.y * s;
+                let vy_b = -self.observed_v_world.x * s + self.observed_v_world.y * c;
+                ((vx_b - self.ramped_v[0]).powi(2) + (vy_b - self.ramped_v[1]).powi(2)).sqrt() > db
+            };
+        let want = if disturbed { want_max } else { 0.0 };
+        // **階段状に動かさない。** 接地している足まで横へ引きずってしまう。
+        let tau = self.cfg.gait.recovery_stance_widen_tau_s.max(0.0);
+        let alpha = if tau > 0.0 && dt > 0.0 {
+            (dt / (tau + dt)).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self.widen_now += (want - self.widen_now) * alpha;
+    }
+
     /// 位置保持が使う「いまの位置」。外部基準があればそちら。
     fn hold_here(&self) -> [f64; 2] {
         self.world_position.unwrap_or(self.odom_world)
