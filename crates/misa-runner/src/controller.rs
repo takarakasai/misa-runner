@@ -1338,7 +1338,7 @@ impl Controller {
         };
         // 反転中の胴体高さ。脚が一直線になる瞬間の足先の下がり (上腿+下腿)·cos(ロール)
         // + 3 cm を床から確保する（keel 0.30 → 0.34 m）。
-        let h_flip = h_ref.max(l_total * roll_mag.cos() + 0.03);
+        let h_flip = h_ref.max(l_total * roll_mag.cos() + 0.03).max(g.knee_flip_height_m.unwrap_or(0.0));
 
         match g.knee_flip_style {
             KneeFlipStyle::Rest => {
@@ -1629,6 +1629,22 @@ impl Controller {
                 // 24 s が約 11 s になる。反転中は胴体を h_flip に上げる。
                 let shift = g.knee_flip_shift_m;
                 let ph = g.knee_flip_stand_phase_s;
+                // 3 脚支持は釣り合いを取らないので、trot より高く（脚を伸ばして）反転する。
+                // 既定は脚長の 94 %（keel 0.40 m）。寄せた足先（±shift）に両方の膝の向きで
+                // IK が届く高さまで 5 mm 刻みで下げる（脚の短い機体・足幅の広い機体）。
+                let reachable_at = |h: f64| -> bool {
+                    (0..4).all(|slot| {
+                        [(shift, shift), (shift, -shift), (-shift, shift), (-shift, -shift)].iter().all(|(dx, dy)| {
+                            let f = nalgebra::Vector3::new(feet_ref[slot].x + dx, feet_ref[slot].y + dy, -h);
+                            [true, false].iter().all(|fwd| solve_leg_ik(kin_ref.legs()[slot], f, *fwd).is_reachable())
+                        })
+                    })
+                };
+                let mut h_stand = g.knee_flip_stand_height_m.unwrap_or(0.94 * l_total).max(h_flip);
+                while h_stand > h_flip + 1e-9 && !reachable_at(h_stand) {
+                    h_stand = (h_stand - 0.005).max(h_flip);
+                }
+                let h_flip = h_stand;
                 cur_floor.set(-h_flip);
                 let z_float = -h_flip + g.knee_flip_foot_lift_m;
                 let at = |f: nalgebra::Vector3<f64>, z: f64| nalgebra::Vector3::new(f.x, f.y, z);
@@ -1657,7 +1673,7 @@ impl Controller {
                     // 浮かす + 倒す + 折り返しの前半（`knee_flip_reverse_overlap`）。
                     let lifted = ik(slot, at(feet_shift[slot], z_float), cur_forward.get()[slot])?;
                     let landed = ik(slot, at(feet_shift[slot], z_float), knee_forward_for(new, slot))?;
-                    let ov = g.knee_flip_reverse_overlap;
+                    let ov = g.knee_flip_stand_overlap;
                     cur.legs[slot] = lifted;
                     cur.legs[slot][0] = roll_out(slot);
                     for k in 1..3 {
@@ -2886,19 +2902,25 @@ mod tests {
         flip.knee_pattern = Some(KneePatternRequest::BothForward);
         let mut entered = false;
         let mut ticks = 0;
-        let h_ref = c.robot.reference_height_m(&c.cfg.gait);
         while ticks < 6000 {
             let out = c.tick(&flip, &JointVec::zeros(), imu(), dt);
             ticks += 1;
             if out.state == State::FlippingKnees {
                 entered = true;
-                // 振り付け中の足先は地面（胴体から −h）より上。
+                // 振り付け中、浮かせている脚の足先は地面より上。反転中は胴体を上げる
+                // ので、地面は「接地している脚の足先のいちばん低い所」で測る。
                 let feet = c.robot.feet_from_posture(&out.targets);
+                let floor = (0..4)
+                    .filter(|s| out.stance[*s])
+                    .map(|s| feet[s].z)
+                    .fold(f64::INFINITY, f64::min);
                 for (slot, f) in feet.iter().enumerate() {
-                    // 浮かせている脚は出発した面より下がらない。接地している脚は
-                    // 関節空間の補間で弧を描くぶん（数 mm〜1 cm）だけ許す。
-                    let tol = if out.stance[slot] { 0.02 } else { 0.005 };
-                    assert!(f.z + h_ref > -tol, "脚 {slot} の足先が地面の下 {:+.3}（接地 {}）", f.z + h_ref, out.stance[slot]);
+                    if out.stance[slot] {
+                        // 接地している脚どうしは同じ面（関節空間の補間の弧のぶんだけ許す）。
+                        assert!(f.z - floor < 0.03, "接地している脚 {slot} の足先が他より {:+.3} 高い", f.z - floor);
+                    } else {
+                        assert!(f.z > floor - 0.005, "浮かせている脚 {slot} の足先が地面の下 {:+.3}", f.z - floor);
+                    }
                 }
             } else if entered {
                 break;

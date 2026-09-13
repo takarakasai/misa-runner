@@ -215,6 +215,17 @@ impl AppConfig {
         if !(0.2..3.0).contains(&sp) {
             return Err(format!("gait.knee_flip_stand_phase_s = {sp} は 0.2〜3 s で"));
         }
+        if let Some(h) = self.gait.knee_flip_height_m {
+            if !(0.1..0.6).contains(&h) {
+                return Err(format!("gait.knee_flip_height_m = {h} は 0.1〜0.6 m で"));
+            }
+        }
+        let (sh, so) = (self.gait.knee_flip_stand_height_m.unwrap_or(0.3), self.gait.knee_flip_stand_overlap);
+        if !((0.1..0.6).contains(&sh) && (0.0..=0.9).contains(&so)) {
+            return Err(format!(
+                "gait.knee_flip_stand_height_m {sh}（0.1〜0.6 m）/ knee_flip_stand_overlap {so}（0〜0.9）が範囲外"
+            ));
+        }
         let (ov, ct) = (self.gait.knee_flip_reverse_overlap, self.gait.knee_flip_cop_tau_s);
         if !((0.0..=0.9).contains(&ov) && (0.0..10.0).contains(&ct)) {
             return Err(format!(
@@ -1086,7 +1097,11 @@ fn default_knee_flip_foot_lift_m() -> f64 {
 }
 
 fn default_knee_flip_stand_phase_s() -> f64 {
-    0.65
+    0.5
+}
+
+fn default_knee_flip_stand_overlap() -> f64 {
+    0.6
 }
 
 fn default_knee_flip_reverse_overlap() -> f64 {
@@ -1399,6 +1414,25 @@ pub struct GaitTuning {
     /// 回り**（0.3 s で ±2°）、重力で倒れ始める角加速度が読めない。
     #[serde(default = "default_knee_flip_probe_move_s")]
     pub knee_flip_probe_move_s: f64,
+    /// 反転中の胴体高さ [m]。無ければ「脚が一直線のときの足先の下がり + 3 cm」と
+    /// 立ち高さの大きいほう（keel 0.337）。**高くすると立脚・浮かせる脚とも伸びた
+    /// 状態から始まり、折り返しの動きが短くなる**（0.40 m なら calf の振りが 3.5 →
+    /// 1.4 rad）うえ、一直線の瞬間の床余裕が増えて `knee_flip_reverse_overlap` を
+    /// 大きくできる。上限は脚長 0.426 の手前（腿が 15° は残る 0.41）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knee_flip_height_m: Option<f64>,
+    /// `stand` の反転中の胴体高さ [m]。無ければ脚長（上腿+下腿）の 94 %（keel 0.40、
+    /// 腿が 20° 残る）。**3 脚支持は釣り合いを取らないので高くしてよく**、脚が伸びた状態から
+    /// 始めると折り返しが短くなって反動が減る（1 段 0.5 s で傾き 8° → 3°、0.4 s なら
+    /// 9.2 s で 3.4°）。`trot` は逆で、高くすると釣り合いの効率が落ちて倒れる
+    /// （0.36 で 15°、0.38 以上で転倒）ので `knee_flip_height_m` は別。届かなければ
+    /// 計画時に IK のエラーで止まる。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knee_flip_stand_height_m: Option<f64>,
+    /// `stand` の折り返しの重ね合わせ（`knee_flip_reverse_overlap` の stand 用）。
+    /// 胴体 0.40 m なら床の余裕が 6 cm あるので 0.6 まで通る。既定 0.6。
+    #[serde(default = "default_knee_flip_stand_overlap")]
+    pub knee_flip_stand_overlap: f64,
     /// ロールで外へ倒しながら**腿と calf の折り返しをどこまで先に始めるか**（0〜0.9）。
     /// 浮かす段の終わりに、折り返しをこの割合まで進めておく。反転の段に残る動きが
     /// 減るので段を短くできる。**0.3 以上は途中で足先が床に近づく**（ロールが
@@ -1464,10 +1498,11 @@ pub struct GaitTuning {
     #[serde(default = "default_knee_flip_phase_s")]
     pub knee_flip_phase_s: f64,
     /// `stand` の 1 段の時間 [s]。3 脚支持は静的に安定（倒れない）が、7 kg の脚を
-    /// 振る反動と立脚の沈みで胴体は揺れる。keel MuJoCo（MIT 500 / 5）の反転中の
-    /// 傾きの最大は 0.5 s で 16°、0.65 s で 14°、0.8 s で 3°。反転中だけ hip / thigh
-    /// を kp 2000 / kd 20 にする（`hardware.mit_gains_knee_flip`）と 0.5 s で 8°、
-    /// 0.65 s で 3°、0.8 s で 1.7°。既定 0.65（4 脚で 15 s。5 段だった頃は 24 s）。
+    /// 振る反動と立脚の沈みで胴体は揺れる。keel MuJoCo、反転中だけ hip / thigh を
+    /// kp 2000 / kd 20（`hardware.mit_gains_knee_flip`）、胴体 0.40 m・重ね合わせ 0.6
+    /// （`knee_flip_stand_height_m` / `knee_flip_stand_overlap`）で、反転中の傾きの
+    /// 最大は 0.65 s で 2.0°、0.5 s で 3.1°、0.4 s で 3.4°（それぞれ 15 / 11.5 / 9.2 s）。
+    /// 胴体 0.34 m のままだと 0.5 s で 8°、MIT 500 / 5 のままなら 16°。既定 0.5。
     #[serde(default = "default_knee_flip_stand_phase_s")]
     pub knee_flip_stand_phase_s: f64,
     /// 膝を伸ばし切るときに脚を向ける方向。**胴体座標で足先が hip より
@@ -1678,6 +1713,9 @@ impl Default for GaitTuning {
             com_offset_body_m: [0.0, 0.0],
             knee_flip_rest_height_m: None,
             knee_flip_foot_lift_m: default_knee_flip_foot_lift_m(),
+            knee_flip_stand_height_m: None,
+            knee_flip_stand_overlap: default_knee_flip_stand_overlap(),
+            knee_flip_height_m: None,
             knee_flip_reverse_overlap: default_knee_flip_reverse_overlap(),
             knee_flip_cop_tau_s: default_knee_flip_cop_tau_s(),
             knee_flip_probe_lift_m: default_knee_flip_probe_lift_m(),
