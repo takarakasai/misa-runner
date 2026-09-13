@@ -413,6 +413,8 @@ impl Teleop {
         };
 
         Intent {
+            // プロポには位置保持の口を割り当てていない。
+            hold_position: false,
             time: Time::ZERO,
             velocity: Velocity {
                 vx_m_s: self.cfg.vx.value(state) * self.max_vx,

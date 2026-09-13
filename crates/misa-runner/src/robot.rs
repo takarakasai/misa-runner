@@ -242,6 +242,13 @@ impl Robot {
         let body = self.body_inertia_at(&self.stance_posture(tuning));
 
         ctrl.set_capture_point_gain(tuning.mpc_capture_point_gain_s);
+        // **パルス項は不感帯つきなので定常歩行では効かない。** 押された
+        // ときだけ着地点を動かす
+        // （[`crate::config::GaitTuning::mpc_capture_point_pulse`]）。
+        ctrl.set_capture_point_pulse(
+            tuning.mpc_capture_point_pulse,
+            tuning.mpc_capture_point_deadband_m_s,
+        );
         // **接地力のコストと上限は質量で伸ばす。** quadruped-gait の既定
         // （`r_diag = 1e-3`、`max_normal_force = 200 N`）は namiashi（2.4 kg）で
         // 詰めた値で、重い機体ではそのままだと (a) 接地力 1 本が 200 N で

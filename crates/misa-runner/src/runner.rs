@@ -956,6 +956,26 @@ pub fn run(
         // **ここが指令を書き換えてよい唯一の場所。** `dt` は実測を渡す
         // （目標周期を渡すと、ループが遅れている間に目標だけ規定どおり
         // 進んで変化率の制限が意味を失う）。
+        // **外乱から立ち直る窓を開ける。** 引き金は捕捉点パルスと同じ
+        // 「速度誤差が不感帯を超えた」。踏み出しの目標は正当に速いので、
+        // ここで言っておかないとゲートが異常と見なして削る。
+        if cfg.gait.recovery_target_rate_rad_s > 0.0 || cfg.gait.recovery_torque_scale > 0.0 {
+            let db = cfg.gait.mpc_capture_point_deadband_m_s;
+            if db > 0.0 {
+                if let Some(v) = body.velocity_world {
+                    let yaw = out.planned_yaw_rad;
+                    let (c, sn) = (yaw.cos(), yaw.sin());
+                    let vx_b = v.x * c + v.y * sn;
+                    let vy_b = -v.x * sn + v.y * c;
+                    let err = ((vx_b - out.body_velocity[0]).powi(2)
+                        + (vy_b - out.body_velocity[1]).powi(2))
+                    .sqrt();
+                    if err > db {
+                        gate.begin_recovery(std::time::Duration::from_millis(200));
+                    }
+                }
+            }
+        }
         let verdict = gate.apply(&mut outgoing, &obs, last_tick.elapsed());
         // **丸めたことを黙っていない。** ただし毎周期出すと埋もれるので、
         // 状態が変わったときだけ。可動域や変化率に当たり続けているのは、
@@ -967,11 +987,16 @@ pub fn run(
             } else {
                 log::warn!(
                     "安全ゲート: 可動域 {} 軸 / 変化率 {} 軸 / トルク {} 軸 / \
-                     トルク変化率 {} 軸{}{}",
+                     トルク変化率 {} 軸{}{}{}",
                     verdict.clamped.len(),
                     verdict.rate_limited.len(),
                     verdict.torque_limited.len(),
                     verdict.torque_rate_limited.len(),
+                    if verdict.recovery_active {
+                        " / **復帰の窓が開いています**（外乱）"
+                    } else {
+                        ""
+                    },
                     if verdict.held_for_stale_observation {
                         " / 観測が古いので目標を進めていません"
                     } else {

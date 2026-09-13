@@ -191,6 +191,22 @@ pub struct Controller {
     /// 脚オドメトリで測った胴体の速度と角速度（世界座標系）。
     /// [`Self::observe_body`] が入れ、MPC の参照を作るのに使う。
     observed_v_world: nalgebra::Vector3<f64>,
+    /// 脚オドメトリの速度を積んだ世界座標の位置。**絶対の基準ではない。**
+    ///
+    /// **押されて滑った変位はここに現れない。** 脚オドメトリは「接地足は
+    /// 世界に対して静止」を前提にするが、押されたときに起きるのはまさに
+    /// その前提が崩れる滑りで、実測では横 400 N で 0.39 m 流れても
+    /// 積算はほぼ動かなかった。
+    odom_world: [f64; 2],
+    /// **外から与えられた絶対位置**（あれば `odom_world` より優先）。
+    ///
+    /// モーションキャプチャ・マーカー・SLAM のような、滑りに依らない基準。
+    /// シムでは MuJoCo の真値を入れる。無ければ位置保持は脚オドメトリで
+    /// 動くが、**押された変位は戻せない**（上記）。
+    world_position: Option<[f64; 2]>,
+    /// 位置保持の目標。`Intent::hold_position` の立ち上がりで**いまの
+    /// `odom_world`** を入れる。
+    hold_target: Option<[f64; 2]>,
     observed_omega_world: nalgebra::Vector3<f64>,
     /// 直近の歩容出力から取った胴体姿勢と接地。可視化にだけ使う。
     ///
@@ -304,6 +320,9 @@ impl Controller {
             target_foot_body: [nalgebra::Vector3::zeros(); 4],
             mpc: None,
             observed_v_world: nalgebra::Vector3::zeros(),
+            odom_world: [0.0; 2],
+            world_position: None,
+            hold_target: None,
             observed_omega_world: nalgebra::Vector3::zeros(),
             body_view: BodyView::default(),
             contact_weight: [0.0; 4],
@@ -431,6 +450,15 @@ impl Controller {
     /// 位置（`set_body_pose_observed`）は渡さない。**脚オドメトリからは
     /// 絶対位置が出ない**（積分するしかなく滑りのぶんが溜まる）ので、
     /// 渡すと歩容が溜まった位置を「正しい」と信じて追いに行く。
+    /// 外部の絶対位置を渡す（モーションキャプチャ等、シムでは真値）。
+    ///
+    /// **位置保持が押された変位を戻せるのはこれがあるときだけ。** 脚
+    /// オドメトリは滑りを見ないので、外部基準が無ければ「戻ったつもり」に
+    /// なる（[`Self::world_position`]）。
+    pub fn observe_world_position(&mut self, xy: [f64; 2]) {
+        self.world_position = Some(xy);
+    }
+
     pub fn observe_body(&mut self, body: &crate::estimator::BodyState) {
         // **角速度は接地に依らず入る。** 空中相でも姿勢は測れている。
         self.observed_omega_world = body.angular_velocity_world;
@@ -443,6 +471,7 @@ impl Controller {
         });
         let Some(v) = body.velocity_world else { return };
         self.observed_v_world = v;
+
         // **速度の閉ループを切る選択肢**（[`crate::config::GaitTuning::mpc_observe_velocity`]）。
         // 切ったときは、ランプ後の指令を歩容のヨーで世界向きに回して
         // 「指令どおりに動いている」と MPC に伝える。角速度は実測のまま。
@@ -516,6 +545,12 @@ impl Controller {
         // **歩容が回っていない相では MPC の参照を捨てる。** 立脚フラグと
         // 同じ理由で、古い接地力の予測は「もう接地していない足を押せ」に
         // なる。`tick_active` が毎周期入れ直す。
+        // **位置は速度の積算でしか分からない。** 外部の基準が無いので、
+        // 位置保持は「いつからどれだけ動いたか」の相対量で行う。
+        self.odom_world[0] += self.observed_v_world.x * dt;
+        self.odom_world[1] += self.observed_v_world.y * dt;
+        self.apply_hold(cmd);
+
         self.mpc = None;
         match self.state {
             State::Relaxed => self.tick_relaxed(cmd, measured),
@@ -695,7 +730,11 @@ impl Controller {
         let h = self.clamp_body_height(self.robot.reference_height_m(&self.cfg.gait) + cmd.height_offset_m);
         self.apply_body_height(h);
         let want = match cmd.mode {
-            ModeRequest::Walk => [cmd.velocity.vx_m_s, cmd.velocity.vy_m_s, cmd.velocity.wz_rad_s],
+            // **位置保持が効いていれば、操縦の速度指令より優先する。**
+            ModeRequest::Walk => match self.hold_velocity() {
+                Some(v) => v,
+                None => [cmd.velocity.vx_m_s, cmd.velocity.vy_m_s, cmd.velocity.wz_rad_s],
+            },
             // 起立中は歩容を止める（速度ゼロ = 接地したまま）。
             _ => [0.0; 3],
         };
@@ -2685,6 +2724,53 @@ impl Controller {
             w[i] = ((1.0 - f) / r).min(1.0_f64).clamp(0.0, 1.0);
         }
         w
+    }
+
+    /// 位置保持。**速度指令の代わりに「目標へ戻る速度」を作る。**
+    ///
+    /// 歩容は速度指令しか受け付けないので、位置の輪は外側に置く。こうすると
+    /// **歩容の種類に依らない**（`set_goal_pose_world` は FullCentroidal
+    /// にしか無い）。立ち上がりでいまの推定位置を目標にし、以後は
+    /// `v = kp · (目標 − いま)` を速度の上限で丸めて入れる。
+    ///
+    /// **戻れるのは脚オドメトリが信じられる範囲まで。** 滑りで誤差が溜まる
+    /// ので、押されて流されたぶんを数十秒で戻す用途に限る。
+    /// 位置保持が使う「いまの位置」。外部基準があればそちら。
+    fn hold_here(&self) -> [f64; 2] {
+        self.world_position.unwrap_or(self.odom_world)
+    }
+
+    fn apply_hold(&mut self, cmd: &Intent) {
+        let kp = self.cfg.gait.hold_position_kp;
+        if !cmd.hold_position || kp <= 0.0 {
+            if self.hold_target.is_some() {
+                log::info!("位置保持をやめます");
+            }
+            self.hold_target = None;
+            return;
+        }
+        if self.hold_target.is_none() {
+            self.hold_target = Some(self.hold_here());
+            log::info!(
+                "位置保持を始めます（いまの推定位置を目標に）。**脚オドメトリの積算なので\
+                 長時間の錨にはなりません**"
+            );
+        }
+    }
+
+    /// 位置保持が効いているときの速度指令。効いていなければ `None`。
+    fn hold_velocity(&self) -> Option<[f64; 3]> {
+        let target = self.hold_target?;
+        let kp = self.cfg.gait.hold_position_kp;
+        let here = self.hold_here();
+        let (ex, ey) = (target[0] - here[0], target[1] - here[1]);
+        // 世界座標の誤差を機体座標の速度へ回す。
+        let yaw = self.body_view.yaw;
+        let (c, s) = (yaw.cos(), yaw.sin());
+        let vx = (kp * (ex * c + ey * s)).clamp(-self.cfg.gait.max_vx_m_s, self.cfg.gait.max_vx_m_s);
+        let vy =
+            (kp * (-ex * s + ey * c)).clamp(-self.cfg.gait.max_vy_m_s, self.cfg.gait.max_vy_m_s);
+        Some([vx, vy, 0.0])
     }
 
     fn set_gait(&mut self, select: GaitSelect) {

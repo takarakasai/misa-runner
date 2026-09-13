@@ -1800,6 +1800,51 @@ pub struct GaitTuning {
     /// 96 %）。articara も 0 に落としている。効かせるなら機体で値を出す。
     #[serde(default = "default_mpc_capture_point_gain_s")]
     pub mpc_capture_point_gain_s: f64,
+    /// 捕捉点フィードバックの**パルス項**の傾き。**既定 0（無効）。**
+    ///
+    /// `feedback = k_linear·v_err + sign(v_err)·k_pulse·max(|v_err| − v_db, 0)`
+    ///
+    /// **線形項（`mpc_capture_point_gain_s`）と性質が違う。** あちらは毎周期の
+    /// 速度誤差に効くので、追従の悪い相手では誤差を着地点へ増幅する正帰還に
+    /// なる（keel で歩けなくなり 0 にした）。こちらは**不感帯を超えるまで
+    /// 厳密に 0** なので、定常歩行では一切効かず、押されたときだけ着地点が動く。
+    ///
+    /// quadruped-gait の実験では `k_pulse ≳ 0.20` / `v_db ≈ 0.05 m/s` で、
+    /// ドリフトを増やさずに横方向へ 5 cm 以上の着地点を取れた。
+    #[serde(default)]
+    pub mpc_capture_point_pulse: f64,
+    /// パルス項の不感帯 [m/s]。**これ未満の速度誤差では着地点を動かさない。**
+    #[serde(default)]
+    pub mpc_capture_point_deadband_m_s: f64,
+    /// **外乱から立ち直る間だけ安全ゲートの上限を緩める** [rad/s]。`0` で無効。
+    ///
+    /// 目標レートの上限（`hardware.max_target_rate_rad_s`、keel は 8.0）は
+    /// 「目標が跳んだ」異常を捕まえるためのもので、**押されて踏み出すときの
+    /// 正当に速い目標と区別できない**。keel の実測で、横 500 N を受けた
+    /// 復帰の踏み出しは 33.7 rad/s を要求する（通常の歩行は 5.8）。
+    ///
+    /// 引き金は捕捉点パルスと同じ「速度誤差が
+    /// [`Self::mpc_capture_point_deadband_m_s`] を超えた」。窓は
+    /// `misa_core::MAX_RECOVERY` で強制的に閉じ、**開いていられるのは時間の
+    /// 1/3 まで**なので、引き金が張り付いてもゲートは無効にならない。
+    #[serde(default)]
+    pub recovery_target_rate_rad_s: f64,
+    /// 同じ窓のあいだのトルク上限。**モデルの定格に対する倍率**（`0` で無効）。
+    ///
+    /// 立ち上げ用の上限は定格の 4 割ほどなので復帰の踏み出しが当たる
+    /// （keel の実測で延べ 813 軸）。`1.0` でモデルの定格まで許す。
+    #[serde(default)]
+    pub recovery_torque_scale: f64,
+    /// **位置保持のゲイン** [1/s]。`Intent::hold_position` が立っている間、
+    /// 位置誤差にこれを掛けたものが速度指令になる。`0` で無効。
+    ///
+    /// `v = clamp(kp · (目標 − いまの推定位置), 速度の上限)`。0.5 なら
+    /// 「0.4 m ずれていたら 0.2 m/s で戻る」。上限は `max_vx_m_s` などが効く。
+    ///
+    /// **位置の基準は脚オドメトリの積算しかない。** 滑りで誤差が溜まるので
+    /// 分単位の錨には使えない。押されて流されたぶんを数十秒で戻す用途向け。
+    #[serde(default)]
+    pub hold_position_kp: f64,
     /// 速度指令を 0 から最大まで振り切るのにかける時間 [s]。0 でランプ無し。
     ///
     /// **歩容はスティックが動いた瞬間に出力を階段状に飛ばす。** 実測で
@@ -1963,6 +2008,11 @@ impl Default for GaitTuning {
             mpc_horizon_steps: default_mpc_horizon_steps(),
             mpc_dt_per_step: default_mpc_dt_per_step(),
             mpc_capture_point_gain_s: default_mpc_capture_point_gain_s(),
+            mpc_capture_point_pulse: 0.0,
+            mpc_capture_point_deadband_m_s: 0.0,
+            recovery_target_rate_rad_s: 0.0,
+            recovery_torque_scale: 0.0,
+            hold_position_kp: 0.0,
             mpc_observe_pose: true,
             mpc_observe_velocity: true,
             estimator_use_measured_contact: false,

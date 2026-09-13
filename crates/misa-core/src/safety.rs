@@ -31,6 +31,12 @@ use crate::axis::AxisId;
 use crate::command::{Command, ControlMode};
 use crate::observation::Observation;
 
+/// **復帰の窓を連続で開けていられる上限。** 引き金が張り付いてもゲートが
+/// 実質無効にならないように、これを超えたら強制的に閉じて同じだけ休む。
+/// 踏み出し 1〜2 歩ぶんに当たる長さ。強制的に閉じたあとはこの 2 倍だけ
+/// 休むので、**引き金が張り付いても開いていられるのは時間の 1/3 まで。**
+pub const MAX_RECOVERY: Duration = Duration::from_millis(800);
+
 /// 1 軸に掛ける制限。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AxisLimits {
@@ -60,6 +66,26 @@ pub struct AxisLimits {
     /// `wbc.solution_check` の仕事で、**こちらはそれを抜けたものを受ける
     /// 最後の砦**。
     pub max_torque_rate_nm_s: f64,
+    /// **外乱から立ち直る間だけ使う目標レートの上限** [rad/s]。`0` で通常と同じ。
+    ///
+    /// # なぜ 2 つ目の上限が要るのか
+    ///
+    /// [`max_target_rate_rad_s`](Self::max_target_rate_rad_s) は「歩容の
+    /// 切り替えや IK のクランプで**目標が跳んだ**」のを捕まえるためのもので、
+    /// 想定しているのは異常。ところが**押されて踏み出すときの目標は正当に
+    /// 速い** — keel の実測で、横 500 N を受けた復帰の踏み出しは 33.7 rad/s を
+    /// 要求する（通常の歩行は 5.8、上限は 8.0）。
+    ///
+    /// **ゲートはその 2 つを区別できない。** 区別できるのは「いま外乱から
+    /// 立ち直ろうとしている」と知っている上位だけなので、上位が
+    /// [`SafetyGate::begin_recovery`] で窓を開ける。
+    pub recovery_max_target_rate_rad_s: f64,
+    /// 同じ窓のあいだのトルク上限 [N·m]。`0` で通常と同じ。
+    ///
+    /// 立ち上げ用の上限は定格の 4 割ほどに絞ってあるので、**復帰の踏み出しは
+    /// そこに当たる**（keel の実測で延べ 813 軸）。ここにはモデルの定格までを
+    /// 入れる。
+    pub recovery_max_torque_nm: f64,
     /// 速度指令の上限 [rad/s]。`0` なら制限しない。
     ///
     /// [`max_target_rate_rad_s`](Self::max_target_rate_rad_s) とは別物。
@@ -78,6 +104,8 @@ impl AxisLimits {
         max_target_rate_rad_s: 0.0,
         max_torque_nm: 0.0,
         max_torque_rate_nm_s: 0.0,
+        recovery_max_target_rate_rad_s: 0.0,
+        recovery_max_torque_nm: 0.0,
         max_velocity_rad_s: 0.0,
     };
 }
@@ -117,6 +145,9 @@ pub struct SafetyVerdict {
     pub held_for_stale_observation: bool,
     /// 異常ビットが立っている軸。**指令には触っていない。**
     pub faulted: Vec<AxisId>,
+    /// **復帰の窓が開いていたか。** 開いている間は目標レートとトルクの上限が
+    /// 緩い方に替わる。記録に残して後から「なぜ速く動いたか」を説明するため。
+    pub recovery_active: bool,
     /// 傾きが `max_tilt_rad` を超えていれば、その傾き [rad]。
     ///
     /// **指令には触っていない。** 超えていない・IMU が無い・値が古いときは
@@ -156,6 +187,14 @@ pub struct SafetyGate {
     /// 位置は「進めない」、トルクは「前回のまま出し続ける」。トルクを 0 に
     /// 落とすのは脱力と同じで、荷重のかかった四足では崩れる。
     issued_torque: Vec<Option<f64>>,
+    /// 復帰の窓の残り時間。`begin_recovery` で伸び、`apply` ごとに減る。
+    recovery_left: Duration,
+    /// **窓を開けっぱなしにしない。** 連続で開いていられる上限。超えたら
+    /// 一度閉じ、`begin_recovery` を呼び直しても再開しない（下の
+    /// `recovery_cooldown` が明けるまで）。引き金が張り付いてゲートが
+    /// 実質無効になるのを防ぐ。
+    recovery_open_for: Duration,
+    recovery_cooldown: Duration,
 }
 
 impl SafetyGate {
@@ -166,11 +205,35 @@ impl SafetyGate {
             cfg,
             issued,
             issued_torque,
+            recovery_left: Duration::ZERO,
+            recovery_open_for: Duration::ZERO,
+            recovery_cooldown: Duration::ZERO,
         }
     }
 
     pub fn limits(&self) -> &[AxisLimits] {
         &self.cfg.axes
+    }
+
+    /// **外乱から立ち直る窓を開ける。** `ttl` のあいだ、目標レートとトルクの
+    /// 上限が `recovery_*` の側へ替わる。
+    ///
+    /// 呼ぶのは「いま踏み出さないと転ぶ」と判断できる上位（速度誤差が捕捉点の
+    /// 不感帯を超えた、など）。**毎周期呼んでよい** — 残り時間が伸びるだけ。
+    ///
+    /// **開けっぱなしにはならない。** 連続 [`MAX_RECOVERY`] を超えると強制的に
+    /// 閉じ、同じだけの休止をはさむまで再開しない。引き金が張り付いたときに
+    /// ゲートが実質無効になるのを防ぐため。
+    pub fn begin_recovery(&mut self, ttl: Duration) {
+        if !self.recovery_cooldown.is_zero() {
+            return;
+        }
+        self.recovery_left = self.recovery_left.max(ttl);
+    }
+
+    /// 復帰の窓が開いているか。
+    pub fn recovery_active(&self) -> bool {
+        !self.recovery_left.is_zero()
     }
 
     /// 直近に通した目標を忘れる。次の位置指令は実測から出発する。
@@ -190,6 +253,26 @@ impl SafetyGate {
     /// 制限の意味が無くなる。
     pub fn apply(&mut self, cmd: &mut Command, obs: &Observation, dt: Duration) -> SafetyVerdict {
         let mut v = SafetyVerdict::default();
+
+        // 復帰の窓の時間を進める。**`apply` が唯一の時計。**
+        if !self.recovery_cooldown.is_zero() {
+            self.recovery_cooldown = self.recovery_cooldown.saturating_sub(dt);
+        }
+        if !self.recovery_left.is_zero() {
+            self.recovery_left = self.recovery_left.saturating_sub(dt);
+            self.recovery_open_for += dt;
+            if self.recovery_open_for >= MAX_RECOVERY {
+                // 開きすぎ。強制的に閉じて、同じだけ休む。
+                self.recovery_left = Duration::ZERO;
+                // **休止は開放の 2 倍。** 引き金が張り付いても、開いて
+                // いられるのは時間の 1/3 までになる。
+                self.recovery_cooldown = 2 * MAX_RECOVERY;
+            }
+        } else {
+            self.recovery_open_for = Duration::ZERO;
+        }
+        let recovery = !self.recovery_left.is_zero();
+        v.recovery_active = recovery;
 
         // 観測が古いときは目標を進めない。**モードは変えない。**
         // 見えていない相手に新しい目標を出すより、いまの姿勢で止まるほうが安全。
@@ -222,8 +305,13 @@ impl SafetyGate {
                 continue;
             }
 
-            if lim.max_torque_nm > 0.0 && a.torque_ff_nm.abs() > lim.max_torque_nm {
-                a.torque_ff_nm = a.torque_ff_nm.clamp(-lim.max_torque_nm, lim.max_torque_nm);
+            // **復帰中は緩い方の上限を使う。** 指定が無ければ通常と同じ。
+            let torque_cap = match (recovery, lim.recovery_max_torque_nm > 0.0) {
+                (true, true) => lim.recovery_max_torque_nm,
+                _ => lim.max_torque_nm,
+            };
+            if torque_cap > 0.0 && a.torque_ff_nm.abs() > torque_cap {
+                a.torque_ff_nm = a.torque_ff_nm.clamp(-torque_cap, torque_cap);
                 v.torque_limited.push(id);
             }
 
@@ -301,12 +389,16 @@ impl SafetyGate {
                 v.clamped.push(id);
             }
 
+            let target_rate = match (recovery, lim.recovery_max_target_rate_rad_s > 0.0) {
+                (true, true) => lim.recovery_max_target_rate_rad_s,
+                _ => lim.max_target_rate_rad_s,
+            };
             // 位置制御に入った最初の 1 回は**実測位置から**出発する。
             let from = self.issued[i].unwrap_or(measured);
             let target = if stale {
                 from
-            } else if lim.max_target_rate_rad_s > 0.0 && !dt.is_zero() {
-                let step = lim.max_target_rate_rad_s * dt.as_secs_f64();
+            } else if target_rate > 0.0 && !dt.is_zero() {
+                let step = target_rate * dt.as_secs_f64();
                 step_toward(from, want, step)
             } else {
                 want
@@ -504,6 +596,84 @@ mod tests {
         assert_eq!(cmd.get(id).unwrap().torque_ff_nm, 3.0);
     }
 
+    /// **押されて踏み出すときの目標は正当に速い。** 復帰の窓が開いている
+    /// あいだは緩い方の上限を使い、閉じれば元に戻る。
+    #[test]
+    fn the_recovery_window_swaps_in_the_looser_rate() {
+        let mut g = gate(
+            AxisLimits {
+                min_rad: -10.0,
+                max_rad: 10.0,
+                max_target_rate_rad_s: 8.0,
+                recovery_max_target_rate_rad_s: 40.0,
+                ..AxisLimits::UNLIMITED
+            },
+            1,
+        );
+        let id = AxisId::new(0);
+        // 通常: 8 rad/s · 10 ms = 0.08 rad しか進まない。
+        let mut cmd = position_cmd(1, 5.0);
+        let v = g.apply(&mut cmd, &fresh_obs(1, 0.0), DT);
+        assert!(!v.recovery_active);
+        assert!((cmd.get(id).unwrap().position_rad - 0.08).abs() < 1e-9);
+        // 窓を開けると 40 rad/s = 0.40 rad。
+        g.begin_recovery(Duration::from_millis(200));
+        let mut cmd = position_cmd(1, 5.0);
+        let v = g.apply(&mut cmd, &fresh_obs(1, 0.0), DT);
+        assert!(v.recovery_active);
+        assert!((cmd.get(id).unwrap().position_rad - 0.48).abs() < 1e-9);
+    }
+
+    /// トルクの上限も同じ窓で替わる。
+    #[test]
+    fn the_recovery_window_swaps_in_the_looser_torque_ceiling() {
+        let mut g = gate(
+            AxisLimits {
+                max_torque_nm: 40.0,
+                recovery_max_torque_nm: 96.0,
+                ..AxisLimits::UNLIMITED
+            },
+            1,
+        );
+        let id = AxisId::new(0);
+        let mut cmd = torque_cmd(1, 0.0, 90.0);
+        g.apply(&mut cmd, &fresh_obs(1, 0.0), DT);
+        assert_eq!(cmd.get(id).unwrap().torque_ff_nm, 40.0);
+        g.begin_recovery(Duration::from_millis(200));
+        let mut cmd = torque_cmd(1, 0.0, 90.0);
+        g.apply(&mut cmd, &fresh_obs(1, 0.0), DT);
+        assert_eq!(cmd.get(id).unwrap().torque_ff_nm, 90.0);
+    }
+
+    /// **引き金が張り付いてもゲートは無効にならない。** 連続 `MAX_RECOVERY`
+    /// で強制的に閉じ、同じだけ休むまで開き直せない。
+    #[test]
+    fn the_recovery_window_cannot_be_held_open_forever() {
+        let mut g = gate(
+            AxisLimits {
+                max_target_rate_rad_s: 8.0,
+                recovery_max_target_rate_rad_s: 40.0,
+                ..AxisLimits::UNLIMITED
+            },
+            1,
+        );
+        let mut open = 0;
+        for _ in 0..400 {
+            // 毎周期呼び続ける（張り付いた引き金）。
+            g.begin_recovery(Duration::from_millis(200));
+            let mut cmd = position_cmd(1, 5.0);
+            if g.apply(&mut cmd, &fresh_obs(1, 0.0), DT).recovery_active {
+                open += 1;
+            }
+        }
+        // 10 ms × 400 = 4 s のうち、開いていられるのは 0.8 s ぶんずつ。
+        assert!(open > 0, "一度も開かないのはおかしい");
+        assert!(
+            open < 400 * 2 / 5,
+            "開きっぱなしに近い。歯止めになっていない（{open} / 400）"
+        );
+    }
+
     #[test]
     fn a_target_outside_the_range_is_clamped() {
         let mut g = gate(
@@ -638,6 +808,8 @@ mod tests {
                 max_target_rate_rad_s: 100.0,
                 max_torque_nm: 10.0,
                 max_torque_rate_nm_s: 1000.0,
+                recovery_max_target_rate_rad_s: 0.0,
+                recovery_max_torque_nm: 0.0,
                 max_velocity_rad_s: 20.0,
             },
             2,

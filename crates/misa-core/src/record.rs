@@ -45,6 +45,9 @@ use crate::time::Time;
 // **`SafetyVerdict` に `torque_rate_limited` が増えたので 7。** 前置トルクの
 // 変化を鈍らせたことを記録に残すため。
 //
+// **`Intent` に `hold_position`、`SafetyVerdict` に `recovery_active` が
+// 増えたので 8。**
+//
 // **`Intent` に `knee_flip_phase_s`（反転の 1 段の時間）が増えたので 8。**
 pub const FORMAT_VERSION: u32 = 8;
 
