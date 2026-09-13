@@ -244,6 +244,9 @@ pub struct WbcObservation<'a> {
     pub mpc: Option<MpcReference>,
     /// 立脚フラグ（FL, FR, RL, RR）。
     pub stance: [bool; 4],
+    /// 立脚の**重み**（0〜1）。`wbc.contact_ramp_s > 0` のとき、優先度 0 の
+    /// 2 つのタスクはこちらを使う（[`crate::controller::ControlOutput`]）。
+    pub contact_weight: [f64; 4],
     /// 制御周期 [s]。**実測を渡すこと**（積分の刻みになる）。
     pub dt: f64,
 }
@@ -613,6 +616,7 @@ impl WbcLayer {
             &j_contact,
             &dj_v,
             obs.stance,
+            obs.contact_weight,
             &refs,
             swing,
             &joint_q_ddot,
@@ -644,10 +648,23 @@ impl WbcLayer {
         let finite = sol.tau.iter().all(|t| t.is_finite())
             && sol.q_ddot.iter().all(|a| a.is_finite());
         let weight = self.mass_kg * G;
+        // **接地の重みを使っているときは、そもそも出せる力が絞られている。**
+        // 重み w の足は `w × cap × 体重` までしか踏めないので、下限を体重で
+        // 固定すると、ランプの最中に「壊れた解」と誤判定する（接地比 0.5 の
+        // trot は踏み替えで重なりが無く、合計が一時的に体重を割る）。
+        let capacity = if self.cfg.contact_ramp_s > 0.0 {
+            let cap = self.cfg.contact_force_cap_frac.max(0.1) * weight;
+            obs.contact_weight
+                .iter()
+                .map(|w| w.clamp(0.0, 1.0) * cap)
+                .sum::<f64>()
+        } else {
+            f64::INFINITY
+        };
+        let lower = (self.cfg.check_grf_min_frac * weight).min(0.9 * capacity);
         let grf_ok = !self.cfg.solution_check
             || stance_count == 0
-            || (f_z_total >= self.cfg.check_grf_min_frac * weight
-                && f_z_total <= self.cfg.check_grf_max_frac * weight);
+            || (f_z_total >= lower && f_z_total <= self.cfg.check_grf_max_frac * weight);
         let sane = finite && grf_ok;
         if !sane {
             self.x_prev = None;
@@ -910,6 +927,7 @@ impl WbcLayer {
         j_contact: &na::DMatrix<f64>,
         dj_v: &na::DVector<f64>,
         stance: [bool; 4],
+        contact_weight: [f64; 4],
         refs: &References,
         swing: Option<wbc::Task>,
         joint_q_ddot: &na::DVector<f64>,
@@ -922,14 +940,32 @@ impl WbcLayer {
         let task_0 = tasks::floating_base_eom::formulate(dims, mass, nle, j_contact)
             .weight(w.floating_base_eom)
             + tasks::torque_limits::formulate(dims, &self.torque_max)
-            + tasks::friction_cone::formulate(
-                dims,
-                stance,
-                self.cfg.friction_mu,
-                self.cfg.f_min_stance_n,
-            )
-            + tasks::no_contact_motion::formulate(dims, j_contact, dj_v, stance)
-                .weight(w.no_contact_motion);
+            + if self.cfg.contact_ramp_s > 0.0 {
+                // **接地を連続にする。** 0/1 だと遊脚の「力は厳密に 0」という
+                // 硬い等式が 1 周期で現れ消えし、優先度 0 のランクが飛ぶ。
+                // 重み付きなら行の形が毎周期同じで、境界だけが動く。
+                tasks::friction_cone::formulate_weighted(
+                    dims,
+                    contact_weight,
+                    self.cfg.friction_mu,
+                    self.cfg.f_min_stance_n,
+                    self.cfg.contact_force_cap_frac.max(0.1) * self.mass_kg * G,
+                )
+            } else {
+                tasks::friction_cone::formulate(
+                    dims,
+                    stance,
+                    self.cfg.friction_mu,
+                    self.cfg.f_min_stance_n,
+                )
+            }
+            + if self.cfg.contact_ramp_s > 0.0 {
+                tasks::no_contact_motion::formulate_weighted(dims, j_contact, dj_v, contact_weight)
+                    .weight(w.no_contact_motion)
+            } else {
+                tasks::no_contact_motion::formulate(dims, j_contact, dj_v, stance)
+                    .weight(w.no_contact_motion)
+            };
 
         let mut task_1 =
             tasks::base_accel::formulate(dims, &refs.a_base_des).weight(w.base_accel);
@@ -1336,6 +1372,7 @@ impl WbcRunner {
             body: *body,
             mpc: out.mpc,
             stance: out.stance,
+            contact_weight: out.contact_weight,
             dt,
         });
         Some(plan)
@@ -1532,6 +1569,7 @@ mod tests {
             body: level_stand(),
             mpc: None,
             stance: [true; 4],
+            contact_weight: [1.0; 4],
             dt: 0.005,
         };
 
@@ -1594,6 +1632,7 @@ mod tests {
             body: level_stand(),
             mpc: None,
             stance: [false; 4],
+            contact_weight: [0.0; 4],
             dt: 0.005,
         });
         assert_eq!(plan.status.stance_count, 0);
@@ -1624,6 +1663,7 @@ mod tests {
             body: level_stand(),
             mpc: None,
             stance: [true; 4],
+            contact_weight: [1.0; 4],
             dt: 0.005,
         });
         assert_eq!(plan.status.stance_count, 4);
@@ -1671,6 +1711,7 @@ mod tests {
                 body: level_stand(),
                 mpc,
                 stance: [true; 4],
+                contact_weight: [1.0; 4],
                 dt: 0.005,
             })
         };
@@ -1726,6 +1767,7 @@ mod tests {
                 solved: false,
             }),
             stance: [true; 4],
+            contact_weight: [1.0; 4],
             dt: 0.005,
         });
         assert!(!plan.status.mpc_driven);
@@ -1763,6 +1805,7 @@ mod tests {
                 body: level_stand(),
                 mpc: None,
                 stance: [true; 4],
+                contact_weight: [1.0; 4],
                 dt: 0.005,
             });
             assert_eq!(
@@ -1811,6 +1854,7 @@ mod tests {
             body: level_stand(),
             mpc: None,
             stance: [true, true, false, false],
+            contact_weight: [1.0, 1.0, 0.0, 0.0],
             dt: 0.005,
         });
         for (leg, names) in misa_hal::joint::JOINT_NAMES.iter().enumerate() {
@@ -1854,6 +1898,7 @@ mod tests {
                 body: level_stand(),
                 mpc: None,
                 stance: [true; 4],
+                contact_weight: [1.0; 4],
                 dt: 0.005,
             }
         }

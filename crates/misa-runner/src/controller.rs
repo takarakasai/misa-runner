@@ -77,6 +77,15 @@ pub struct ControlOutput {
     /// 歩容を回していない状態（遷移中・ポーズ再生中）は最後に分かった値の
     /// まま。そのあいだ WBC は回さないので影響しない。
     pub stance: [bool; 4],
+    /// 立脚の**重み**（FL, FR, RL, RR、0〜1）。`stance` の連続版。
+    ///
+    /// **0/1 で切り替えると WBC の優先度 0 のランクが 1 周期で飛ぶ。**
+    /// 階層 QP はその周期に矛盾した解を返すことがあり、実測では踏み替えの
+    /// たびに前置トルクが 145 N·m 跳んだ。離地の手前で 1 → 0、着地の直後に
+    /// 0 → 1 と `wbc.contact_ramp_s` 秒かけて動かす。
+    ///
+    /// `wbc.contact_ramp_s = 0`（既定）では `stance` をそのまま 0/1 で返す。
+    pub contact_weight: [f64; 4],
     /// 歩容が計画している世界ヨー角 [rad]。速度指令の積分値で、IMU とは
     /// **原点が違う**。WBC のヨー保持の目標に使う。
     pub planned_yaw_rad: f64,
@@ -189,6 +198,12 @@ pub struct Controller {
     /// 最後に分かった値を保持する。歩容が止まっている間は胴体も動かない
     /// ので、これは嘘ではない。
     body_view: BodyView,
+    /// 立脚の重み（`ControlOutput::contact_weight`）。位相から毎周期作る。
+    contact_weight: [f64; 4],
+    /// いま歩容に入っている周期と接地比。**重みのランプ幅を秒で決める**
+    /// のに要る（`contact_ramp_s / (周期 × 接地比)`）。
+    gait_cycle_s: f64,
+    gait_duty: f64,
     /// 反転の振り付けが終わったら採用する膝の向き。
     knee_flip_target: Option<crate::config::KneeShape>,
     /// 振り付けの段ごとの立脚フラグ（浮かせている脚は false）。前置トルクと
@@ -255,6 +270,8 @@ impl Controller {
         // 基準姿勢の胴体高さ（高さだけの由来なら stance_height_m そのもの）。
         let stance_height_m = robot.reference_height_m(&cfg.gait);
         let gait_select = GaitSelect::Crawl;
+        let initial_gait_cfg =
+            crate::robot::tuned_gait_config(&cfg.gait, gait_select, &misa_core::GaitTune::default());
         let gait = robot.build_gait(&cfg.gait, &cfg.wbc, gait_select);
         let chicken = ChickenHead::new(&cfg.poses);
         let mut c = Self {
@@ -281,6 +298,9 @@ impl Controller {
             observed_v_world: nalgebra::Vector3::zeros(),
             observed_omega_world: nalgebra::Vector3::zeros(),
             body_view: BodyView::default(),
+            contact_weight: [0.0; 4],
+            gait_cycle_s: initial_gait_cfg.cycle_period_s,
+            gait_duty: initial_gait_cfg.duty_factor,
             knee_flip_target: None,
             knee_flip_stance: Vec::new(),
             warned_knee_flip: false,
@@ -496,6 +516,7 @@ impl Controller {
             },
             state: self.state,
             stance: self.body_view.stance,
+            contact_weight: self.contact_weight,
             planned_yaw_rad: self.body_view.yaw,
             target_foot_body: self.target_foot_body,
             mpc: self.mpc,
@@ -688,6 +709,7 @@ impl Controller {
                 out.legs[3].phase.is_stance,
             ],
         };
+        self.contact_weight = self.contact_weights(&out);
         let (targets, reachable) = self.robot.output_to_joints_tilted(&out, arm, self.tilt_rad);
         self.targets = targets;
         // 傾けたぶん脚が届かなくなることがある。歩容自身の `all_reachable`
@@ -2324,6 +2346,8 @@ impl Controller {
         }
         let cfg = crate::robot::tuned_gait_config(&self.cfg.gait, self.gait_select, &want);
         self.gait.set_config(cfg.clone());
+        self.gait_cycle_s = cfg.cycle_period_s;
+        self.gait_duty = cfg.duty_factor;
         log::info!(
             "歩容パラメータ: 周期 {:.3} s / 遊脚 {:.3} m / 歩幅 {:.3} m / 接地比 {:.2}",
             cfg.cycle_period_s,
@@ -2339,6 +2363,45 @@ impl Controller {
         self.gait_tune
     }
 
+    /// 立脚の重み（0〜1）を歩容の位相から作る。
+    ///
+    /// **離地の手前で 1 → 0、着地の直後に 0 → 1 へ `wbc.contact_ramp_s`
+    /// 秒かけて動かす。** 0/1 で切り替えると WBC の優先度 0（摩擦錐と
+    /// 「立脚足は動かない」）のランクが 1 周期で飛び、階層 QP が矛盾した解を
+    /// 返すことがある（実測: 接地力の合計 0.1 N に対して胴体の角加速度
+    /// 57 rad/s²、前置トルクが 145 N·m 跳ぶ。踏み替えのたび）。
+    ///
+    /// **予定表は歩容の位相時計から採る。** MPC の窓（既定 10 段 × 30 ms）
+    /// でも同じことはできるが、あちらは 30 ms 刻みで制御周期 5 ms を解像
+    /// できないうえ、CHAMP では存在しない。位相は連続で、どの歩容にもある。
+    fn contact_weights(&self, out: &quadruped_gait::ControllerOutput) -> [f64; 4] {
+        let ramp_s = self.cfg.wbc.contact_ramp_s;
+        let mut w = [0.0; 4];
+        for (i, leg) in out.legs.iter().enumerate() {
+            if !leg.phase.is_stance {
+                continue;
+            }
+            if ramp_s <= 0.0 {
+                w[i] = 1.0;
+                continue;
+            }
+            // 接地している時間。**これより長いランプは指定できない**
+            // （抜けきる前に離地する）ので、サブ相の半分で頭打ち。
+            let stance_s = (self.gait_cycle_s * self.gait_duty).max(1e-3);
+            let r = (ramp_s / stance_s).clamp(1e-6, 0.5);
+            let f = leg.phase.sub_fraction.clamp(0.0, 1.0);
+            // **離地の側だけ鈍らせる。着地は即 1。**
+            //
+            // 両側を鈍らせると、接地比 0.5 の trot では踏み替えの瞬間に
+            // 両対角とも重みが 0 になり、**支持が一瞬抜ける**（実測で解の
+            // 検算が 2 → 50 周期に増え、接地力の合計が体重を割る）。
+            // 抜ける足は実際に荷重を減らしながら離れるので鈍らせるのが
+            // 物理的だが、着く足は本当にそこに着くので即 1 でよい。
+            w[i] = ((1.0 - f) / r).min(1.0_f64).clamp(0.0, 1.0);
+        }
+        w
+    }
+
     fn set_gait(&mut self, select: GaitSelect) {
         log::info!("歩容を {} に切り替えます", select.label());
         self.gait = self.robot.build_gait(&self.cfg.gait, &self.cfg.wbc, select);
@@ -2346,6 +2409,9 @@ impl Controller {
         // **作り直したので上書きは落ちている。** 次の周期で操縦側が送って
         // くる値が入る（操縦側も歩容を替えたら基準値へ戻す約束）。
         self.gait_tune = misa_core::GaitTune::default();
+        let c = crate::robot::tuned_gait_config(&self.cfg.gait, select, &self.gait_tune);
+        self.gait_cycle_s = c.cycle_period_s;
+        self.gait_duty = c.duty_factor;
         // 歩容ごとに可否が違うので、切り替えたら言い直す。
     }
 }
