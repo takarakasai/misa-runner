@@ -381,7 +381,7 @@ impl Default for RunOptions {
 /// 受信機を待ち、CH5 が脱力位置か確かめ、マルチターンの原点を張り、
 /// 伏せ姿勢と照合する。**どれもバスを直接握る構成にしか無い**ので、
 /// ブリッジ越しの機体はここを通らない。
-fn start_serial(
+pub fn start_serial(
     cfg: &AppConfig,
     opts: &RunOptions,
     plant: crate::plant::SerialPlant,
