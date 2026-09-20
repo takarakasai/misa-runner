@@ -692,6 +692,34 @@ pub fn check(cfg: &AppConfig) -> Result<(), String> {
             cfg.gait.controller.label(),
             modes.join(" ")
         );
+        // **歩容が出せる上限を、宣言している上限と並べて出す。**
+        // 超えて指令しても届かないだけで、追従率が落ちるのはそのせい。
+        println!(
+            "  出せる速度の上限（歩幅 / (周期 × 接地比)。宣言は max_vx_m_s {:.2} / max_wz_rad_s {:.2}）",
+            cfg.gait.max_vx_m_s, cfg.gait.max_wz_rad_s
+        );
+        for select in [GaitSelect::Crawl, GaitSelect::Walk, GaitSelect::Trot] {
+            let (vx, wz) = crate::robot::speed_ceiling(&robot, &cfg.gait, select);
+            let g = crate::robot::base_gait_config(&cfg.gait, select);
+            let over = |declared: f64, ceil: f64| {
+                if declared > ceil * 1.05 {
+                    "  ← 宣言のほうが大きい"
+                } else {
+                    ""
+                }
+            };
+            println!(
+                "    {:6} 前進 {:.3} m/s{}  旋回 {:.3} rad/s{}  （歩幅 {:.3} m / 周期 {:.3} s / 接地比 {:.2}）",
+                select.label(),
+                vx,
+                over(cfg.gait.max_vx_m_s, vx),
+                wz,
+                over(cfg.gait.max_wz_rad_s, wz),
+                g.max_step_length_m,
+                g.cycle_period_s,
+                g.duty_factor,
+            );
+        }
         if cfg.gait.controller.has_mpc() {
             let posture = robot.stance_posture(&cfg.gait);
             let b = robot.body_inertia_at(&posture);

@@ -794,6 +794,37 @@ pub fn gait_supports_body_height(mode: GaitMode) -> bool {
     matches!(mode, GaitMode::LinearCrawl)
 }
 
+/// その歩容が出せる**最高の前進速度** [m/s] と**最高の旋回速度** [rad/s]。
+///
+/// **歩幅がすべてを決める。** 1 周期で足が地面を掻けるのは歩幅ぶんだけで、
+/// 掻いている時間は `周期 × 接地比`。だから
+/// `前進 = 歩幅 / (周期 × 接地比)`、旋回はそれを足の回転半径で割る。
+///
+/// **これを超えて指令しても届かない。** 届かないぶんは追従率が落ちるだけで、
+/// コントローラの失敗ではない。hayaashi の crawl は 0.059 m/s・0.19 rad/s
+/// しか出ないのに、プロファイルは `max_vx_m_s = 0.4` を宣言している。
+/// `check` が両方を並べて出すのはそのため。
+pub fn speed_ceiling(
+    robot: &Robot,
+    tuning: &GaitTuning,
+    select: GaitSelect,
+) -> (f64, f64) {
+    let c = base_gait_config(tuning, select);
+    let denom = c.cycle_period_s * c.duty_factor;
+    if denom <= 0.0 {
+        return (f64::INFINITY, f64::INFINITY);
+    }
+    let vx = c.max_step_length_m / denom;
+    // 足の回転半径は 4 脚の `nominal_foot_body` の水平距離の平均。
+    let kin = robot.stance_kinematics(tuning);
+    let mut r = 0.0;
+    for leg in kin.legs() {
+        r += leg.nominal_foot_body.xy().norm();
+    }
+    r /= 4.0;
+    (vx, if r > 1e-6 { vx / r } else { f64::INFINITY })
+}
+
 /// プロファイルから決まる、その歩容の基準となる [`GaitConfig`]。
 ///
 /// **歩容ごとに基準が違う。** 周期は `trot_cycle_s` / `walk_cycle_s` /
@@ -998,6 +1029,39 @@ mod tests {
         }
         assert_eq!(gait_mode_of(GaitSelect::Crawl, &auto_on), GaitMode::LinearCrawl);
         assert_eq!(gait_mode_of(GaitSelect::Walk, &auto_on), GaitMode::Champ);
+    }
+
+    /// [`speed_ceiling`] は実測の飽和点と合う。
+    ///
+    /// hayaashi の crawl（歩幅 0.06 / 周期 1.2 / 接地比 0.85、足の回転半径
+    /// 0.314 m）を MuJoCo で振ると、前進は 0.059 m/s、旋回は 0.19 rad/s で
+    /// 頭打ちになる。**そこを超えた指令の「追従率」は制御の失敗ではない。**
+    #[test]
+    fn the_ceiling_matches_what_the_gait_actually_saturates_at() {
+        let robot = Robot::load(
+            &format!("{}/../../models/testquad/testquad.misa", env!("CARGO_MANIFEST_DIR")),
+            &crate::config::AppConfig::default().control.kinematics_pose,
+        )
+        .expect("テスト用モデルを読めません");
+        let mut t = GaitTuning {
+            crawl_cycle_s: Some(1.2),
+            ..GaitTuning::default()
+        };
+        let (vx, wz) = speed_ceiling(&robot, &t, GaitSelect::Crawl);
+        assert!((vx - 0.0588).abs() < 0.001, "crawl の前進上限 {vx:.4}");
+        assert!(wz > 0.0 && wz.is_finite(), "旋回上限 {wz}");
+        // 半径で割った値になっている（前進より必ず大きいか小さいかは
+        // 機体の大きさ次第なので、比だけ見る）。
+        let r = {
+            let kin = robot.stance_kinematics(&t);
+            kin.legs().iter().map(|l| l.nominal_foot_body.xy().norm()).sum::<f64>() / 4.0
+        };
+        assert!((wz - vx / r).abs() < 1e-9);
+
+        // **周期を詰めれば上限は上がる。** crawl が遅いのは周期のせい。
+        t.crawl_cycle_s = Some(0.6);
+        let (fast, _) = speed_ceiling(&robot, &t, GaitSelect::Crawl);
+        assert!(fast > vx * 1.9, "{fast:.4} は {vx:.4} のほぼ 2 倍のはず");
     }
 
     /// **歩幅がその歩容の最高速度を決める。**
