@@ -1845,6 +1845,21 @@ pub struct GaitTuning {
     /// 分単位の錨には使えない。押されて流されたぶんを数十秒で戻す用途向け。
     #[serde(default)]
     pub hold_position_kp: f64,
+    /// **向きも保持する**ときの比例ゲイン [1/s]。`0` で無効（既定）。
+    ///
+    /// `wz = clamp(kp · wrap(目標ヨー − 実測ヨー), max_wz_rad_s)`。位置と
+    /// 違って**実測ヨー（IMU）を使う**。歩容が持っているヨーは指令を積んだ
+    /// 計画値なので、それと比べても誤差は出ない。
+    ///
+    /// **押された後に戻らないのは向きだけ。** roll と pitch は WBC の姿勢
+    /// タスクが常時 0 へ引くので自然に戻るが、ヨーは歩容の進行方向そのもので
+    /// WBC の対象外。keel の 500 N 横 push では、復帰の踏み出しが左右非対称に
+    /// 効いて 17° 残る（外力のモーメントではなく、戻る動作の副産物）。
+    ///
+    /// **ヨーの基準は IMU の積分しかない。** 位置と同じで分単位の錨には
+    /// ならない。地磁気や外部基準が無い実機では徐々に流れる。
+    #[serde(default)]
+    pub hold_yaw_kp: f64,
     /// **外乱を受けたら立ち幅を広げる量** [m]（片側）。`0` で無効。
     ///
     /// 500 N 級の転倒は「足が食いついて、その足を支点に倒れる」= 躓きで
@@ -2038,6 +2053,7 @@ impl Default for GaitTuning {
             recovery_target_rate_rad_s: 0.0,
             recovery_torque_scale: 0.0,
             hold_position_kp: 0.0,
+            hold_yaw_kp: 0.0,
             recovery_stance_widen_m: 0.0,
             recovery_stance_widen_tau_s: default_widen_tau(),
             mpc_observe_pose: true,

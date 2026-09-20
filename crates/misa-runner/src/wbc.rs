@@ -1437,7 +1437,8 @@ const G: f64 = 9.806_65;
 /// 当たらない。
 const JOINT_V_MAX: f64 = 10.0;
 
-fn wrap_pi(x: f64) -> f64 {
+/// 角度を `[-pi, pi)` へ畳む。差分を取ってから使う。
+pub(crate) fn wrap_pi(x: f64) -> f64 {
     (x + std::f64::consts::PI).rem_euclid(2.0 * std::f64::consts::PI) - std::f64::consts::PI
 }
 

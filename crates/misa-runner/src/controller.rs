@@ -204,9 +204,9 @@ pub struct Controller {
     /// シムでは MuJoCo の真値を入れる。無ければ位置保持は脚オドメトリで
     /// 動くが、**押された変位は戻せない**（上記）。
     world_position: Option<[f64; 2]>,
-    /// 位置保持の目標。`Intent::hold_position` の立ち上がりで**いまの
-    /// `odom_world`** を入れる。
-    hold_target: Option<[f64; 2]>,
+    /// 位置保持の目標 `[x, y, yaw]`。`Intent::hold_position` の立ち上がりで
+    /// **いまの `odom_world` と実測ヨー**を入れる。
+    hold_target: Option<[f64; 3]>,
     /// いま効いている立ち幅の広げ量 [m]（片側）。目標へ一次遅れで寄せる。
     widen_now: f64,
     /// 最後に運動学へ渡した広げ量。変わったときだけ差し替える。
@@ -2786,17 +2786,22 @@ impl Controller {
         self.widen_now
     }
 
-    /// 位置保持の目標（世界座標 x, y）。保持していなければ `None`。
+    /// 位置保持の目標 `[x, y, yaw]`。保持していなければ `None`。
     ///
     /// **外乱評価の絵で「戻るべき点」を描くために要る。** 目標を描く側が
     /// 指令を積分し直すと、途中で飽和した分だけずれる。
-    pub fn hold_target(&self) -> Option<[f64; 2]> {
+    pub fn hold_target(&self) -> Option<[f64; 3]> {
         self.hold_target
     }
 
     /// 位置保持が使う「いまの位置」。外部基準があればそちら。
     fn hold_here(&self) -> [f64; 2] {
         self.world_position.unwrap_or(self.odom_world)
+    }
+
+    /// 位置保持が使う「いまの向き」。**IMU の実測**で、歩容の計画値ではない。
+    fn hold_yaw_here(&self) -> f64 {
+        self.last_attitude_rad[2]
     }
 
     fn apply_hold(&mut self, cmd: &Intent) {
@@ -2809,7 +2814,8 @@ impl Controller {
             return;
         }
         if self.hold_target.is_none() {
-            self.hold_target = Some(self.hold_here());
+            let [x, y] = self.hold_here();
+            self.hold_target = Some([x, y, self.hold_yaw_here()]);
             log::info!(
                 "位置保持を始めます（いまの推定位置を目標に）。**脚オドメトリの積算なので\
                  長時間の錨にはなりません**"
@@ -2823,13 +2829,22 @@ impl Controller {
         let kp = self.cfg.gait.hold_position_kp;
         let here = self.hold_here();
         let (ex, ey) = (target[0] - here[0], target[1] - here[1]);
-        // 世界座標の誤差を機体座標の速度へ回す。
-        let yaw = self.body_view.yaw;
+        // **世界座標の誤差を機体座標へ回すのは実測ヨー。** 歩容が持っている
+        // のは指令を積んだ計画値で、押されて向きがずれると実際の機体との差が
+        // そのまま戻る方向の誤りになる。
+        let yaw = self.hold_yaw_here();
         let (c, s) = (yaw.cos(), yaw.sin());
         let vx = (kp * (ex * c + ey * s)).clamp(-self.cfg.gait.max_vx_m_s, self.cfg.gait.max_vx_m_s);
         let vy =
             (kp * (-ex * s + ey * c)).clamp(-self.cfg.gait.max_vy_m_s, self.cfg.gait.max_vy_m_s);
-        Some([vx, vy, 0.0])
+        let kyaw = self.cfg.gait.hold_yaw_kp;
+        let wz = if kyaw > 0.0 {
+            let e = crate::wbc::wrap_pi(target[2] - yaw);
+            (kyaw * e).clamp(-self.cfg.gait.max_wz_rad_s, self.cfg.gait.max_wz_rad_s)
+        } else {
+            0.0
+        };
+        Some([vx, vy, wz])
     }
 
     fn set_gait(&mut self, select: GaitSelect) {
@@ -2876,6 +2891,53 @@ mod tests {
     fn test_model_path() -> String {
         // crates/misa-runner から見たリポジトリルート。
         format!("{}/../../models/testquad/testquad.misa", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    /// 向きの保持は**実測ヨー**を見る。歩容の計画ヨーを見ても誤差は出ない。
+    ///
+    /// 押されて向きがずれた状態を作り、`hold_yaw_kp` が 0 なら wz は 0 のまま、
+    /// 入っていれば誤差を消す向きの wz が出ることを見る。
+    #[test]
+    fn holding_a_pose_turns_the_body_back_only_when_the_yaw_gain_is_set() {
+        let mut c = controller();
+        c.cfg.gait.hold_position_kp = 0.5;
+        c.hold_target = Some([0.0, 0.0, 0.0]);
+        c.world_position = Some([0.0, 0.0]);
+
+        // 実測ヨーが +0.20 rad ずれている（計画ヨーは 0 のまま）。
+        c.last_attitude_rad = [0.0, 0.0, 0.20];
+
+        c.cfg.gait.hold_yaw_kp = 0.0;
+        assert_eq!(c.hold_velocity().unwrap()[2], 0.0, "既定では向きを触らない");
+
+        c.cfg.gait.hold_yaw_kp = 2.0;
+        let wz = c.hold_velocity().unwrap()[2];
+        assert!(wz < 0.0, "ずれを減らす向きに回る。得られた wz = {wz}");
+        assert!(
+            (wz + 2.0 * 0.20).abs() < 1e-9 || wz.abs() >= c.cfg.gait.max_wz_rad_s - 1e-9,
+            "kp x 誤差、または上限。得られた wz = {wz}"
+        );
+
+        // ±pi をまたぐ側を近道と見なす。
+        c.hold_target = Some([0.0, 0.0, 3.10]);
+        c.last_attitude_rad = [0.0, 0.0, -3.10];
+        let wz = c.hold_velocity().unwrap()[2];
+        assert!(wz < 0.0, "6.2 rad 戻るのではなく 0.08 rad 進む。得られた wz = {wz}");
+    }
+
+    /// 位置の誤差は**実測ヨー**で機体座標へ回す。計画ヨーで回すと、
+    /// 押されて向きがずれたぶんだけ戻る方向が狂う。
+    #[test]
+    fn the_position_error_is_rotated_by_the_measured_yaw() {
+        let mut c = controller();
+        c.cfg.gait.hold_position_kp = 1.0;
+        c.hold_target = Some([1.0, 0.0, 0.0]);
+        c.world_position = Some([0.0, 0.0]);
+        // 機体が +90 度向いている。世界 +x への誤差は機体の -y。
+        c.last_attitude_rad = [0.0, 0.0, std::f64::consts::FRAC_PI_2];
+        let v = c.hold_velocity().unwrap();
+        assert!(v[0].abs() < 1e-9, "前後には出ない。得られた vx = {}", v[0]);
+        assert!(v[1] < 0.0, "右へ寄る。得られた vy = {}", v[1]);
     }
 
     /// 状態が `want` になるまで回す。回りすぎたら失敗。

@@ -40,7 +40,8 @@ import sys
 from PIL import Image, ImageDraw, ImageFont
 
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
-W, H = 640, 214
+# H は偶数でないと libx264 が通らない。
+W, H = 640, 236
 DEG = 57.29577951308232
 
 
@@ -119,6 +120,18 @@ def overlay_world(im, r, cam, push, t, font, n_scale):
         err = math.dist(here, goal)
         d.text((q[0] + 17, q[1] - 8), f"TARGET  err {err:.3f} m",
                font=font, fill=(120, 230, 255, 255))
+        # **向きも保持するなら向きも描く。** 点だけだと、戻ったのが位置だけ
+        # なのか向きもなのか絵から分からない。目標の向きを目標点から、いまの
+        # 向きを機体の足元から、同じ長さ 0.3 m の線で出す。
+        if "hold_yaw" in r and "yaw" in r:
+            for base, ang, col in (
+                (goal, g("hold_yaw"), (120, 230, 255, 220)),
+                (here, g("yaw"), (250, 210, 100, 220)),
+            ):
+                b = cam((base[0], base[1], 0.0))
+                tip = cam((base[0] + 0.30 * math.cos(ang), base[1] + 0.30 * math.sin(ang), 0.0))
+                if b and tip:
+                    arrow(d, b, tip, col, 2)
 
     if not push:
         return
@@ -218,6 +231,17 @@ def panel(out_dir, rows, ts, n_frames, title, push, fps):
             fill=(225, 230, 240),
         )
         y += lh
+        if "yaw" in r and "hold_yaw" in r:
+            ey = (g("yaw") - g("hold_yaw")) * DEG
+            ey = (ey + 180) % 360 - 180
+            d.text(
+                (9, y),
+                f"HEADING  yaw {g('yaw') * DEG:+7.2f}  target {g('hold_yaw') * DEG:+7.2f}  "
+                f"err {ey:+6.2f} deg",
+                font=font,
+                fill=(240, 200, 80) if abs(ey) > 2.0 else (165, 200, 180),
+            )
+            y += lh
         d.text(
             (9, y),
             f"stance widen {g('widen'):.3f} m | ACTUAL = sim truth",
