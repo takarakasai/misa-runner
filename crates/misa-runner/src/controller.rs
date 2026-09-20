@@ -2786,6 +2786,14 @@ impl Controller {
         self.widen_now
     }
 
+    /// 位置保持の目標（世界座標 x, y）。保持していなければ `None`。
+    ///
+    /// **外乱評価の絵で「戻るべき点」を描くために要る。** 目標を描く側が
+    /// 指令を積分し直すと、途中で飽和した分だけずれる。
+    pub fn hold_target(&self) -> Option<[f64; 2]> {
+        self.hold_target
+    }
+
     /// 位置保持が使う「いまの位置」。外部基準があればそちら。
     fn hold_here(&self) -> [f64; 2] {
         self.world_position.unwrap_or(self.odom_world)

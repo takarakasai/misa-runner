@@ -421,7 +421,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
         let mut w = std::io::BufWriter::new(
             std::fs::File::create(path).unwrap_or_else(|e| panic!("{path} を作れません: {e}")),
         );
-        let _ = writeln!(w, "t,vx_req,vy_req,wz_req,vx_cmd,vy_cmd,wz_cmd,vx_true,vy_true,wz_true,vx_est,vy_est,z,roll,pitch,x_world,y_world,widen");
+        let _ = writeln!(w, "t,vx_req,vy_req,wz_req,vx_cmd,vy_cmd,wz_cmd,vx_true,vy_true,wz_true,vx_est,vy_est,z,roll,pitch,x_world,y_world,widen,hold_x,hold_y");
         w
     });
     // `--push "t,dur,fx,fy,fz"`: 胴体を世界座標で押す（外乱応答）。
@@ -778,7 +778,7 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                     let _ = writeln!(
                         w,
                         "{t:.4},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},\
-                         {:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5}",
+                         {:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5}",
                         cmd.velocity.vx_m_s,
                         cmd.velocity.vy_m_s,
                         cmd.velocity.wz_rad_s,
@@ -796,6 +796,10 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                         p[0],
                         p[1],
                         controller.stance_widen_now(),
+                        // 保持していないときは「いまの位置」を書く。描く側で
+                        // 空欄を扱わずに済み、点は機体に重なって見えなくなる。
+                        controller.hold_target().unwrap_or([p[0], p[1]])[0],
+                        controller.hold_target().unwrap_or([p[0], p[1]])[1],
                     );
                 }
                 active_end = p;

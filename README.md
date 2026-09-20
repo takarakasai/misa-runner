@@ -459,7 +459,7 @@ hayaashi の trot 0.12 で kp 300 / kd 2 なら素の歩容は −0.30 m（後�
 misa-run sim --robot robots/testquad.toml --gait trot --vx 0.12 --secs 14 \
     --timestep 0.0005 --safety-gate --push "6.0,0.2,0,-600,0" \
     --csv /tmp/run.csv \
-    --video /tmp/frames --cam-fixed --cam-az 0 --cam-el -11 \
+    --video /tmp/frames --cam-fixed --cam-az 180 --cam-el -11 \
     --cam-dist 1.55 --cam-x 0.45 --cam-y -0.22 --cam-z 0.26
 
 ./scripts/hud-video.py /tmp/run.csv /tmp/frames out.mp4 \
@@ -470,8 +470,31 @@ misa-run sim --robot robots/testquad.toml --gait trot --vx 0.12 --secs 14 \
 ESTIMATE（脚オドメトリ）を並べ、胴体の高さと傾き、立ち幅の広げ量、外力の
 状態（UPCOMING → ACTIVE → DONE）を出す。
 
-**カメラの向き。** `--cam-az 0` で機体の前がカメラ側、`180` で後ろ姿、
-`90` で真横（右が前）。横に押すところを見せるなら正面、進む量を見せるなら真横。
+**目標位置と外力を絵の中に描く（`--cam`）。** sim へ渡したのと同じ
+`az,el,dist,x,y,z` を渡すと、世界座標を画素へ落として重ねる。位置保持の
+目標（CSV の `hold_x,hold_y`）を地面の同心円と誤差の数字で、外力を発生点の
+丸と矢印で描く。**矢印は長さと太さの両方で大きさを表す** — 長さだけだと
+奥行きで縮んだのか力が小さいのか区別できない。押している間だけ出す。
+
+```sh
+misa-run sim --robot <profile> --gait trot --secs 16 --timestep 0.0005 \
+    --kp 500 --kv 5 --safety-gate --hold --push "6.0,0.2,0,-500,0" \
+    --csv /tmp/d.csv --video /tmp/dfr --cam-fixed \
+    --cam-az 180 --cam-el -16 --cam-dist 1.85 --cam-x 0 --cam-y -0.20 --cam-z 0.30
+
+./scripts/hud-video.py /tmp/d.csv /tmp/dfr out.mp4 --push 6.0,0.2,0,-500,0 \
+    --cam 180,-16,1.85,0,-0.20,0.30
+```
+
+`--cam-fixed` の自由カメラだけが対象。追従カメラは注視点が毎周期動くので
+再現できない。画角は MuJoCo の既定 45°（`--vy` で機体を振って画素の重心を
+追い、実測 45.3°・残差 5.7 px で確かめた）。
+
+**カメラの向き。** `--cam-az 180` で機体の前がカメラ側、`0` で後ろ姿、
+`90` で真横。**0 と 180 を取り違えないこと** — 前後がよく似ていて絵では
+判別できない。確かめ方は `--vx` を正で走らせること。小さくなれば背面
+（az 0）、大きくなれば正面（az 180）。地平線に見える線は**床の端**であって
+地平線ではないので、画角の当てにはならない。
 
 ### MuJoCo の絵を動画にする
 
