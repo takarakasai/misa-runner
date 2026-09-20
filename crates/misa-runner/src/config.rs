@@ -608,6 +608,27 @@ pub struct WbcConfig {
     ///
     /// 制御周期の数倍を目安に。200 Hz なら 0.02 s で 4 周期。
     pub contact_ramp_s: f64,
+    /// 歩容ごとの傾斜 (s)。指定が無ければ [`Self::contact_ramp_s`]。
+    ///
+    /// **歩容で効きが逆になる。** hayaashi の MuJoCo 実測（20 s、棄却率と
+    /// 到達距離）:
+    ///
+    /// | 傾斜 | trot | walk | crawl |
+    /// |---|---|---|---|
+    /// | 0 | +1.958 m / 2.5 % | +0.927 / 2.5 % | **+0.959 / 1.5 %** |
+    /// | 0.005 | +2.032 / 0.1 % | +1.038 / 0.0 % | +0.673 / 0.2 % |
+    /// | 0.02 | **+2.069 / 0.1 %** | +0.988 / 0.1 % | +0.673 / 1.0 % |
+    ///
+    /// 2 脚支持の trot と walk は棄却も距離も良くなるが、**crawl は 3 割
+    /// 落ちる**。長さを変えても戻らないので、傾斜そのものが 3 脚支持と
+    /// 相性が悪い（荷重配分が過決定で、重みを動かすと配り方が変わる）。
+    /// だから歩容ごとに持つ。
+    #[serde(default)]
+    pub crawl_contact_ramp_s: Option<f64>,
+    #[serde(default)]
+    pub walk_contact_ramp_s: Option<f64>,
+    #[serde(default)]
+    pub trot_contact_ramp_s: Option<f64>,
     /// 重み 1 のときの 1 足あたりの鉛直力の上限。体重に対する倍率。
     ///
     /// **[`Self::contact_ramp_s`] が効くのはこの上限があるから。** 重み w の
@@ -850,6 +871,9 @@ impl Default for WbcConfig {
             check_grf_max_frac: 3.0,
             check_eom_residual: 0.0,
             contact_ramp_s: 0.0,
+            crawl_contact_ramp_s: None,
+            walk_contact_ramp_s: None,
+            trot_contact_ramp_s: None,
             contact_force_cap_frac: 2.0,
             swing_kp: 350.0,
             swing_kd: 37.0,
@@ -887,6 +911,17 @@ impl Default for WbcConfig {
 }
 
 impl WbcConfig {
+    /// この歩容で使う接地の傾斜 (s)。歩容ごとの指定が無ければ
+    /// [`Self::contact_ramp_s`]（歩容によって効きが逆になる理由はそちら）。
+    pub fn contact_ramp_for(&self, gait: misa_core::GaitSelect) -> f64 {
+        let per = match gait {
+            misa_core::GaitSelect::Crawl => self.crawl_contact_ramp_s,
+            misa_core::GaitSelect::Walk => self.walk_contact_ramp_s,
+            misa_core::GaitSelect::Trot => self.trot_contact_ramp_s,
+        };
+        per.unwrap_or(self.contact_ramp_s)
+    }
+
     /// その軸のトルク上限 [N·m]。`declared` はモデルの `effort`。
     ///
     /// **モデル × 係数を、絶対値の上限で頭打ちにする。** どちらも無ければ
@@ -2163,6 +2198,29 @@ impl Default for PoseConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 接地の傾斜は**歩容ごとに持てる**。書いていない歩容は共通値に落ちる。
+    ///
+    /// trot は傾斜を入れると棄却が 2.5 % → 0.1 %、crawl は入れると到達距離が
+    /// 3 割落ちる。逆向きなので 1 つの値では決められない。
+    #[test]
+    fn the_contact_ramp_falls_back_to_the_shared_value_per_gait() {
+        use misa_core::GaitSelect;
+        let cfg = WbcConfig {
+            contact_ramp_s: 0.02,
+            crawl_contact_ramp_s: Some(0.0),
+            ..WbcConfig::default()
+        };
+        assert_eq!(cfg.contact_ramp_for(GaitSelect::Crawl), 0.0, "書いた歩容はその値");
+        assert_eq!(cfg.contact_ramp_for(GaitSelect::Walk), 0.02, "書いていなければ共通値");
+        assert_eq!(cfg.contact_ramp_for(GaitSelect::Trot), 0.02);
+
+        // 歩容ごとの指定が無ければ、3 歩容とも共通値のまま（既存の挙動）。
+        let flat = WbcConfig { contact_ramp_s: 0.02, ..WbcConfig::default() };
+        for g in [GaitSelect::Crawl, GaitSelect::Walk, GaitSelect::Trot] {
+            assert_eq!(flat.contact_ramp_for(g), 0.02);
+        }
+    }
 
     /// **軸種別の上限は脚 12 軸にだけ効く。** モデルの定格の比（keel は
     /// calf 180 / hip・thigh 96）を一律の 1 つに潰さないための口。

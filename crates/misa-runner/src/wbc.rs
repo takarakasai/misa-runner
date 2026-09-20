@@ -244,7 +244,11 @@ pub struct WbcObservation<'a> {
     pub mpc: Option<MpcReference>,
     /// 立脚フラグ（FL, FR, RL, RR）。
     pub stance: [bool; 4],
-    /// 立脚の**重み**（0〜1）。`wbc.contact_ramp_s > 0` のとき、優先度 0 の
+    /// [`Self::contact_weight`] が傾斜で作られているか
+    /// （[`crate::config::WbcConfig::contact_ramp_for`]。歩容ごとに違う）。
+    /// **重みが全部 1.0 でも真になりうる**ので、値からは判らない。
+    pub contact_weighted: bool,
+    /// 立脚の**重み**（0〜1）。傾斜が効いているとき、優先度 0 の
     /// 2 つのタスクはこちらを使う（[`crate::controller::ControlOutput`]）。
     pub contact_weight: [f64; 4],
     /// 制御周期 [s]。**実測を渡すこと**（積分の刻みになる）。
@@ -623,6 +627,7 @@ impl WbcLayer {
             &dj_v,
             obs.stance,
             obs.contact_weight,
+            obs.contact_weighted,
             &refs,
             swing,
             &joint_q_ddot,
@@ -658,7 +663,7 @@ impl WbcLayer {
         // 重み w の足は `w × cap × 体重` までしか踏めないので、下限を体重で
         // 固定すると、ランプの最中に「壊れた解」と誤判定する（接地比 0.5 の
         // trot は踏み替えで重なりが無く、合計が一時的に体重を割る）。
-        let capacity = if self.cfg.contact_ramp_s > 0.0 {
+        let capacity = if obs.contact_weighted {
             let cap = self.cfg.contact_force_cap_frac.max(0.1) * weight;
             obs.contact_weight
                 .iter()
@@ -948,6 +953,7 @@ impl WbcLayer {
         dj_v: &na::DVector<f64>,
         stance: [bool; 4],
         contact_weight: [f64; 4],
+        contact_weighted: bool,
         refs: &References,
         swing: Option<wbc::Task>,
         joint_q_ddot: &na::DVector<f64>,
@@ -965,7 +971,7 @@ impl WbcLayer {
         let task_0 = tasks::floating_base_eom::formulate(dims, mass, nle, j_contact)
             .weight(w.floating_base_eom)
             + tasks::torque_limits::formulate(dims, &self.torque_max)
-            + if self.cfg.contact_ramp_s > 0.0 {
+            + if contact_weighted {
                 // **接地を連続にする。** 0/1 だと遊脚の「力は厳密に 0」という
                 // 硬い等式が 1 周期で現れ消えし、優先度 0 のランクが飛ぶ。
                 // 重み付きなら行の形が毎周期同じで、境界だけが動く。
@@ -984,7 +990,7 @@ impl WbcLayer {
                     self.cfg.f_min_stance_n,
                 )
             }
-            + if self.cfg.contact_ramp_s > 0.0 {
+            + if contact_weighted {
                 tasks::no_contact_motion::formulate_weighted(dims, j_contact, dj_v, contact_weight)
                     .weight(w.no_contact_motion)
             } else {
@@ -1415,6 +1421,7 @@ impl WbcRunner {
             mpc: out.mpc,
             stance: out.stance,
             contact_weight: out.contact_weight,
+            contact_weighted: out.contact_weighted,
             dt,
         });
         Some(plan)
@@ -1613,6 +1620,7 @@ mod tests {
             mpc: None,
             stance: [true; 4],
             contact_weight: [1.0; 4],
+            contact_weighted: false,
             dt: 0.005,
         };
 
@@ -1668,6 +1676,7 @@ mod tests {
             mpc: None,
             stance: [true; 4],
             contact_weight: [1.0; 4],
+            contact_weighted: false,
             dt: 0.005,
         };
         // 既定（無効）では通る。
@@ -1715,6 +1724,7 @@ mod tests {
             mpc: None,
             stance: [false; 4],
             contact_weight: [0.0; 4],
+            contact_weighted: false,
             dt: 0.005,
         });
         assert_eq!(plan.status.stance_count, 0);
@@ -1746,6 +1756,7 @@ mod tests {
             mpc: None,
             stance: [true; 4],
             contact_weight: [1.0; 4],
+            contact_weighted: false,
             dt: 0.005,
         });
         assert_eq!(plan.status.stance_count, 4);
@@ -1794,6 +1805,7 @@ mod tests {
                 mpc,
                 stance: [true; 4],
                 contact_weight: [1.0; 4],
+                contact_weighted: false,
                 dt: 0.005,
             })
         };
@@ -1850,6 +1862,7 @@ mod tests {
             }),
             stance: [true; 4],
             contact_weight: [1.0; 4],
+            contact_weighted: false,
             dt: 0.005,
         });
         assert!(!plan.status.mpc_driven);
@@ -1888,6 +1901,7 @@ mod tests {
                 mpc: None,
                 stance: [true; 4],
                 contact_weight: [1.0; 4],
+                contact_weighted: false,
                 dt: 0.005,
             });
             assert_eq!(
@@ -1937,6 +1951,7 @@ mod tests {
             mpc: None,
             stance: [true, true, false, false],
             contact_weight: [1.0, 1.0, 0.0, 0.0],
+            contact_weighted: false,
             dt: 0.005,
         });
         for (leg, names) in misa_hal::joint::JOINT_NAMES.iter().enumerate() {
@@ -1981,6 +1996,7 @@ mod tests {
                 mpc: None,
                 stance: [true; 4],
                 contact_weight: [1.0; 4],
+                contact_weighted: false,
                 dt: 0.005,
             }
         }

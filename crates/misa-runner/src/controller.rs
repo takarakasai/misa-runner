@@ -86,6 +86,10 @@ pub struct ControlOutput {
     ///
     /// `wbc.contact_ramp_s = 0`（既定）では `stance` をそのまま 0/1 で返す。
     pub contact_weight: [f64; 4],
+    /// [`Self::contact_weight`] が傾斜で作られているか。**重みが全部 1.0
+    /// でも真になりうる**（傾斜の途中でないだけ）ので、値から推し量れない。
+    /// WBC はこれを見て重みつきの拘束と接地力の上限に切り替える。
+    pub contact_weighted: bool,
     /// 歩容が計画している世界ヨー角 [rad]。速度指令の積分値で、IMU とは
     /// **原点が違う**。WBC のヨー保持の目標に使う。
     pub planned_yaw_rad: f64,
@@ -585,6 +589,7 @@ impl Controller {
             state: self.state,
             stance: self.body_view.stance,
             contact_weight: self.contact_weight,
+            contact_weighted: self.cfg.wbc.contact_ramp_for(self.gait_select) > 0.0,
             planned_yaw_rad: self.body_view.yaw,
             target_foot_body: self.target_foot_body,
             mpc: self.mpc,
@@ -2716,7 +2721,7 @@ impl Controller {
     /// でも同じことはできるが、あちらは 30 ms 刻みで制御周期 5 ms を解像
     /// できないうえ、CHAMP では存在しない。位相は連続で、どの歩容にもある。
     fn contact_weights(&self, out: &quadruped_gait::ControllerOutput) -> [f64; 4] {
-        let ramp_s = self.cfg.wbc.contact_ramp_s;
+        let ramp_s = self.cfg.wbc.contact_ramp_for(self.gait_select);
         let mut w = [0.0; 4];
         for (i, leg) in out.legs.iter().enumerate() {
             if !leg.phase.is_stance {
