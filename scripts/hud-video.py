@@ -188,6 +188,20 @@ def load(path):
 def panel(out_dir, rows, ts, n_frames, title, push, fps):
     """1 フレーム 1 枚、計器板の PNG を書く。"""
     font = ImageFont.truetype(FONT, 14) if os.path.exists(FONT) else ImageFont.load_default()
+    # **表題は黙って切れる。** 幅は 640 で固定なので、収まる大きさまで
+    # 落としてから描く。落としきれなければ後ろを削る。
+    title_font = font
+    probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    head = f"{title} | MuJoCo | t=  0.0s"
+    if os.path.exists(FONT):
+        for size in range(14, 8, -1):
+            title_font = ImageFont.truetype(FONT, size)
+            if probe.textlength(head, font=title_font) <= W - 18:
+                break
+    while len(title) > 8 and probe.textlength(
+        f"{title} | MuJoCo | t=  0.0s", font=title_font
+    ) > W - 18:
+        title = title[:-2] + "\u2026"
     os.makedirs(out_dir, exist_ok=True)
     t0, dur, fx, fy, fz = push if push else (None, 0, 0, 0, 0)
     mag = (fx * fx + fy * fy + fz * fz) ** 0.5
@@ -202,7 +216,7 @@ def panel(out_dir, rows, ts, n_frames, title, push, fps):
         d = ImageDraw.Draw(im)
         d.rectangle([0, 0, W - 1, H - 1], outline=(120, 140, 165))
         y, lh = 7, 21
-        d.text((9, y), f"{title} | MuJoCo | t={t:5.1f}s", font=font, fill=(235, 240, 248))
+        d.text((9, y), f"{title} | MuJoCo | t={t:5.1f}s", font=title_font, fill=(235, 240, 248))
         y += lh + 3
         for label, keys, col in (
             ("REQUEST ", ("vx_req", "vy_req", "wz_req"), (225, 230, 240)),
