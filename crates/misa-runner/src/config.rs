@@ -1961,6 +1961,20 @@ pub struct GaitTuning {
     /// 一次遅れを入れる。0 で素通し。
     #[serde(default = "default_body_attitude_tau_s")]
     pub body_attitude_tau_s: f64,
+    /// **胴体高さを動かす速さの上限** [m/s]。`0` で素通し（既定。従来どおり）。
+    ///
+    /// # なぜ要るのか
+    ///
+    /// 高さの指令は歩容の立ち位置そのもの（`nominal_foot_body.z`）を動かす
+    /// ので、段差で入れると**その 1 周期で脚を伸縮しろ**という目標になる。
+    /// hayaashi で 0.05 m を一度に入れると膝の目標が **89 rad/s**（定格
+    /// 10.47、安全ゲート 8.0）、機械出力が 2232 W 跳ねた。ゲートが丸めるので
+    /// 落ちはしないが、実機でやる動きではない。
+    ///
+    /// 屈伸のように意図して高さを振るなら、ここを入れて一定速度で動かす。
+    /// 0.05 m/s なら 0.05 m の上下に 1 秒。
+    #[serde(default)]
+    pub body_height_rate_m_s: f64,
     /// 歩容種別ごとの周期 (s)。指定が無ければ `quadruped-gait` のプリセット値。
     #[serde(default)]
     pub crawl_cycle_s: Option<f64>,
@@ -2137,6 +2151,7 @@ impl Default for GaitTuning {
             // 設定で明示的に上げるまで従来と 1 ビットも変わらない出力を出す。
             body_attitude_max_rad: 0.0,
             body_attitude_tau_s: default_body_attitude_tau_s(),
+            body_height_rate_m_s: 0.0,
             crawl_cycle_s: None,
             walk_cycle_s: None,
             trot_cycle_s: None,

@@ -739,8 +739,9 @@ impl Controller {
         }
         // 胴体高さはスティックで上下できる。歩容の立ち位置そのものを動かす
         // （全歩容。[`Self::apply_body_height`]）。
-        let h = self.clamp_body_height(self.robot.reference_height_m(&self.cfg.gait) + cmd.height_offset_m);
-        self.apply_body_height(h);
+        let want_h =
+            self.clamp_body_height(self.robot.reference_height_m(&self.cfg.gait) + cmd.height_offset_m);
+        self.apply_body_height(self.ramp_body_height(want_h, dt));
         let want = match cmd.mode {
             // **位置保持が効いていれば、操縦の速度指令より優先する。**
             ModeRequest::Walk => match self.hold_velocity() {
@@ -1068,6 +1069,29 @@ impl Controller {
     }
 
     /// 脚が届く範囲に丸める。伸び切り（脚長）の 95 % を上限、30 % を下限に。
+    /// 胴体高さを `gait.body_height_rate_m_s` で追う。`0` なら素通し。
+    ///
+    /// **高さの段差は脚の伸縮の段差。** 歩容の立ち位置そのものを動かすので、
+    /// 一度に入れると膝の目標が定格を超える（0.05 m で 89 rad/s）。
+    fn ramp_body_height(&self, want: f64, dt: f64) -> f64 {
+        let rate = self.cfg.gait.body_height_rate_m_s;
+        if rate <= 0.0 || dt <= 0.0 {
+            return want;
+        }
+        // 立ち上がりは現在値が無いので素通し（起立の遷移を鈍らせない）。
+        let from = self.applied_height_m;
+        if from <= 0.0 {
+            return want;
+        }
+        let step = rate * dt;
+        let d = want - from;
+        if d.abs() <= step {
+            want
+        } else {
+            from + step.copysign(d)
+        }
+    }
+
     fn clamp_body_height(&self, h: f64) -> f64 {
         let leg = self.robot.kin.fl.upper_leg_m + self.robot.kin.fl.lower_leg_m;
         h.clamp(0.3 * leg, 0.95 * leg)
@@ -2896,6 +2920,37 @@ mod tests {
     fn test_model_path() -> String {
         // crates/misa-runner から見たリポジトリルート。
         format!("{}/../../models/testquad/testquad.misa", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    /// 胴体高さは**一定速度で**動く。段差で入れると脚の伸縮が定格を超える。
+    ///
+    /// hayaashi で 0.05 m を一度に入れると膝の目標が 89 rad/s（定格 10.47）、
+    /// 機械出力が 2232 W 跳ねた。速度制限を入れると 271 W に収まる。
+    #[test]
+    fn the_body_height_moves_at_a_limited_speed() {
+        let mut c = controller();
+        c.applied_height_m = 0.30;
+
+        // 既定（0）は素通し。既存のプロファイルの挙動を変えない。
+        c.cfg.gait.body_height_rate_m_s = 0.0;
+        assert_eq!(c.ramp_body_height(0.25, 0.005), 0.25);
+
+        // 0.10 m/s、1 周期 5 ms なら 1 周期で 0.5 mm。
+        c.cfg.gait.body_height_rate_m_s = 0.10;
+        let step = c.ramp_body_height(0.25, 0.005);
+        assert!((step - (0.30 - 0.0005)).abs() < 1e-12, "1 歩ぶん = {step}");
+
+        // 1 歩で届くなら丸めずにそのまま（残差で動き続けない）。
+        assert_eq!(c.ramp_body_height(0.2999, 0.005), 0.2999);
+
+        // 上げる向きも同じ。
+        let up = c.ramp_body_height(0.40, 0.005);
+        assert!((up - (0.30 + 0.0005)).abs() < 1e-12, "上げる向き = {up}");
+
+        // **立ち上がりは鈍らせない。** 起立の遷移で高さが 0 から入るとき、
+        // 制限を掛けると立つのに何秒もかかる。
+        c.applied_height_m = 0.0;
+        assert_eq!(c.ramp_body_height(0.30, 0.005), 0.30);
     }
 
     /// 向きの保持は**実測ヨー**を見る。歩容の計画ヨーを見ても誤差は出ない。
