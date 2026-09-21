@@ -10,6 +10,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/PlayPose.srv"
   "srv/SetBodyAttitude.srv"
   "srv/SetHeight.srv"
+  "srv/SetKneePattern.srv"
 )
 
 ament_package()

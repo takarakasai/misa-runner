@@ -11,6 +11,7 @@
 //!  ~/play_pose           misa_msgs/PlayPose        1 回だけ起こす
 //!  ~/set_body_attitude   misa_msgs/SetBodyAttitude roll / pitch / yaw
 //!  ~/set_height          misa_msgs/SetHeight       立ち高さの差分
+//!  ~/set_knee_pattern    misa_msgs/SetKneePattern  膝の向きと反転のやり方
 //! ```
 //!
 //! # ROS を制御ループの中で待たない
@@ -61,6 +62,11 @@ struct Shared {
     attitude_max_rad: f64,
     /// 高さオフセットの上限 [m]。`gait.height_range_m`。
     height_range_m: f64,
+    /// **膝の向きの要求。** `poll` が毎周期そのまま流す（制御側が
+    /// 「もうその向き」なら何もしない）。`None` で触らない。
+    knee_pattern: Option<misa_core::KneePatternRequest>,
+    /// 反転のやり方の要求。`None` で今のまま。
+    knee_flip_style: Option<misa_core::KneeFlipStyleRequest>,
 }
 
 impl Default for Shared {
@@ -74,6 +80,8 @@ impl Default for Shared {
             pose_pending: None,
             attitude_rad: [0.0; 3],
             height_offset_m: 0.0,
+            knee_pattern: None,
+            knee_flip_style: None,
             // **既定は 0 = 無効。** プロファイルが明示したときだけ効く。
             attitude_max_rad: 0.0,
             height_range_m: 0.0,
@@ -158,6 +166,12 @@ impl Ros2Pilot {
                 r2r::QosProfile::default(),
             )
             .map_err(|e| format!("set_height を開けません: {e}"))?;
+        let set_knee = node
+            .create_service::<r2r::misa_msgs::srv::SetKneePattern::Service>(
+                "~/set_knee_pattern",
+                r2r::QosProfile::default(),
+            )
+            .map_err(|e| format!("set_knee_pattern を開けません: {e}"))?;
 
         log::info!(
             "ROS 2 から操縦します: {namespace}/{node_name}  cmd_vel + サービス 5 本"
@@ -176,6 +190,7 @@ impl Ros2Pilot {
                 spawn_play_pose(&sp, play_pose, Arc::clone(&spin_shared));
                 spawn_set_attitude(&sp, set_attitude, Arc::clone(&spin_shared));
                 spawn_set_height(&sp, set_height, Arc::clone(&spin_shared));
+                spawn_set_knee(&sp, set_knee, Arc::clone(&spin_shared));
                 while !spin_stop.load(Ordering::Relaxed) {
                     node.spin_once(Duration::from_millis(5));
                     pool.run_until_stalled();
@@ -240,8 +255,8 @@ impl Pilot for Ros2Pilot {
             // 足すなら実機で替えて良いかの判断が先）。
             wbc: None,
             gait_controller: None,
-            knee_pattern: None,
-            knee_flip_style: None,
+            knee_pattern: s.knee_pattern,
+            knee_flip_style: s.knee_flip_style,
             knee_flip_phase_s: None,
         }
     }
@@ -427,9 +442,85 @@ spawn_service!(
     }
 );
 
+spawn_service!(
+    spawn_set_knee,
+    r2r::misa_msgs::srv::SetKneePattern::Service,
+    r2r::misa_msgs::srv::SetKneePattern::Response,
+    |req, s| {
+        match decode_knee(req.pattern, req.style) {
+            Ok((pattern, style, msg)) => {
+                s.knee_pattern = Some(pattern);
+                if let Some(st) = style {
+                    s.knee_flip_style = Some(st);
+                }
+                (true, msg)
+            }
+            Err(e) => (false, e),
+        }
+    }
+);
+
+/// `SetKneePattern` の番号を型へ。**知らない番号は受け付けない。**
+///
+/// 受け付けたと返しておいて何も起きないのがいちばん困る（指令している
+/// のに動かない理由が残らない）。
+fn decode_knee(
+    pattern: u8,
+    style: u8,
+) -> Result<
+    (
+        misa_core::KneePatternRequest,
+        Option<misa_core::KneeFlipStyleRequest>,
+        String,
+    ),
+    String,
+> {
+    use misa_core::KneeFlipStyleRequest as S;
+    use misa_core::KneePatternRequest as P;
+    let p = match pattern {
+        0 => P::BothBack,
+        1 => P::MammalianForward,
+        2 => P::MammalianReverse,
+        3 => P::BothForward,
+        other => return Err(format!("膝の向き {other} は 0〜3 のどれでもありません")),
+    };
+    let st = match style {
+        0 => None,
+        1 => Some(S::Stand),
+        2 => Some(S::Pitch),
+        3 => Some(S::Trot),
+        4 => Some(S::All),
+        5 => Some(S::Rest),
+        other => return Err(format!("反転のやり方 {other} は 0〜5 のどれでもありません")),
+    };
+    let msg = match st {
+        Some(st) => format!("{} へ（{}）", p.label(), st.label()),
+        None => format!("{} へ（やり方は今のまま）", p.label()),
+    };
+    Ok((p, st, msg))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **知らない番号は受け付けない。** 受け付けたと返して何も起きないと、
+    /// 指令しているのに動かない理由が残らない。
+    #[test]
+    fn the_knee_service_refuses_a_number_it_does_not_know() {
+        use misa_core::KneeFlipStyleRequest as S;
+        use misa_core::KneePatternRequest as P;
+        let (p, st, msg) = decode_knee(3, 2).unwrap();
+        assert_eq!(p, P::BothForward);
+        assert_eq!(st, Some(S::Pitch));
+        assert!(msg.contains(">>") && msg.contains("pitch"), "{msg}");
+
+        // style 0 は「今のまま」。
+        assert_eq!(decode_knee(0, 0).unwrap().1, None);
+
+        assert!(decode_knee(4, 0).unwrap_err().contains("0〜3"));
+        assert!(decode_knee(0, 6).unwrap_err().contains("0〜5"));
+    }
 
     /// **無効なら「ok」と言わない。** 受け付けたと返しておいて何も
     /// 起きないと、指令しているのに動かない理由が残らない。

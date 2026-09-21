@@ -72,6 +72,12 @@ pub enum Key {
     /// 膝の反転のやり方を次へ。**普段使う 2 つだけ**を行き来する
     /// （1 脚ずつ ↔ 一斉に伸ばす）。次の反転から効く。
     KneeStyleNext,
+    /// **屈伸。** 立ち姿勢と、脚だけで下がれるいちばん低い所を行き来する。
+    ///
+    /// `r` / `f` は 1 段ずつなので深く沈むのに 8 回要る。これは 1 押しで
+    /// 端まで行く。速さは `gait.body_height_rate_m_s`、深さは
+    /// `gait.height_range_m`。
+    SquatToggle,
     /// **隠し。** 反転のやり方を 5 つすべて巡回する（`:`）。
     ///
     /// `trot` / `all` / `rest` は前提が要る（2 点支持・足を滑らせる・
@@ -157,6 +163,8 @@ pub fn decode(c: u8) -> Option<Key> {
         b']' => Key::KneeNext,
         b'[' => Key::KneePrev,
         b';' => Key::KneeStyleNext,
+        // **`'`。** 大文字は decode が小文字に潰すので `R` / `F` は使えない。
+        b'\'' => Key::SquatToggle,
         // **隠し**（Shift + `;`）。一覧には出さない。
         b':' => Key::KneeStyleNextAny,
         b'=' => Key::KneePhase(1),
@@ -365,6 +373,15 @@ pub fn apply(intent: &mut Intent, key: Key, lim: &Limits) {
         Key::KneePrev => {
             intent.knee_pattern = Some(intent.knee_pattern.unwrap_or(lim.knee_initial).prev());
         }
+        Key::SquatToggle => {
+            // **端まで行っていれば戻る。** 中途半端な高さから押したら沈む。
+            let deep = -lim.height_range;
+            intent.height_offset_m = if intent.height_offset_m <= deep + 1e-6 {
+                0.0
+            } else {
+                deep
+            };
+        }
         Key::KneeStyleNext => {
             intent.knee_flip_style = Some(
                 intent
@@ -404,8 +421,9 @@ pub fn help(lim: &Limits, gait: GaitSelect) -> String {
          \n\
          　  0 / 1 / 2   脱力 / 初期姿勢 / 歩行\n\
          　  z / x / c   Crawl / Walk / Trot\n\
-         　  r / f       立ち高さ ±{:.2} m（**屈伸はこれ**。`gait.body_height_rate_m_s` を\n\
-         　                書いてあれば一定速度で動く。0 だと 1 周期で跳ぶ）\n\
+         　  r / f       立ち高さ ±{:.2} m を 1 段ずつ（8 段）\n\
+         　  '           **屈伸**。いちばん低い所 ↔ 立ち姿勢を 1 押しで往復\n\
+         　                速さは gait.body_height_rate_m_s（0 だと 1 周期で跳ぶ）\n\
          　  i / k / j / l   胴体を傾ける（合成 {:.2} rad まで）、v で水平へ\n\
          \n\
          　**歩容パラメータ（歩きながら替えられます。上段が + / 下段が −）**\n\
@@ -684,6 +702,34 @@ impl Pilot for KeyPilot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **`'` は屈伸。** `r` / `f` は 1 段ずつ（8 段）なので、深く沈めるのに
+    /// 8 回押すことになる。これは 1 押しで端まで行き、もう 1 押しで戻る。
+    #[test]
+    fn the_squat_key_goes_all_the_way_down_and_back() {
+        let lim = lim();
+        let mut intent = misa_core::Intent::default();
+        assert_eq!(intent.height_offset_m, 0.0);
+
+        apply(&mut intent, Key::SquatToggle, &lim);
+        assert!(
+            (intent.height_offset_m + lim.height_range).abs() < 1e-12,
+            "いちばん低い所へ = {}",
+            intent.height_offset_m
+        );
+        apply(&mut intent, Key::SquatToggle, &lim);
+        assert_eq!(intent.height_offset_m, 0.0, "立ち姿勢へ戻る");
+
+        // **中途半端な高さからは沈む。** `r` / `f` で少し上げた後に押しても、
+        // 「戻る」ではなく「下がる」でないと屈伸にならない。
+        intent.height_offset_m = 0.5 * lim.height_range;
+        apply(&mut intent, Key::SquatToggle, &lim);
+        assert!(intent.height_offset_m < 0.0, "{}", intent.height_offset_m);
+
+        // 一覧に出ている。
+        let h = help(&lim, GaitSelect::Trot);
+        assert!(h.contains("屈伸"), "{h}");
+    }
 
     /// **`;` は反転を何脚ずつ行うかを巡回し、`=` / `-` は 1 段の時間を動かす。**
     /// どちらも押していなければ `None`（今のまま）。
