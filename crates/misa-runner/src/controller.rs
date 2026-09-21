@@ -1287,7 +1287,13 @@ impl Controller {
             return Err("反転する脚が無い".into());
         }
         let g = &self.cfg.gait;
-        let phase = g.knee_flip_phase_s;
+        // **pitch は別の段時間を持てる。** 伸ばし切りの手前まで胴体を上げる
+        // ので、頂点付近では同じ上昇速度でも膝の要求角速度が跳ね上がる
+        // （[`crate::config::GaitTuning::knee_flip_pitch_phase_s`]）。
+        let phase = match g.knee_flip_style {
+            KneeFlipStyle::Pitch if g.knee_flip_pitch_phase_s > 0.0 => g.knee_flip_pitch_phase_s,
+            _ => g.knee_flip_phase_s,
+        };
         let h_ref = self.commanded_height_m();
         let kin_ref = self.robot.stance_kinematics_at_height(g, h_ref);
         let signs = self.robot.signs;

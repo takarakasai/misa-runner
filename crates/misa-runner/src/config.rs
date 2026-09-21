@@ -1801,6 +1801,22 @@ pub struct GaitTuning {
     /// 胴体 0.34 m のままだと 0.5 s で 8°、MIT 500 / 5 のままなら 16°。既定 0.5。
     #[serde(default = "default_knee_flip_stand_phase_s")]
     pub knee_flip_stand_phase_s: f64,
+    /// **`pitch` の 1 段の時間** [s]。`0` なら [`Self::knee_flip_phase_s`]。
+    ///
+    /// # なぜ別に持つのか
+    ///
+    /// `knee_flip_phase_s` は `trot` の振り付けに合わせて決めた値で、
+    /// `pitch` には短すぎることがある。**pitch は伸ばし切りの手前まで
+    /// 胴体を持ち上げる**ので、頂点付近では `dz/dθ` が小さくなり、同じ
+    /// 上昇速度でも膝の要求角速度が跳ね上がる。
+    ///
+    /// hayaashi（脚長 0.426、立ち 0.300、余裕 5 mm、1 段 0.5 s）の計算:
+    /// 伸ばす段の山の速度 0.227 m/s に対し `dz/dθ` が 0.033 m/rad しか
+    /// なく、**膝に 7.0 rad/s**（安全ゲート 8.0、定格 10.47）を要求する。
+    /// 実機はここでふらつく。1 段を 0.8 s にすると 4.4 rad/s、
+    /// [`Self::knee_flip_straight_margin_m`] を 0.015 と併せて 2.3 rad/s。
+    #[serde(default)]
+    pub knee_flip_pitch_phase_s: f64,
     /// 膝を伸ばし切るときに脚を向ける方向。**胴体座標で足先が hip より
     /// これだけ下**になる角度に腿を振る（前脚は前へ、後脚は後ろへ）。
     /// 0 なら水平（既定）。下げると、畳んだ calf を伸ばす途中で下腿が真下を
@@ -2141,6 +2157,7 @@ impl Default for GaitTuning {
             knee_flip_balance_max_m: default_knee_flip_balance_max_m(),
             knee_flip_phase_s: default_knee_flip_phase_s(),
             knee_flip_stand_phase_s: default_knee_flip_stand_phase_s(),
+            knee_flip_pitch_phase_s: 0.0,
             knee_flip_out_z_m: default_knee_flip_out_z_m(),
             mpc_force_cost: None,
             estimator: EstimatorKind::LegOdometry,
