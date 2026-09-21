@@ -227,10 +227,7 @@ impl Limits {
                 (true, _) => WbcRequest::Position,
             },
             knee_initial: cfg.gait.knee_pattern.to_request(),
-            knee_phase_initial: match cfg.gait.knee_flip_style {
-                crate::config::KneeFlipStyle::Stand => cfg.gait.knee_flip_stand_phase_s,
-                _ => cfg.gait.knee_flip_phase_s,
-            },
+            knee_phase_initial: cfg.gait.knee_flip_phase_for(cfg.gait.knee_flip_style),
             knee_style_initial: match cfg.gait.knee_flip_style {
                 crate::config::KneeFlipStyle::Stand => misa_core::KneeFlipStyleRequest::Stand,
                 crate::config::KneeFlipStyle::Rest => misa_core::KneeFlipStyleRequest::Rest,
@@ -441,7 +438,9 @@ pub fn help(lim: &Limits, gait: GaitSelect) -> String {
          　           **どこからどこへでも 1 回の振り付けで行きます。** 2 つ先を選びたければ\n\
          　           反転が始まる前に 2 回押すこと（いま選んでいる向きは状態行の「膝」に出ます）\n\
          　  ;        反転のやり方  1 脚ずつ（3 脚支持） ↔ 一斉に伸ばして折り返す（Pitch 軸だけ）。次の反転から効く\n\
-         　  = / -    反転の 1 段の時間 ±0.05 s（0.2〜2.0。**腿を振り出す経路は 0.8 s 以上**。次の反転から効く）\n\
+         　  = / -    反転の **1 段**の時間 ±0.05 s（0.2〜2.0。**反転ぜんたいは段数ぶんの倍数**\n\
+         　           — pitch は 5 倍なので 1 段 1.0 s で 5.0 s。**腿を振り出す経路は 0.8 s 以上**。\n\
+         　           いまの方式の欄に入る。次の反転から効く）\n\
          　  ※ 反転は **`r` / `f` で決めたいまの立ち高さのまま**行います（低いほど揺れません）\n\
          \n\
          　  h / ?    この一覧    Esc / Ctrl-C    終了（脱力して抜けます）\n",
@@ -768,7 +767,11 @@ mod tests {
         // 一覧に出ている。
         let h = help(&lim, GaitSelect::Trot);
         assert!(h.contains("反転のやり方"), "{h}");
-        assert!(h.contains("反転の 1 段の時間"), "{h}");
+        // **「1 段」と「ぜんたい」の両方が出ていること。** 設定は 1 段の秒
+        // なので、全体が何秒になるかを書かないと取り違える（実機で単位を
+        // 聞かれた）。
+        assert!(h.contains("段**の時間"), "{h}");
+        assert!(h.contains("ぜんたいは段数ぶんの倍数"), "{h}");
         // **隠しは一覧に出さない。** 出すなら隠す意味がない。
         // （`trot` は接地比の説明にも出るので、`;` の行だけを見る。）
         let style_line = h

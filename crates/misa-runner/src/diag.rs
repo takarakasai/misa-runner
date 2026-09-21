@@ -703,13 +703,30 @@ pub fn check(cfg: &AppConfig) -> Result<(), String> {
         } else {
             cfg.gait.knee_flip_phase_s
         };
+        // **1 段と全体の両方を出す。** 設定は 1 段の秒なので、全体が何秒に
+        // なるかは掛け算しないと分からない。段数は方式で違い、stand だけは
+        // 替える脚数でも違う。
+        let phase = cfg.gait.knee_flip_phase_for(cfg.gait.knee_flip_style);
+        use crate::config::KneeFlipStyle as K;
+        let whole = match cfg.gait.knee_flip_style {
+            K::Pitch => format!("5 段 = {:.1} s", 5.0 * phase),
+            K::All => format!("9 段 = {:.1} s", 9.0 * phase),
+            K::Trot => format!("19 段 = {:.1} s", 19.0 * phase),
+            K::Rest => format!("15 段 = {:.1} s", 15.0 * phase),
+            K::Stand => format!(
+                "17 段 = {:.1} s（2 脚）/ 33 段 = {:.1} s（4 脚）",
+                17.0 * phase,
+                33.0 * phase
+            ),
+        };
         println!(
-            "  膝の反転: {} / 1 段 {:.2} s（pitch は {:.2} s）/ 伸ばし切りの余裕 {:.3} m",
+            "  膝の反転: {} / 1 段 {:.2} s → ぜんたい {} / 伸ばし切りの余裕 {:.3} m",
             cfg.gait.knee_flip_style.label(),
-            cfg.gait.knee_flip_phase_s,
-            pitch_phase,
+            phase,
+            whole,
             cfg.gait.knee_flip_straight_margin_m,
         );
+        let _ = pitch_phase;
         // **歩容が出せる上限を、宣言している上限と並べて出す。**
         // 超えて指令しても届かないだけで、追従率が落ちるのはそのせい。
         println!(

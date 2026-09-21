@@ -910,6 +910,34 @@ impl Default for WbcConfig {
     }
 }
 
+impl GaitTuning {
+    /// **その方式が使う 1 段の時間** [s]。
+    ///
+    /// 方式ごとに別の欄を持つので、**読む所と書く所がずれると
+    /// 「`=` / `-` を押しても変わらない」になる**（pitch 専用の欄を足した
+    /// ときに実際そうなった）。resolver はここだけにする。
+    pub fn knee_flip_phase_for(&self, style: KneeFlipStyle) -> f64 {
+        match style {
+            KneeFlipStyle::Stand => self.knee_flip_stand_phase_s,
+            KneeFlipStyle::Pitch if self.knee_flip_pitch_phase_s > 0.0 => {
+                self.knee_flip_pitch_phase_s
+            }
+            _ => self.knee_flip_phase_s,
+        }
+    }
+
+    /// その方式が使う 1 段の時間を書き換える（`=` / `-` と `SetKneePattern`）。
+    pub fn set_knee_flip_phase_for(&mut self, style: KneeFlipStyle, s: f64) {
+        match style {
+            KneeFlipStyle::Stand => self.knee_flip_stand_phase_s = s,
+            // **pitch は専用の欄に書く。** 0 のままだと共通値に落ちるので、
+            // 触った時点でそちらを使うようにする。
+            KneeFlipStyle::Pitch => self.knee_flip_pitch_phase_s = s,
+            _ => self.knee_flip_phase_s = s,
+        }
+    }
+}
+
 impl WbcConfig {
     /// この歩容で使う接地の傾斜 (s)。歩容ごとの指定が無ければ
     /// [`Self::contact_ramp_s`]（歩容によって効きが逆になる理由はそちら）。
@@ -1801,7 +1829,10 @@ pub struct GaitTuning {
     /// 胴体 0.34 m のままだと 0.5 s で 8°、MIT 500 / 5 のままなら 16°。既定 0.5。
     #[serde(default = "default_knee_flip_stand_phase_s")]
     pub knee_flip_stand_phase_s: f64,
-    /// **`pitch` の 1 段の時間** [s]。`0` なら [`Self::knee_flip_phase_s`]。
+    /// **`pitch` の 1 段の時間【秒】。** `0` なら [`Self::knee_flip_phase_s`]。
+    ///
+    /// **反転ぜんたいはこの 5 倍**（伸ばす 2 + 折り返す 1 + 戻す 2 段ぶん）。
+    /// `1.0` なら 5.0 s。`check` と起動ログは両方を出す。
     ///
     /// # なぜ別に持つのか
     ///

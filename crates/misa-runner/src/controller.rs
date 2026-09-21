@@ -1170,18 +1170,14 @@ impl Controller {
         if let Some(p) = cmd.knee_flip_phase_s {
             use crate::config::KneeFlipStyle;
             let p = p.clamp(0.2, 2.0);
-            let now = match self.cfg.gait.knee_flip_style {
-                KneeFlipStyle::Stand => self.cfg.gait.knee_flip_stand_phase_s,
-                _ => self.cfg.gait.knee_flip_phase_s,
-            };
+            let style = self.cfg.gait.knee_flip_style;
+            let now = self.cfg.gait.knee_flip_phase_for(style);
             if (p - now).abs() > 1e-9 && self.state != State::FlippingKnees {
-                match self.cfg.gait.knee_flip_style {
-                    KneeFlipStyle::Stand => self.cfg.gait.knee_flip_stand_phase_s = p,
-                    _ => self.cfg.gait.knee_flip_phase_s = p,
-                }
+                self.cfg.gait.set_knee_flip_phase_for(style, p);
                 log::info!(
-                    "膝の反転の 1 段を {p:.2} s にしました（{}）",
-                    self.cfg.gait.knee_flip_style.label()
+                    "膝の反転の 1 段を {p:.2} s にしました（{}、反転ぜんたい {:.1} s）",
+                    style.label(),
+                    5.0 * p
                 );
             }
         }
@@ -1304,10 +1300,7 @@ impl Controller {
         // **pitch は別の段時間を持てる。** 伸ばし切りの手前まで胴体を上げる
         // ので、頂点付近では同じ上昇速度でも膝の要求角速度が跳ね上がる
         // （[`crate::config::GaitTuning::knee_flip_pitch_phase_s`]）。
-        let phase = match g.knee_flip_style {
-            KneeFlipStyle::Pitch if g.knee_flip_pitch_phase_s > 0.0 => g.knee_flip_pitch_phase_s,
-            _ => g.knee_flip_phase_s,
-        };
+        let phase = g.knee_flip_phase_for(g.knee_flip_style);
         let h_ref = self.commanded_height_m();
         let kin_ref = self.robot.stance_kinematics_at_height(g, h_ref);
         let signs = self.robot.signs;
