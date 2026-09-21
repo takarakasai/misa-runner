@@ -450,6 +450,67 @@ impl Robot {
     /// 基準姿勢を、胴体高さ `h` に合わせて上下させたもの（実行中の高さ変更）。
     /// 4 脚とも同じだけ z をずらすので、前後の高さ差や足パターンは保たれる。
     /// 高さだけの由来なら `kin_at_height(h)` と同じ。
+    /// **4 脚とも可動域の内側で立てる、いちばん低い胴体高さ** [m]。
+    ///
+    /// # なぜ要るのか
+    ///
+    /// **膝の向きで脚の畳める量が違う。** `<>` や `><` のように前後で向きが
+    /// 違うと、深く沈めたとき片方だけが先に可動域へ当たり、当たっていない側が
+    /// 下がり続けて**胴体が傾く**（hayaashi の実測で pitch +5.9° / −5.4°）。
+    /// 「前後の hip 高さを揃える」という決めごとと正面から衝突する。
+    ///
+    /// **いちばん狭い脚に合わせて止める。** 4 脚が同じ高さで居られるところ
+    /// までしか下げなければ、胴体は水平のままでいられる。
+    ///
+    /// 二分法で 1 mm まで詰める。`hi` は届く前提（立ち姿勢）で、そこから
+    /// 下は届かなくなるだけなので単調。
+    pub fn deepest_level_height_m(&self, tuning: &GaitTuning) -> f64 {
+        let stand = self.reference_height_m(tuning);
+        let reaches = |h: f64| self.stance_fits(tuning, h);
+        // 立ち姿勢で既に外なら、そこが下限（それ以上は触らない）。
+        if !reaches(stand) {
+            return stand;
+        }
+        let (mut lo, mut hi) = (0.05_f64, stand); // lo は届かない側
+        if reaches(lo) {
+            return lo;
+        }
+        while hi - lo > 1e-3 {
+            let mid = 0.5 * (lo + hi);
+            if reaches(mid) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        hi
+    }
+
+    /// その高さで 4 脚とも IK が届き、可動域の内側か。
+    fn stance_fits(&self, tuning: &GaitTuning, h: f64) -> bool {
+        let kin = self.stance_kinematics_at_height(tuning, h);
+        for slot in 0..4 {
+            let leg = kin.legs()[slot];
+            let knee_forward = knee_forward_for(tuning.knee_pattern, slot);
+            let sol = solve_leg_ik(leg, leg.nominal_foot_body, knee_forward);
+            if !sol.is_reachable() {
+                return false;
+            }
+            let (hip, thigh, calf) = sol.angles();
+            let sg = self.signs[slot];
+            for (k, v_ik) in [hip, thigh, calf].iter().enumerate() {
+                let jn = misa_hal::joint::JOINT_NAMES[slot][k];
+                let v = v_ik * sg[k];
+                if let Some((lo, hi)) = self.limits.get(jn) {
+                    if v < *lo - 1e-9 || v > *hi + 1e-9 {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
     pub fn stance_kinematics_at_height(&self, tuning: &GaitTuning, h: f64) -> KinematicsConfig {
         if tuning.stance_pose.is_none() && tuning.stance_feet_body.is_none() {
             return self.kin_at_height(h);

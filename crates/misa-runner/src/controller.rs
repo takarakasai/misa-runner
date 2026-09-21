@@ -211,6 +211,10 @@ pub struct Controller {
     /// 位置保持の目標 `[x, y, yaw]`。`Intent::hold_position` の立ち上がりで
     /// **いまの `odom_world` と実測ヨー**を入れる。
     hold_target: Option<[f64; 3]>,
+    /// **その膝の向きで 4 脚とも水平に立てる下限** [m]
+    /// （[`crate::robot::Robot::deepest_level_height_m`]）。
+    /// 膝の向きが変わると変わるので、反転のたびに取り直す。
+    deepest_level_m: f64,
     /// いま効いている立ち幅の広げ量 [m]（片側）。目標へ一次遅れで寄せる。
     widen_now: f64,
     /// 最後に運動学へ渡した広げ量。変わったときだけ差し替える。
@@ -331,6 +335,7 @@ impl Controller {
             odom_world: [0.0; 2],
             world_position: None,
             hold_target: None,
+            deepest_level_m: 0.0,
             widen_now: 0.0,
             applied_widen: 0.0,
             observed_omega_world: nalgebra::Vector3::zeros(),
@@ -372,6 +377,9 @@ impl Controller {
             knee_flip_sdot: 0.0,
             knee_flip_want_lpf: 0.0,
         };
+        // **屈伸の下限はいまの膝の向きで決まる。** 起動時に一度取る（以後は
+        // 反転のたびに取り直す）。
+        c.refresh_deepest_level();
         // `rest` の反転を使う機体は、いまの膝の向きで車輪に載って立ち上がれる
         // 足の位置を立ち位置にしておく（置き替えの段を省くため）。
         if c.cfg.gait.knee_flip_style == crate::config::KneeFlipStyle::Rest {
@@ -1092,9 +1100,26 @@ impl Controller {
         }
     }
 
+    /// **狭いほうの脚に合わせて止める。** 4 脚が同じ高さで居られる所より
+    /// 下を指すと、当たっていない側だけが下がって胴体が傾く
+    /// （[`crate::robot::Robot::deepest_level_height_m`]）。
     fn clamp_body_height(&self, h: f64) -> f64 {
         let leg = self.robot.kin.fl.upper_leg_m + self.robot.kin.fl.lower_leg_m;
-        h.clamp(0.3 * leg, 0.95 * leg)
+        let floor = self.deepest_level_m.max(0.3 * leg);
+        h.clamp(floor, 0.95 * leg)
+    }
+
+    /// 膝の向きに応じた下限を取り直す。**反転のたびに呼ぶ。**
+    fn refresh_deepest_level(&mut self) {
+        let was = self.deepest_level_m;
+        self.deepest_level_m = self.robot.deepest_level_height_m(&self.cfg.gait);
+        if (was - self.deepest_level_m).abs() > 1e-4 {
+            log::info!(
+                "屈伸の下限は {:.3} m（膝 {}。4 脚とも可動域の内側で水平に立てる所）",
+                self.deepest_level_m,
+                self.cfg.gait.knee_pattern.label()
+            );
+        }
     }
 
     /// 歩容が「今この設定で立つ」姿勢。時間を進めずに取り出す。
@@ -2306,6 +2331,7 @@ impl Controller {
         if let Some(new) = self.knee_flip_target.take() {
             self.cfg.gait.knee_pattern = new;
             self.gait.set_knee_pattern(crate::robot::knee_pattern_of(new));
+            self.refresh_deepest_level();
             log::info!("膝の向きを {} にしました", new.label());
         }
         if let Some(off) = self.knee_flip_next_offset.take() {
@@ -2920,6 +2946,34 @@ mod tests {
     fn test_model_path() -> String {
         // crates/misa-runner から見たリポジトリルート。
         format!("{}/../../models/testquad/testquad.misa", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    /// **屈伸の下限は膝の向きで変わる。** 狭いほうの脚に合わせて止めないと、
+    /// 当たっていない側だけが下がって胴体が傾く（hayaashi の実測で pitch
+    /// +5.9° / −5.4°）。
+    #[test]
+    fn the_squat_floor_follows_the_knee_direction() {
+        use crate::config::KneeShape;
+        let mut c = controller();
+        let stand = c.robot.reference_height_m(&c.cfg.gait);
+
+        for shape in [
+            KneeShape::BothBack,
+            KneeShape::MammalianForward,
+            KneeShape::MammalianReverse,
+            KneeShape::BothForward,
+        ] {
+            c.cfg.gait.knee_pattern = shape;
+            c.refresh_deepest_level();
+            let floor = c.deepest_level_m;
+            assert!(floor > 0.0, "{shape:?} の下限が {floor}");
+            // **立ち姿勢はどの向きでも指せる。** 下限が立ち高さを超えたら、
+            // 立つことすらできなくなる。
+            assert!(floor <= stand + 1e-9, "{shape:?}: 下限 {floor} > 立ち {stand}");
+            // 下限より下は指せない。
+            let deep = c.clamp_body_height(0.0);
+            assert!(deep >= floor - 1e-9, "{shape:?}: 下限 {floor} を割った {deep}");
+        }
     }
 
     /// 胴体高さは**一定速度で**動く。段差で入れると脚の伸縮が定格を超える。
