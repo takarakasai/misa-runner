@@ -444,6 +444,21 @@ pub struct Ros2Hardware {
     /// 床を押す力を小さくする（kp 200 で 1 cm 沈んで数十 N）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mit_gains_knee_flip_swing: Option<MitGains>,
+    /// **4 脚とも床に着いたまま反転するとき**（`pitch` / `all`）のゲイン。
+    /// 無ければ [`Self::mit_gains_knee_flip`]。
+    ///
+    /// # なぜ別に要るのか
+    ///
+    /// `mit_gains_knee_flip` は **1 脚を振る反動を抑えるため硬くする**値で、
+    /// keel は hip / thigh を kp 2000 にしている。4 脚とも着いたまま伸ばし
+    /// 切る `pitch` では逆で、**基準より柔らかくしないと振動する**（実機
+    /// 2026-10-01、kp 100 で収まった）。伸ばし切り付近では dz/dθ が
+    /// 0.02 m/rad まで落ちるので、kp 500 でも 0.6° の誤差が体重の半分の
+    /// 力になり、4 本が突っ張り合う。
+    ///
+    /// **1 つの表では両立しない。** 柔らかい値を `mit_gains_knee_flip` に
+    /// 入れると `stand` の傾きが 1.7° → 12.0° に悪化する（MuJoCo 実測）。
+    pub mit_gains_knee_flip_planted: Option<MitGains>,
     /// **目標の関節速度を MIT の q̇_d に載せる倍率**（0 = 載せない、既定。1 = そのまま）。
     ///
     /// `τ = kp(q_d − q) + kd(q̇_d − q̇) + τ_ff` の q̇_d。0 だと PD は「動く目標を
@@ -527,6 +542,7 @@ impl Default for Ros2Hardware {
             mit_gains_knee_flip: None,
             mit_gains_ramp_s: default_mit_gains_ramp_s(),
             mit_gains_knee_flip_swing: None,
+            mit_gains_knee_flip_planted: None,
             mit_velocity_feedforward: 0.0,
         }
     }
@@ -608,6 +624,15 @@ impl HardwareConfig {
         match self {
             HardwareConfig::Serial(_) => None,
             HardwareConfig::Ros2(h) => h.mit_gains_knee_flip,
+        }
+    }
+
+    /// 4 脚とも着いたまま反転するときの MIT ゲイン
+    /// （[`Ros2Hardware::mit_gains_knee_flip_planted`]）。
+    pub fn mit_gains_knee_flip_planted(&self) -> Option<MitGains> {
+        match self {
+            HardwareConfig::Serial(_) => None,
+            HardwareConfig::Ros2(h) => h.mit_gains_knee_flip_planted,
         }
     }
 

@@ -923,16 +923,25 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             {
                 // 膝の反転中はゲインを寄せる（無ければそのまま）。浮かせている脚には
                 // `mit_gains_knee_flip_swing` があればそれ。
-                // **脚を浮かせる方式だけ硬くする。** pitch / all は 4 脚とも
-                // 床に着いたままなので反動が無く、伸ばし切りの付近で硬めると
-                // 突っ張り合って振動する（[`Controller::knee_flip_lifts_a_foot`]）。
-                let flipping = controller.state() == State::FlippingKnees
-                    && controller.knee_flip_lifts_a_foot();
+                // **方式で止めない。** 一度「脚が浮かない方式では使わない」に
+                // したが、実機で効いたのは**止めること**ではなく**通常より
+                // 柔らかくすること**だった（keel で kp 2000 → 100、基準の
+                // 500 より下。2026-10-01）。表そのものを使わせないと、その
+                // 調整ができなくなる。値はプロファイルで決める。
+                let flipping = controller.state() == State::FlippingKnees;
                 let ramp = cfg.hardware.mit_gains_ramp_s();
                 let step = if ramp > 0.0 { dt / ramp } else { 1.0 };
                 gain_blend = (gain_blend + if flipping { step } else { -step }).clamp(0.0, 1.0);
                 cfg.hardware.mit_gains().map(|base| {
-                    let flip = cfg.hardware.mit_gains_knee_flip();
+                    // **着いたままの方式は別の表。** 向きが逆なので 1 つにできない
+                // （[`Controller::knee_flip_keeps_feet_down`]）。
+                let flip = if controller.knee_flip_keeps_feet_down() {
+                    cfg.hardware
+                        .mit_gains_knee_flip_planted()
+                        .or_else(|| cfg.hardware.mit_gains_knee_flip())
+                } else {
+                    cfg.hardware.mit_gains_knee_flip()
+                };
                     let swing = cfg.hardware.mit_gains_knee_flip_swing().or(flip);
                     std::array::from_fn(|leg| {
                         let target = if flipping && !out.stance[leg] { swing } else { flip };
@@ -1483,18 +1492,28 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                     flip_tilt_max[0].to_degrees(),
                     flip_tilt_max[1].to_degrees(),
                     flip_ticks as f64 * dt,
-                    // **設定にあるかではなく、実際に入ったかを言う。** 脚を
-                    // 浮かせない方式（pitch / all）では入れない
-                    // （`Controller::knee_flip_lifts_a_foot`）。
-                    match cfg.hardware.mit_gains_knee_flip() {
-                        Some(g) if controller.knee_flip_lifts_a_foot() =>
-                            format!("反転中 kp {:?} / kd {:?}", g.kp, g.kd),
-                        Some(g) => format!(
-                            "そのまま（{} は脚を浮かせないので反転中の kp {:?} は入れない）",
-                            cfg.gait.knee_flip_style.label(),
-                            g.kp
+                    // **基準より硬いか柔らかいかも言う。** 実機で効いたのは
+                    // 柔らかくするほうだった（2026-10-01）。
+                    {
+                    let used = if controller.knee_flip_keeps_feet_down() {
+                        cfg.hardware
+                            .mit_gains_knee_flip_planted()
+                            .or_else(|| cfg.hardware.mit_gains_knee_flip())
+                    } else {
+                        cfg.hardware.mit_gains_knee_flip()
+                    };
+                    match (used, cfg.hardware.mit_gains()) {
+                        (Some(g), Some(b)) => format!(
+                            "反転中 kp {:?} / kd {:?}（基準 kp {:?} より{}。{}）",
+                            g.kp,
+                            g.kd,
+                            b.kp,
+                            if g.kp[0] < b.kp[0] { "柔らかい" } else if g.kp[0] > b.kp[0] { "硬い" } else { "同じ" },
+                            if controller.knee_flip_keeps_feet_down() { "着いたまま用" } else { "脚を浮かせる用" }
                         ),
-                        None => "切り替え無し".to_string(),
+                        (Some(g), None) => format!("反転中 kp {:?} / kd {:?}", g.kp, g.kd),
+                        (None, _) => "切り替え無し".to_string(),
+                    }
                     }
                 );
             }
