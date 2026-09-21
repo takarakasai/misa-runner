@@ -123,10 +123,42 @@ pub fn main_with(backends: &[&dyn Backend]) -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
+/// **この実行ファイルに入っている misa-runner の版。**
+///
+/// # なぜ要るのか
+///
+/// 機体側は misa-runner を git 依存で引く。**`Cargo.lock` を上げ忘れると、
+/// プロファイルに書いた新しい設定が黙って無視される**（設定は未知キーを
+/// 弾かない）。実機で 2 回踏んだ: `knee_flip_pitch_phase_s` を書いたのに
+/// 1 段が変わらない、`SetKneePattern` がビルドで見つからない。どちらも
+/// 「走っているものが何か」を名乗らせれば一目で分かった。
+///
+/// cargo は git 依存を
+/// `~/.cargo/git/checkouts/misa-runner-<hash>/<rev7>/` へ展開するので、
+/// **コンパイル時の `CARGO_MANIFEST_DIR` に revision が入っている。**
+/// 作業ツリーから建てたときは `(path)` を返す。
+pub fn build_id() -> String {
+    let dir = env!("CARGO_MANIFEST_DIR");
+    let mut parts = dir.rsplit('/');
+    // .../<rev7>/crates/misa-runner → crates の 1 つ上
+    let (_me, crates, rev) = (parts.next(), parts.next(), parts.next());
+    match (crates, rev) {
+        (Some("crates"), Some(r))
+            if r.len() == 7 && r.chars().all(|c| c.is_ascii_hexdigit()) =>
+        {
+            format!("git {r}")
+        }
+        _ => format!("path {dir}"),
+    }
+}
+
 fn dispatch(cli: &Cli, backends: &[&dyn Backend]) -> Result<(), String> {
     // **知らないフラグは何もしないうちに弾く。** 綴り違いを黙って無視すると
     // 「指定したつもりの設定が効かないまま実機が動く」になる。
     cli.validate_flags()?;
+    // **何が走っているかを最初に名乗る。** 機体側が lock を上げ忘れても
+    // ここを見れば分かる（[`build_id`]）。
+    log::info!("misa-runner {}", build_id());
     let command = cli.command();
     match command {
         // 設定を読まずに済むものを先に。

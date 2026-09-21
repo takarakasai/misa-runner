@@ -593,6 +593,9 @@ pub fn legs(cfg: &AppConfig, seconds: Option<f64>, viz_cfg: &VizConfig) -> Resul
 /// `check` — 設定とモデルだけを検証する。ハードウェアに触れない。
 pub fn check(cfg: &AppConfig) -> Result<(), String> {
     cfg.validate()?;
+    // **いちばん上に出す。** 機体側が lock を上げ忘れていると、プロファイルに
+    // 書いた設定が黙って無視される（[`crate::build_id`]）。
+    println!("misa-runner: {}", crate::build_id());
     println!("設定: OK");
 
     let robot = crate::robot::load_from_config(cfg)?;
@@ -691,6 +694,21 @@ pub fn check(cfg: &AppConfig) -> Result<(), String> {
             "歩容コントローラ: {}（{}）",
             cfg.gait.controller.label(),
             modes.join(" ")
+        );
+        // **膝の反転の設定を出す。** pitch の 1 段と伸ばし切りの余裕は
+        // 「書いたのに効かない」をいちばん踏みやすい所（古い misa-runner は
+        // `knee_flip_pitch_phase_s` を知らないので黙って無視する）。
+        let pitch_phase = if cfg.gait.knee_flip_pitch_phase_s > 0.0 {
+            cfg.gait.knee_flip_pitch_phase_s
+        } else {
+            cfg.gait.knee_flip_phase_s
+        };
+        println!(
+            "  膝の反転: {} / 1 段 {:.2} s（pitch は {:.2} s）/ 伸ばし切りの余裕 {:.3} m",
+            cfg.gait.knee_flip_style.label(),
+            cfg.gait.knee_flip_phase_s,
+            pitch_phase,
+            cfg.gait.knee_flip_straight_margin_m,
         );
         // **歩容が出せる上限を、宣言している上限と並べて出す。**
         // 超えて指令しても届かないだけで、追従率が落ちるのはそのせい。
