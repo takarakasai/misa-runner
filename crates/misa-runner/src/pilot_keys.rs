@@ -69,9 +69,14 @@ pub enum Key {
     /// 膝の向きを次へ / 前へ（`<<` → `<>` → `><` → `>>`。立って止まっているときだけ効く）。
     KneeNext,
     KneePrev,
-    /// 膝の反転のやり方を次へ（1 脚ずつ → 対角 2 脚 → 一斉に滑らせる →
-    /// 一斉に伸ばす → 車輪に載せて 4 脚まとめて）。次の反転から効く。
+    /// 膝の反転のやり方を次へ。**普段使う 2 つだけ**を行き来する
+    /// （1 脚ずつ ↔ 一斉に伸ばす）。次の反転から効く。
     KneeStyleNext,
+    /// **隠し。** 反転のやり方を 5 つすべて巡回する（`:`）。
+    ///
+    /// `trot` / `all` / `rest` は前提が要る（2 点支持・足を滑らせる・
+    /// 車輪と腹で支える）ので、一覧にも `;` の巡回にも出していない。
+    KneeStyleNextAny,
     /// 膝の反転の 1 段の時間を ±0.05 s。次の反転から効く。
     KneePhase(i8),
     Help,
@@ -152,6 +157,8 @@ pub fn decode(c: u8) -> Option<Key> {
         b']' => Key::KneeNext,
         b'[' => Key::KneePrev,
         b';' => Key::KneeStyleNext,
+        // **隠し**（Shift + `;`）。一覧には出さない。
+        b':' => Key::KneeStyleNextAny,
         b'=' => Key::KneePhase(1),
         b'-' => Key::KneePhase(-1),
         b'p' => Key::ControllerToggle,
@@ -359,7 +366,20 @@ pub fn apply(intent: &mut Intent, key: Key, lim: &Limits) {
             intent.knee_pattern = Some(intent.knee_pattern.unwrap_or(lim.knee_initial).prev());
         }
         Key::KneeStyleNext => {
-            intent.knee_flip_style = Some(intent.knee_flip_style.unwrap_or(lim.knee_style_initial).next());
+            intent.knee_flip_style = Some(
+                intent
+                    .knee_flip_style
+                    .unwrap_or(lim.knee_style_initial)
+                    .next_common(),
+            );
+        }
+        Key::KneeStyleNextAny => {
+            intent.knee_flip_style = Some(
+                intent
+                    .knee_flip_style
+                    .unwrap_or(lim.knee_style_initial)
+                    .next_any(),
+            );
         }
         Key::KneePhase(dir) => {
             let now = intent.knee_flip_phase_s.unwrap_or(lim.knee_phase_initial);
@@ -402,7 +422,7 @@ pub fn help(lim: &Limits, gait: GaitSelect) -> String {
          　  ] / [    膝の向きを次へ / 前へ  << → <> → >< → >>（**立って止まっているときだけ**。脚を浮かせて膝を伸ばし切る振り付けを通る）\n\
          　           **どこからどこへでも 1 回の振り付けで行きます。** 2 つ先を選びたければ\n\
          　           反転が始まる前に 2 回押すこと（いま選んでいる向きは状態行の「膝」に出ます）\n\
-         　  ;        反転のやり方  1 脚ずつ（3 脚支持）→ 対角 2 脚（滑らせる）→ 一斉（滑らせる）→ 一斉に伸ばして折り返す（Pitch 軸だけ）→ 4 脚まとめて（車輪）。次の反転から効く\n\
+         　  ;        反転のやり方  1 脚ずつ（3 脚支持） ↔ 一斉に伸ばして折り返す（Pitch 軸だけ）。次の反転から効く\n\
          　  = / -    反転の 1 段の時間 ±0.05 s（0.2〜2.0。**腿を振り出す経路は 0.8 s 以上**。次の反転から効く）\n\
          　  ※ 反転は **`r` / `f` で決めたいまの立ち高さのまま**行います（低いほど揺れません）\n\
          \n\
@@ -673,16 +693,24 @@ mod tests {
         let mut intent = misa_core::Intent::default();
         assert_eq!(intent.knee_flip_style, None);
         assert_eq!(intent.knee_flip_phase_s, None);
-        // 起動時が stand なので 1 押しで trot、2 押しで rest、3 押しで stand。
-        for want in [
-            misa_core::KneeFlipStyleRequest::Trot,
-            misa_core::KneeFlipStyleRequest::All,
-            misa_core::KneeFlipStyleRequest::Pitch,
-            misa_core::KneeFlipStyleRequest::Rest,
-            misa_core::KneeFlipStyleRequest::Stand,
-        ] {
+        // **`;` は普段使う 2 つだけを行き来する。** 起動時が stand なので
+        // 押すたび pitch ↔ stand。trot / all / rest には落ちない。
+        use misa_core::KneeFlipStyleRequest as S;
+        for want in [S::Pitch, S::Stand, S::Pitch, S::Stand] {
             apply(&mut intent, Key::KneeStyleNext, &lim);
             assert_eq!(intent.knee_flip_style, Some(want));
+        }
+        // **`:`（隠し）は 5 つ全部。**
+        let mut any = misa_core::Intent::default();
+        for want in [S::Trot, S::All, S::Pitch, S::Rest, S::Stand] {
+            apply(&mut any, Key::KneeStyleNextAny, &lim);
+            assert_eq!(any.knee_flip_style, Some(want));
+        }
+        // 隠しの 3 つに居るときに `;` を押したら、普段使う側へ降りる。
+        for from in [S::Trot, S::All, S::Rest] {
+            let mut back = misa_core::Intent { knee_flip_style: Some(from), ..Default::default() };
+            apply(&mut back, Key::KneeStyleNext, &lim);
+            assert_eq!(back.knee_flip_style, Some(S::Stand), "{from:?} から");
         }
         // 1 段の時間は起動時の値から ±0.05 s、0.2〜2.0 で丸める。
         apply(&mut intent, Key::KneePhase(1), &lim);
@@ -695,6 +723,15 @@ mod tests {
         let h = help(&lim, GaitSelect::Trot);
         assert!(h.contains("反転のやり方"), "{h}");
         assert!(h.contains("反転の 1 段の時間"), "{h}");
+        // **隠しは一覧に出さない。** 出すなら隠す意味がない。
+        // （`trot` は接地比の説明にも出るので、`;` の行だけを見る。）
+        let style_line = h
+            .lines()
+            .find(|l| l.contains("反転のやり方"))
+            .expect("反転のやり方の行");
+        for hidden in ["対角", "滑らせる", "車輪", ":"] {
+            assert!(!style_line.contains(hidden), "{hidden} が出ている: {style_line}");
+        }
     }
 
     fn lim() -> Limits {

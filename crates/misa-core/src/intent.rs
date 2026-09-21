@@ -218,8 +218,25 @@ impl KneeFlipStyleRequest {
             Self::Pitch => "pitch",
         }
     }
-    /// stand → trot → all → pitch → rest → stand。
-    pub fn next(self) -> Self {
+    /// **普段使う 2 つだけを行き来する**（`stand` ↔ `pitch`）。
+    ///
+    /// 残る 3 つは条件が要る。`trot` は 2 点支持なので静的に釣り合わず
+    /// 数秒しか持たない。`all` は足を床で滑らせる前提。`rest` は車輪と腹で
+    /// 機体を支える。**選べる所に並べておくと、要らないときに押してしまう。**
+    /// 出したいときは [`Self::next_any`]（キーボードでは `:`）。
+    ///
+    /// その 3 つのどれかに居るときは `stand` に戻る。
+    pub fn next_common(self) -> Self {
+        match self {
+            Self::Stand => Self::Pitch,
+            Self::Pitch => Self::Stand,
+            // 隠しの 3 つからは、普段使う側へ降りる。
+            Self::Trot | Self::All | Self::Rest => Self::Stand,
+        }
+    }
+
+    /// stand → trot → all → pitch → rest → stand。**5 つ全部**。
+    pub fn next_any(self) -> Self {
         match self {
             Self::Stand => Self::Trot,
             Self::Trot => Self::All,
@@ -227,6 +244,11 @@ impl KneeFlipStyleRequest {
             Self::Pitch => Self::Rest,
             Self::Rest => Self::Stand,
         }
+    }
+
+    /// 普段使う 2 つ（`;` で巡回する側）か。
+    pub fn is_common(self) -> bool {
+        matches!(self, Self::Stand | Self::Pitch)
     }
 }
 
