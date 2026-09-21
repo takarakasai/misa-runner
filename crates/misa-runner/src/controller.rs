@@ -2021,12 +2021,53 @@ impl Controller {
                 for s in 0..4 {
                     cur.legs[s] = ik(s, at(feet_ref[s], -h_top), cur_forward.get()[s])?;
                 }
+                let prev_step_targets = cur;
                 push("伸ばす".into(), cur, 2.0 * phase, [true; 4]);
                 // 2. 折り返す（伸ばし切りの手前で膝の向きを入れ替える）。
                 for s in 0..4 {
                     cur.legs[s] = ik(s, at(feet_ref[s], -h_top), knee_forward_for(new, s))?;
                 }
                 cur_forward.set(std::array::from_fn(|s| knee_forward_for(new, s)));
+                // **折り返す段は関節を直線で結ぶ。** 足先がその間ずっと同じ所に
+                // いる保証は無い（リンク長が違えば途中で動く）。足が床に着いた
+                // ままなら、動いたぶんは機体が受ける = 「がたん」になる。
+                // 計画のうちに測って出す。
+                {
+                    let before = prev_step_targets;
+                    let after = cur;
+                    // 五次補間 u(τ) の形も込みで、距離と速さの山を出す。
+                    let quintic = |t: f64| t * t * t * (10.0 - 15.0 * t + 6.0 * t * t);
+                    let (mut worst, mut fastest) = (0.0_f64, 0.0_f64);
+                    let n = 400;
+                    for s in 0..4 {
+                        let leg = kin_ref.legs()[s];
+                        let want = at(feet_ref[s], -h_top);
+                        let foot_at = |tau: f64| {
+                            let u = quintic(tau);
+                            let q: Vec<f64> = (0..3)
+                                .map(|k| {
+                                    let a = before.legs[s][k] * signs[s][k];
+                                    let b = after.legs[s][k] * signs[s][k];
+                                    a + (b - a) * u
+                                })
+                                .collect();
+                            forward_leg_kinematics(leg, q[0], q[1], q[2])
+                        };
+                        let mut prev = foot_at(0.0);
+                        for i in 1..=n {
+                            let tau = i as f64 / n as f64;
+                            let f = foot_at(tau);
+                            worst = worst.max((f - want).norm());
+                            fastest = fastest.max((f - prev).norm() / (phase / n as f64));
+                            prev = f;
+                        }
+                    }
+                    log::info!(
+                        "折り返す段で足先が動く量 最大 {:.1} mm / 速さの山 {:.3} m/s（0 なら足は止まったまま）",
+                        worst * 1000.0,
+                        fastest
+                    );
+                }
                 push("折り返す".into(), cur, phase, [true; 4]);
                 // 3. 戻す（元の立ち高さへ）。
                 for s in 0..4 {
