@@ -154,7 +154,7 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 [[package]]
 name = "articara"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/articara.git#49a28c4429b0da5d326013294c20685c57015532"
+source = "git+https://github.com/takarakasai/articara.git#8799ebb4eb1fc47aa933d870ff8bbc48aa1e5a7d"
 dependencies = [
  "legged-estimation",
  "log",
@@ -1907,7 +1907,7 @@ dependencies = [
 [[package]]
 name = "legged-estimation"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/quadruped-gait.git#d3fdff2844923f4108947d468f40323fff0b8d85"
+source = "git+https://github.com/takarakasai/quadruped-gait.git#be600c075a10c4bce99447f1790c9b83f93b39fa"
 dependencies = [
  "nalgebra",
  "quadruped-gait",
@@ -2172,7 +2172,7 @@ dependencies = [
 [[package]]
 name = "misarta-formats"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/misarta.git#5f677580c460cb1b83203fd71ce31e6c83f39478"
+source = "git+https://github.com/takarakasai/misarta.git#b0aeb128cbe415219ed1667dfc9b4f0389103efc"
 dependencies = [
  "misarta",
  "nalgebra",
@@ -2897,7 +2897,7 @@ dependencies = [
 [[package]]
 name = "quadruped-gait"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/quadruped-gait.git#d3fdff2844923f4108947d468f40323fff0b8d85"
+source = "git+https://github.com/takarakasai/quadruped-gait.git#be600c075a10c4bce99447f1790c9b83f93b39fa"
 dependencies = [
  "clarabel",
  "log",
