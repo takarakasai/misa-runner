@@ -69,7 +69,8 @@ pub enum Key {
     /// 膝の向きを次へ / 前へ（`<<` → `<>` → `><` → `>>`。立って止まっているときだけ効く）。
     KneeNext,
     KneePrev,
-    /// 膝の反転のやり方を次へ（1 脚ずつ → 対角 2 脚 → 4 脚まとめて）。次の反転から効く。
+    /// 膝の反転のやり方を次へ（1 脚ずつ → 対角 2 脚 → 一斉に滑らせる →
+    /// 一斉に伸ばす → 車輪に載せて 4 脚まとめて）。次の反転から効く。
     KneeStyleNext,
     /// 膝の反転の 1 段の時間を ±0.05 s。次の反転から効く。
     KneePhase(i8),
@@ -383,7 +384,8 @@ pub fn help(lim: &Limits, gait: GaitSelect) -> String {
          \n\
          　  0 / 1 / 2   脱力 / 初期姿勢 / 歩行\n\
          　  z / x / c   Crawl / Walk / Trot\n\
-         　  r / f       立ち高さ ±{:.2} m\n\
+         　  r / f       立ち高さ ±{:.2} m（**屈伸はこれ**。`gait.body_height_rate_m_s` を\n\
+         　                書いてあれば一定速度で動く。0 だと 1 周期で跳ぶ）\n\
          　  i / k / j / l   胴体を傾ける（合成 {:.2} rad まで）、v で水平へ\n\
          \n\
          　**歩容パラメータ（歩きながら替えられます。上段が + / 下段が −）**\n\
@@ -398,6 +400,8 @@ pub fn help(lim: &Limits, gait: GaitSelect) -> String {
          　  o        全身制御の出力を巡回  OFF → 位置 → トルク → OFF\n\
          　  p        歩容コントローラ MPC ↔ CHAMP（**立って止まっているときだけ**効く）\n\
          　  ] / [    膝の向きを次へ / 前へ  << → <> → >< → >>（**立って止まっているときだけ**。脚を浮かせて膝を伸ばし切る振り付けを通る）\n\
+         　           **どこからどこへでも 1 回の振り付けで行きます。** 2 つ先を選びたければ\n\
+         　           反転が始まる前に 2 回押すこと（いま選んでいる向きは状態行の「膝」に出ます）\n\
          　  ;        反転のやり方  1 脚ずつ（3 脚支持）→ 対角 2 脚（滑らせる）→ 一斉（滑らせる）→ 一斉に伸ばして折り返す（Pitch 軸だけ）→ 4 脚まとめて（車輪）。次の反転から効く\n\
          　  = / -    反転の 1 段の時間 ±0.05 s（0.2〜2.0。**腿を振り出す経路は 0.8 s 以上**。次の反転から効く）\n\
          　  ※ 反転は **`r` / `f` で決めたいまの立ち高さのまま**行います（低いほど揺れません）\n\
@@ -631,7 +635,7 @@ impl Pilot for KeyPilot {
         let mark = |v: Option<f64>, b: Option<f64>| if v == b { " " } else { "*" };
         format!(
             "キー {since} v=({:+.2},{:+.2},{:+.2}) 高さ{:+.2} 傾き({:+.2},{:+.2}) \
-             周期{}{:.2} 遊脚{}{:.3} 歩幅{}{:.3} 接地比{}{:.2}",
+             周期{}{:.2} 遊脚{}{:.3} 歩幅{}{:.3} 接地比{}{:.2} 膝 {}/{}",
             l.intent.velocity.vx_m_s,
             l.intent.velocity.vy_m_s,
             l.intent.velocity.wz_rad_s,
@@ -646,6 +650,13 @@ impl Pilot for KeyPilot {
             t.step_length_m.unwrap_or(0.0),
             mark(t.duty_factor, base.duty_factor),
             t.duty_factor.unwrap_or(0.0),
+            // **選んだ向きと振り付けを出す。** `]` / `[` / `;` は次の反転まで
+            // 効かないので、出さないと何を選んだか分からないまま押すことになる。
+            l.intent.knee_pattern.unwrap_or(self.limits.knee_initial).label(),
+            l.intent
+                .knee_flip_style
+                .unwrap_or(self.limits.knee_style_initial)
+                .label(),
         )
     }
 }
