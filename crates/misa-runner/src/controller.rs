@@ -1442,8 +1442,12 @@ impl Controller {
         let cur_kind = std::cell::Cell::new(KneeStepKind::Normal);
         let cur_support = std::cell::Cell::new([1usize, 2]);
         let cur_target_s = std::cell::Cell::new(0.0_f64);
+        // **段の補間の形。** 既定は両端で止まる五次。pitch は途中で止めたく
+        // ないので、段を細かく刻んで Linear でつなぐ（[`Self::plan_knee_flip`]
+        // の pitch を見よ）。
+        let cur_interp = std::cell::Cell::new(InterpolationKind::QuinticSmooth);
         let mut push = |name: String, q: JointVec, dur: f64, stance: [bool; 4]| {
-            steps.push(PoseStep { name, target: q, duration_s: dur, kind: InterpolationKind::QuinticSmooth });
+            steps.push(PoseStep { name, target: q, duration_s: dur, kind: cur_interp.get() });
             stances.push(stance);
             floors.push(cur_floor.get());
             forwards.push(cur_forward.get());
@@ -2017,27 +2021,63 @@ impl Controller {
                     "膝の反転（Pitch 軸だけ一斉に）: 胴体 {:.3} → {:.3} → {:.3} m、足は床に着けたまま、3 段 {:.1} s",
                     h_ref, h_top, h_ref, 5.0 * phase
                 );
-                // 1. 伸ばす（いまの膝の向きのまま）。
+                // **3 段を 1 本の連続動作にする。** 段ごとに五次で結ぶと
+                // 両端で速度も加速度も 0 になり、**伸ばし切りの付近で 2 回
+                // 完全に止まって動き出す**。4 脚とも真っ直ぐで、しかも
+                // `mit_gains_knee_flip` で硬くしてある所なので、その止め・
+                // 出しが毎回引っかかりになる（実機 2026-10-01）。
+                //
+                // 経路は変えない。関節空間の折れ線 q0 → q1 → q2 → q3 を
+                // 弧長で measure し、全体に 1 つの五次を掛けて細かく刻む。
+                // 刻みは Linear でつなぐので、速度は階段状だが段差は
+                // 1/`SUBSTEPS` になり、途中で 0 には落ちない。
+                const SUBSTEPS: usize = 60;
+                let q_stance_old = cur;
+                let mut q_top_old = cur;
                 for s in 0..4 {
-                    cur.legs[s] = ik(s, at(feet_ref[s], -h_top), cur_forward.get()[s])?;
+                    q_top_old.legs[s] = ik(s, at(feet_ref[s], -h_top), cur_forward.get()[s])?;
                 }
-                let prev_step_targets = cur;
-                push("伸ばす".into(), cur, 2.0 * phase, [true; 4]);
-                // 2. 折り返す（伸ばし切りの手前で膝の向きを入れ替える）。
+                let mut q_top_new = q_top_old;
                 for s in 0..4 {
-                    cur.legs[s] = ik(s, at(feet_ref[s], -h_top), knee_forward_for(new, s))?;
+                    q_top_new.legs[s] = ik(s, at(feet_ref[s], -h_top), knee_forward_for(new, s))?;
                 }
+                let mut q_stance_new = q_top_new;
+                for s in 0..4 {
+                    q_stance_new.legs[s] = ik(s, feet_ref[s], knee_forward_for(new, s))?;
+                }
+                let _ = q_stance_old;
                 cur_forward.set(std::array::from_fn(|s| knee_forward_for(new, s)));
+                // 折れ線を弧長（関節空間のユークリッド距離）で measure する。
+                let way = [q_stance_old, q_top_old, q_top_new, q_stance_new];
+                let dist = |a: &JointVec, b: &JointVec| -> f64 {
+                    let mut acc = 0.0;
+                    for s in 0..4 {
+                        for k in 0..3 {
+                            let d = b.legs[s][k] - a.legs[s][k];
+                            acc += d * d;
+                        }
+                    }
+                    acc.sqrt()
+                };
+                let seg: Vec<f64> = (0..3).map(|i| dist(&way[i], &way[i + 1])).collect();
+                let total: f64 = seg.iter().sum();
+                log::info!(
+                    "反転の経路 [rad]: 伸ばす {:.3} / 折り返す {:.3} / 戻す {:.3} = {:.3}（弧長の中点 = 折り返しの途中 = いちばん速い所）",
+                    seg[0], seg[1], seg[2], total
+                );
                 // **折り返す段は関節を直線で結ぶ。** 足先がその間ずっと同じ所に
                 // いる保証は無い（リンク長が違えば途中で動く）。足が床に着いた
                 // ままなら、動いたぶんは機体が受ける = 「がたん」になる。
                 // 計画のうちに測って出す。
                 {
-                    let before = prev_step_targets;
-                    let after = cur;
+                    let before = q_top_old;
+                    let after = q_top_new;
                     // 五次補間 u(τ) の形も込みで、距離と速さの山を出す。
-                    let quintic = |t: f64| t * t * t * (10.0 - 15.0 * t + 6.0 * t * t);
+                    // **折り返し区間だけを見る。** 連続動作にしたので区間の
+                    // 時間は 全体 × (折り返しの弧長 / 全弧長)。
+                    let quintic = |t: f64| t;
                     let (mut worst, mut fastest) = (0.0_f64, 0.0_f64);
+                    let swap_s = 5.0 * phase * seg[1] / total;
                     let n = 400;
                     for s in 0..4 {
                         let leg = kin_ref.legs()[s];
@@ -2058,7 +2098,7 @@ impl Controller {
                             let tau = i as f64 / n as f64;
                             let f = foot_at(tau);
                             worst = worst.max((f - want).norm());
-                            fastest = fastest.max((f - prev).norm() / (phase / n as f64));
+                            fastest = fastest.max((f - prev).norm() / (swap_s / n as f64));
                             prev = f;
                         }
                     }
@@ -2068,12 +2108,62 @@ impl Controller {
                         fastest
                     );
                 }
-                push("折り返す".into(), cur, phase, [true; 4]);
-                // 3. 戻す（元の立ち高さへ）。
-                for s in 0..4 {
-                    cur.legs[s] = ik(s, feet_ref[s], knee_forward_for(new, s))?;
+                if total <= 1e-9 {
+                    return Err("反転の経路の長さが 0".into());
                 }
-                push("戻す".into(), cur, 2.0 * phase, [true; 4]);
+                let at_arc = |u: f64| -> JointVec {
+                    // 弧長 u·total の所の姿勢。
+                    let mut rest = u * total;
+                    for i in 0..3 {
+                        if rest <= seg[i] || i == 2 {
+                            let f = if seg[i] > 1e-12 { (rest / seg[i]).clamp(0.0, 1.0) } else { 0.0 };
+                            let mut q = way[i];
+                            for sl in 0..4 {
+                                for k in 0..3 {
+                                    q.legs[sl][k] += (way[i + 1].legs[sl][k] - way[i].legs[sl][k]) * f;
+                                }
+                            }
+                            return q;
+                        }
+                        rest -= seg[i];
+                    }
+                    way[3]
+                };
+                let quintic = |t: f64| t * t * t * (10.0 - 15.0 * t + 6.0 * t * t);
+                let total_s = 5.0 * phase;
+                cur_interp.set(InterpolationKind::Linear);
+                // **関節速度が途中で 0 に落ちていないことを数字で残す。**
+                // 刻みの速度 = 弧長の増分 ÷ 刻みの時間。全体の五次なので
+                // 両端は 0、中央（= 折り返しの真ん中）が山になるはず。
+                let dt_sub = 5.0 * phase / SUBSTEPS as f64;
+                let mut v_min_mid = f64::INFINITY;
+                let mut v_max = 0.0_f64;
+                for i in 1..=SUBSTEPS {
+                    let du = quintic(i as f64 / SUBSTEPS as f64)
+                        - quintic((i - 1) as f64 / SUBSTEPS as f64);
+                    let v = du * total / dt_sub;
+                    v_max = v_max.max(v);
+                    // 真ん中の 1/3 では落ちないこと（端は 0 でよい）。
+                    let f = i as f64 / SUBSTEPS as f64;
+                    if (0.33..0.67).contains(&f) {
+                        v_min_mid = v_min_mid.min(v);
+                    }
+                }
+                log::info!(
+                    "反転の関節速度（弧長）: 山 {:.2} rad/s / 中央 1/3 の最小 {:.2} rad/s（0 に落ちないこと）",
+                    v_max, v_min_mid
+                );
+                for i in 1..=SUBSTEPS {
+                    let u = quintic(i as f64 / SUBSTEPS as f64);
+                    cur = at_arc(u);
+                    push(
+                        format!("反転 {i}/{SUBSTEPS}"),
+                        cur,
+                        total_s / SUBSTEPS as f64,
+                        [true; 4],
+                    );
+                }
+                cur_interp.set(InterpolationKind::QuinticSmooth);
             }
             KneeFlipStyle::Stand => {
                 // **立ったまま 1 脚ずつ、他の 3 脚で支える。** 静的に安定（重心を支持三角形の
