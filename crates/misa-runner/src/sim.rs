@@ -923,7 +923,11 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
             {
                 // 膝の反転中はゲインを寄せる（無ければそのまま）。浮かせている脚には
                 // `mit_gains_knee_flip_swing` があればそれ。
-                let flipping = controller.state() == State::FlippingKnees;
+                // **脚を浮かせる方式だけ硬くする。** pitch / all は 4 脚とも
+                // 床に着いたままなので反動が無く、伸ばし切りの付近で硬めると
+                // 突っ張り合って振動する（[`Controller::knee_flip_lifts_a_foot`]）。
+                let flipping = controller.state() == State::FlippingKnees
+                    && controller.knee_flip_lifts_a_foot();
                 let ramp = cfg.hardware.mit_gains_ramp_s();
                 let step = if ramp > 0.0 { dt / ramp } else { 1.0 };
                 gain_blend = (gain_blend + if flipping { step } else { -step }).clamp(0.0, 1.0);
@@ -1479,8 +1483,17 @@ pub fn run(cfg: &AppConfig, cli: &Cli) -> Result<(), String> {
                     flip_tilt_max[0].to_degrees(),
                     flip_tilt_max[1].to_degrees(),
                     flip_ticks as f64 * dt,
+                    // **設定にあるかではなく、実際に入ったかを言う。** 脚を
+                    // 浮かせない方式（pitch / all）では入れない
+                    // （`Controller::knee_flip_lifts_a_foot`）。
                     match cfg.hardware.mit_gains_knee_flip() {
-                        Some(g) => format!("反転中 kp {:?} / kd {:?}", g.kp, g.kd),
+                        Some(g) if controller.knee_flip_lifts_a_foot() =>
+                            format!("反転中 kp {:?} / kd {:?}", g.kp, g.kd),
+                        Some(g) => format!(
+                            "そのまま（{} は脚を浮かせないので反転中の kp {:?} は入れない）",
+                            cfg.gait.knee_flip_style.label(),
+                            g.kp
+                        ),
                         None => "切り替え無し".to_string(),
                     }
                 );

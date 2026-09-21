@@ -1123,6 +1123,20 @@ impl Controller {
     }
 
     /// 歩容が「今この設定で立つ」姿勢。時間を進めずに取り出す。
+    /// **いまの反転の振り付けが脚を浮かせるか。**
+    ///
+    /// `mit_gains_knee_flip`（反転中だけゲインを上げる）は、**1 脚を振る
+    /// 反動と残りの脚への荷重移動で胴体が揺れる**のを抑えるために入れた。
+    /// `pitch` と `all` は 4 脚とも床に着いたままなので、その反動が無い。
+    ///
+    /// **着いたままの方式で硬くすると害になる。** 伸ばし切りの付近では
+    /// `dz/dθ` が 0.02 m/rad まで落ちるので、kp 500 でも 0.01 rad の誤差が
+    /// 243 N（体重の半分）になる。4 本が突っ張り合って振動する。
+    pub fn knee_flip_lifts_a_foot(&self) -> bool {
+        use crate::config::KneeFlipStyle::*;
+        matches!(self.cfg.gait.knee_flip_style, Stand | Trot | Rest)
+    }
+
     /// いまの膝の向き（`gait.knee_pattern`。反転の振り付けが終わると替わる）。
     pub fn knee_pattern(&self) -> crate::config::KneeShape {
         self.cfg.gait.knee_pattern

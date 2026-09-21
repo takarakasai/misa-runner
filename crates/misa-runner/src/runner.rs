@@ -932,7 +932,11 @@ pub fn run(
             {
                 // 膝の反転中はゲインを寄せる（無ければそのまま）。浮かせている脚には
                 // `mit_gains_knee_flip_swing` があればそれ。
-                let flipping = controller.state() == State::FlippingKnees;
+                // **脚を浮かせる方式だけ硬くする。** pitch / all は 4 脚とも
+                // 床に着いたままなので反動が無く、伸ばし切りの付近で硬めると
+                // 突っ張り合って振動する（[`Controller::knee_flip_lifts_a_foot`]）。
+                let flipping = controller.state() == State::FlippingKnees
+                    && controller.knee_flip_lifts_a_foot();
                 let ramp = cfg.hardware.mit_gains_ramp_s();
                 let step = if ramp > 0.0 { period.as_secs_f64() / ramp } else { 1.0 };
                 gain_blend = (gain_blend + if flipping { step } else { -step }).clamp(0.0, 1.0);
