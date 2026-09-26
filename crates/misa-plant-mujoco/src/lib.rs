@@ -109,6 +109,18 @@ pub struct SimOptions {
     pub feet: Vec<String>,
     /// 胴体リンク。姿勢と角速度をここから読む。
     pub root_link: String,
+    /// `</worldbody>` の直前にそのまま差し込む MJCF。階段・障害物・壁など、
+    /// **機体ではないもの**を場に置くための唯一の入口
+    /// （このプラントは `.misa` 一つからシーン全体を組み立てるので、
+    /// 機体以外が入る場所が他にない）。
+    ///
+    /// **なぜ要るか**: これが無いと平地でしか閉ループを回せず、
+    /// 段差の方策を Rust ランタイムで検証できない
+    /// （go2_rl の Python ハーネスとのクロスエンジン照合が平地止まりになる）。
+    ///
+    /// 名前は機体の body / geom とぶつからないものを呼び出し側が付けること。
+    /// ここで置いた物への接触も [`MujocoPlant`] の接地判定に普通に出る。
+    pub extra_worldbody_xml: Option<String>,
 }
 
 impl Default for SimOptions {
@@ -134,6 +146,7 @@ impl Default for SimOptions {
                 .map(|s| s.to_string())
                 .collect(),
             root_link: "trunk".into(),
+            extra_worldbody_xml: None,
         }
     }
 }
@@ -288,6 +301,7 @@ impl MujocoPlant {
                 None => None,
             },
             default_friction: opts.friction.unwrap_or([0.7, 0.005, 0.0001]),
+            extra_worldbody_xml: opts.extra_worldbody_xml.clone(),
             ..MjcfExportOptions::default()
         };
         let mut sim = MujocoSim::new(&model, mjcf).map_err(|e| format!("MuJoCo: {e}"))?;
