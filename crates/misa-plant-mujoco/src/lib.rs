@@ -301,7 +301,10 @@ impl MujocoPlant {
                 None => None,
             },
             default_friction: opts.friction.unwrap_or([0.7, 0.005, 0.0001]),
-            extra_worldbody_xml: opts.extra_worldbody_xml.clone(),
+            // articara 側の名前は版で割れている（main = `extra_worldbody`、
+            // 分岐側 = `extra_worldbody_xml`）。こちらの公開名は
+            // `extra_worldbody_xml` のままにして、転送先だけ main に合わせる。
+            extra_worldbody: opts.extra_worldbody_xml.clone(),
             ..MjcfExportOptions::default()
         };
         let mut sim = MujocoSim::new(&model, mjcf).map_err(|e| format!("MuJoCo: {e}"))?;

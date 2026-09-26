@@ -54,7 +54,7 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 [[package]]
 name = "articara"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/articara.git#6e0a7fd9c60e55503b56e7a799d4b2451696a92c"
+source = "git+https://github.com/takarakasai/articara.git#8799ebb4eb1fc47aa933d870ff8bbc48aa1e5a7d"
 dependencies = [
  "legged-estimation",
  "log",
