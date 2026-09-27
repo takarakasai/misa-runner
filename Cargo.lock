@@ -245,7 +245,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.11.0",
+ "itertools 0.10.5",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1907,7 +1907,7 @@ dependencies = [
 [[package]]
 name = "legged-estimation"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/quadruped-gait.git#a7a531e17a535e13e4fa436b02a9a1def59d8cc1"
+source = "git+https://github.com/takarakasai/quadruped-gait.git#d3fdff2844923f4108947d468f40323fff0b8d85"
 dependencies = [
  "nalgebra",
  "quadruped-gait",
@@ -2148,7 +2148,7 @@ dependencies = [
 [[package]]
 name = "misa-wbc"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/misa-wbc.git#92e42a59af30edca053ce9b61c7a74c40568753b"
+source = "git+https://github.com/takarakasai/misa-wbc.git#5f6e8755fc50461824442e2b82e6167d70dd9e27"
 dependencies = [
  "clarabel",
  "nalgebra",
@@ -2157,7 +2157,7 @@ dependencies = [
 [[package]]
 name = "misarta"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/misarta.git#5f677580c460cb1b83203fd71ce31e6c83f39478"
+source = "git+https://github.com/takarakasai/misarta.git#b0aeb128cbe415219ed1667dfc9b4f0389103efc"
 dependencies = [
  "clarabel",
  "nalgebra",
@@ -2897,7 +2897,7 @@ dependencies = [
 [[package]]
 name = "quadruped-gait"
 version = "0.1.0"
-source = "git+https://github.com/takarakasai/quadruped-gait.git#a7a531e17a535e13e4fa436b02a9a1def59d8cc1"
+source = "git+https://github.com/takarakasai/quadruped-gait.git#d3fdff2844923f4108947d468f40323fff0b8d85"
 dependencies = [
  "clarabel",
  "log",

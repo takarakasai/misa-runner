@@ -954,6 +954,11 @@ impl WbcLayer {
         joint_flag: &[bool],
         tau_gravity: &na::DVector<f64>,
     ) -> WbcSolution {
+        // `friction_cone::formulate_weighted` / `no_contact_motion::formulate_weighted`
+        // (the continuous-contact branch below) were added in quadruped-gait d3fdff2.
+        // Cargo.lock must pin quadruped-gait at d3fdff2 or later: c19462b started
+        // calling them while the lock still pointed at a7a531e, and the crate did
+        // not build until the lock was bumped.
         use quadruped_gait::wbc::tasks;
         let w = &self.weights;
 
