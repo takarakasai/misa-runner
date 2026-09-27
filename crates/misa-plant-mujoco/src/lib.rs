@@ -656,8 +656,17 @@ impl Plant for MujocoPlant {
                 self.feet[2].as_str(),
                 self.feet[3].as_str(),
             ];
-            let fz = self.sim.contact_force_per_foot(&feet);
-            for (i, f) in fz.iter().enumerate() {
+            // **接地は力の「大きさ」で見る。** `contact_force_per_foot` は
+            // 世界系 z 成分だけを足すので、法線が +z の平地では正しいが、
+            // **階段は蹴上げや段鼻で法線が傾き、符号違いの成分が相殺して
+            // 荷重のかかった足を見落とす**。接地本数が落ちると、接地足を
+            // 平均する脚オドメトリが荒れる（2026-09-27、Go2 の 20 cm × 10 段:
+            // 偏り −0.72 m/s で盲目段差の方策が分布外に出て 5 段で崩れた。
+            // 大きさに直すと偏り +0.01 m/s で 10 段完登）。
+            // IsaacLab の接触センサも `net_forces_w.norm()` で閾値を切るので、
+            // そこで学習した方策が見ていた量とも一致する。
+            let f_mag = self.sim.contact_force_magnitude_per_foot(&feet);
+            for (i, f) in f_mag.iter().enumerate() {
                 if let Some(slot) = obs.contacts.get_mut(i) {
                     *slot = Some(*f > self.contact_threshold_n);
                 }
