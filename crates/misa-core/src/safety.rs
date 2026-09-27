@@ -238,7 +238,7 @@ impl SafetyGate {
             if lim.max_torque_rate_nm_s > 0.0 && !dt.is_zero() {
                 let from = self.issued_torque[i].unwrap_or(0.0);
                 let step = lim.max_torque_rate_nm_s * dt.as_secs_f64();
-                let limited = from + (a.torque_ff_nm - from).clamp(-step, step);
+                let limited = step_toward(from, a.torque_ff_nm, step);
                 if limited != a.torque_ff_nm {
                     a.torque_ff_nm = limited;
                     v.torque_rate_limited.push(id);
@@ -307,7 +307,7 @@ impl SafetyGate {
                 from
             } else if lim.max_target_rate_rad_s > 0.0 && !dt.is_zero() {
                 let step = lim.max_target_rate_rad_s * dt.as_secs_f64();
-                from + (want - from).clamp(-step, step)
+                step_toward(from, want, step)
             } else {
                 want
             };
@@ -342,6 +342,22 @@ impl SafetyGate {
         let [roll, pitch, _yaw] = imu.rpy_rad;
         let tilt = (roll.cos() * pitch.cos()).clamp(-1.0, 1.0).acos();
         (tilt > self.cfg.max_tilt_rad).then_some(tilt)
+    }
+}
+
+/// Move from `from` toward `want` by at most `step`.
+///
+/// Returns `want` itself (bit-for-bit) when it is within reach. Writing this as
+/// `from + (want - from).clamp(-step, step)` does not round-trip in floating
+/// point: for a torque of ~1e-17 N·m the result differs from `want` in the last
+/// bit, so the caller's `!=` check reported "rate limited" on axes that were
+/// never limited (seen in misa-manipulator on a zero-gravity joint).
+fn step_toward(from: f64, want: f64, step: f64) -> f64 {
+    let d = want - from;
+    if d.abs() <= step {
+        want
+    } else {
+        from + step.copysign(d)
     }
 }
 
@@ -812,5 +828,43 @@ mod tests {
         let obs = with_tilt(fresh_obs(1, 0.0), 1.4, 0.0);
         let mut cmd = position_cmd(1, 0.0);
         assert_eq!(g.apply(&mut cmd, &obs, DT).tilt_rad, None);
+    }
+
+    /// Values within reach must pass through unchanged and unflagged, even when
+    /// `from + (want - from)` would not round-trip in floating point.
+    #[test]
+    fn rate_limits_do_not_flag_rounding_noise() {
+        let lim = AxisLimits {
+            max_target_rate_rad_s: 1.0,
+            max_torque_rate_nm_s: 100.0,
+            ..AxisLimits::UNLIMITED
+        };
+        let mut g = gate(lim, 1);
+        let obs = fresh_obs(1, 0.1);
+        for (pos, tau) in [(0.1, 1e-17), (0.1 + 3e-17, -2e-17), (0.30000000000000004, 3.1e-17)] {
+            let mut cmd = Command::idle(1);
+            *cmd.get_mut(AxisId::new(0)).unwrap() = AxisCommand {
+                mode: ControlMode::Impedance,
+                position_rad: pos,
+                torque_ff_nm: tau,
+                ..AxisCommand::idle()
+            };
+            let v = g.apply(&mut cmd, &obs, DT);
+            let a = cmd.axes()[0];
+            assert_eq!(a.torque_ff_nm, tau);
+            assert!(v.torque_rate_limited.is_empty(), "{v:?}");
+            if (pos - 0.1f64).abs() <= 0.01 {
+                assert_eq!(a.position_rad, pos);
+                assert!(v.rate_limited.is_empty(), "{v:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn step_toward_limits_and_passes_through() {
+        assert_eq!(step_toward(0.0, 0.5, 1.0), 0.5);
+        assert_eq!(step_toward(0.0, 2.0, 1.0), 1.0);
+        assert_eq!(step_toward(0.0, -2.0, 1.0), -1.0);
+        assert_eq!(step_toward(1e-17, 3e-17, 1e-3), 3e-17);
     }
 }
